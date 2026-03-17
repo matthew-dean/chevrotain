@@ -536,8 +536,10 @@ Clean up the call graph for V8's inliner.
 
 #### What changes
 
-- Port the three existing `benchmark_web` grammars (JSON, CSS, ECMA5) to run
+- Run the three existing `benchmark_web` grammars (JSON, CSS, ECMA5) unchanged
   against both the old engine (pinned at `v12.0.0`) and the new engine.
+  No grammar changes should be required — identical source code is the
+  backwards-compatibility proof.
 - Extend `bench_logic.js` to show three columns: `latest` (v12), `next` (this
   branch), `delta`.
 - Add two separate benchmark modes:
