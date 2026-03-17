@@ -1,5 +1,12 @@
 import { IToken, TokenType } from "@chevrotain/types";
 
+/**
+ * Checks whether `tokInstance` is of type `tokConstructor` or one of its
+ * category ancestors. Uses a Uint32Array bitset (MATCH_SET) instead of the
+ * old categoryMatchesMap object lookup — one bitwise AND vs. a property read
+ * and coercion, and stays monomorphic because MATCH_SET is always the same
+ * type (Uint32Array | null).
+ */
 export function tokenStructuredMatcher(
   tokInstance: IToken,
   tokConstructor: TokenType,
@@ -8,10 +15,6 @@ export function tokenStructuredMatcher(
   if (instanceType === tokConstructor.tokenTypeIdx) {
     return true;
   }
-  // MATCH_SET is a Uint32Array bitset: bit (tokenTypeIdx) is set for every
-  // token type that is a member of this category (including transitive ones).
-  // This replaces the O(1)-but-two-allocation categoryMatchesMap lookup with a
-  // single bitwise AND — one fewer indirection and zero object property lookup.
   const matchSet = tokConstructor.MATCH_SET;
   return (
     matchSet !== null &&
@@ -20,8 +23,10 @@ export function tokenStructuredMatcher(
   );
 }
 
-// Optimized tokenMatcher in case our grammar does not use token categories.
-// Being so tiny it is much more likely to be in-lined and this avoids the function call overhead.
+/**
+ * Fast path for grammars with no token categories. Tiny enough for V8 to
+ * inline at every call site, avoiding the MATCH_SET branch entirely.
+ */
 export function tokenStructuredMatcherNoCategories(
   token: IToken,
   tokType: TokenType,
@@ -47,8 +52,8 @@ export function augmentTokenTypes(tokenTypes: TokenType[]): void {
     tokType.isParent = tokType.categoryMatches!.length > 0;
   });
 
-  // Build MATCH_SET bitsets after all indices are finalized.
-  // Size: enough 32-bit words to cover the highest assigned index.
+  // Build MATCH_SET bitsets after all indices are finalized so the array is
+  // sized correctly. One word covers 32 token indices.
   const setSize = (tokenShortNameIdx >>> 5) + 1;
   tokenTypesAndParents.forEach((tokType) => {
     if (tokType.isParent) {
@@ -153,10 +158,13 @@ export function singleAssignCategoriesToksMap(
   });
 }
 
-// tokenTypeIdx is pre-declared as 0 (sentinel) on all TokenType objects.
-// Valid indices start at 1, so a non-zero value means already augmented.
-// The null/undefined guard preserves the original safety contract — callers
-// such as gast_recorder.ts pass user-supplied values that may be null.
+/**
+ * Returns true if `tokType` has already been assigned a tokenTypeIdx by
+ * augmentTokenTypes(). Uses a value check (non-zero) rather than
+ * Object.hasOwn because tokenTypeIdx is now always pre-declared as 0.
+ * Null guard preserved because gast_recorder.ts passes user-supplied values
+ * that may be null.
+ */
 export function hasShortKeyProperty(tokType: TokenType): boolean {
   return tokType != null && !!tokType.tokenTypeIdx;
 }

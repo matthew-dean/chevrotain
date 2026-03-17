@@ -20,6 +20,15 @@ export function hasTokenLabel(
   return typeof obj.LABEL === "string" && obj.LABEL !== "";
 }
 
+/**
+ * Creates a TokenType with every field pre-declared so all TokenType objects
+ * share a single V8 hidden class from birth. augmentTokenTypes() overwrites
+ * the sentinel slots (tokenTypeIdx, isParent, MATCH_SET) without adding new
+ * properties, avoiding hidden-class transitions on every token construction.
+ *
+ * Validators in lexer.ts that used Object.hasOwn() to detect "was this field
+ * explicitly configured?" are updated to check `!== undefined` instead.
+ */
 export function createToken(config: ITokenConfig): TokenType {
   if (Object.hasOwn(config, "parent")) {
     throw (
@@ -28,7 +37,6 @@ export function createToken(config: ITokenConfig): TokenType {
     );
   }
 
-  // Normalize CATEGORIES to an array at creation time.
   const rawCats = config.categories;
   const categories: TokenType[] = rawCats
     ? Array.isArray(rawCats)
@@ -36,15 +44,6 @@ export function createToken(config: ITokenConfig): TokenType {
       : [rawCats as TokenType]
     : [];
 
-  // ALL fields are pre-declared with sentinel values so every TokenType object
-  // shares a single V8 hidden class from birth. augmentTokenTypes() overwrites
-  // the augmented sentinel slots without adding new properties, eliminating
-  // hidden-class transitions on every token construction.
-  //
-  // Validators in lexer.ts that previously used Object.hasOwn() to detect
-  // "was this field explicitly configured?" have been updated to check
-  // `!== undefined` instead. Tests that verified properties were added
-  // post-creation are updated accordingly.
   const tokenType: TokenType = {
     name: config.name,
     PATTERN: config.pattern ?? undefined,
@@ -71,6 +70,11 @@ export function createToken(config: ITokenConfig): TokenType {
 
 export const EOF = createToken({ name: "EOF", pattern: Lexer.NA });
 
+/**
+ * Produces an IToken with every field declared upfront so all IToken objects
+ * share a single V8 hidden class. payload and isInsertedInRecovery are always
+ * present as sentinels rather than added post-hoc during recovery.
+ */
 export function createTokenInstance(
   tokType: TokenType,
   image: string,
