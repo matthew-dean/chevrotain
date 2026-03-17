@@ -133,7 +133,9 @@ interface-compatible implementation.
 
 **Goal:** Fix all hidden class instability in the token layer. All token objects
 share one hidden class from birth; no shape transitions after construction.
-This stage is independent and can land before or in parallel with Stage 1.
+This stage must land before Stage 1 — the new engine accesses `MATCH_SET`,
+`isParent`, and other augmented fields unconditionally. Without a guaranteed
+shape, every access would require `?.` or null checks throughout the engine.
 
 #### What changes
 
@@ -564,20 +566,19 @@ Clean up the call graph for V8's inliner.
 ## Stage Dependencies
 
 ```
-Stage 0 (token/IToken shapes)  ← independent, can land first or in parallel
-  │
-Stage 1 (SPEC_FAIL + saveRecogState)
-  └─ Stage 2 (speculative OR)
-       └─ Stage 3 (numbered variant aliases)
-            ├─ Stage 4 (runtime CST + CST allocation fixes)
-            │    └─ Stage 5 (opt-in recording)
-            │         └─ Stage 6 (flatten mixins)
-            └─ Stage 7 (benchmarks)  ← can start after Stage 2
+Stage 0 (token/IToken shapes)  ← prerequisite for everything
+  └─ Stage 1 (SPEC_FAIL + saveRecogState)
+       └─ Stage 2 (speculative OR)
+            └─ Stage 3 (numbered variant aliases)
+                 ├─ Stage 4 (runtime CST + CST allocation fixes)
+                 │    └─ Stage 5 (opt-in recording)
+                 │         └─ Stage 6 (flatten mixins)
+                 └─ Stage 7 (benchmarks)  ← can start after Stage 2
 ```
 
-Stage 0 is fully independent. Stages 4 and 5 can be developed in parallel once
-Stage 3 is done. Stage 7 can begin as soon as Stage 2 is complete — early
-benchmark data is useful for motivating Stages 4–6.
+Stages 4 and 5 can be developed in parallel once Stage 3 is done.
+Stage 7 can begin as soon as Stage 2 is complete — early benchmark data is
+useful for motivating Stages 4–6.
 
 ---
 
