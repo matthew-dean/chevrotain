@@ -87,6 +87,7 @@ export class Lexer {
   protected modes: string[] = [];
   protected defaultMode!: string;
   protected emptyGroups: { [groupName: string]: IToken } = {};
+  /** Keys of emptyGroups, cached so tokenizeInternal skips Object.keys() on every call. */
   private groupKeys: string[] = [];
 
   private config: Required<ILexerConfig>;
@@ -262,8 +263,6 @@ export class Lexer {
       );
 
       this.defaultMode = actualDefinition.defaultMode;
-      // Cache group keys so tokenizeInternal can build the result groups object
-      // without calling Object.keys() on every tokenize() invocation.
       this.groupKeys = Object.keys(this.emptyGroups);
 
       if (
@@ -411,9 +410,6 @@ export class Lexer {
     const errors: ILexingError[] = [];
     let line = this.trackStartLines ? 1 : undefined;
     let column = this.trackStartLines ? 1 : undefined;
-    // Build a fresh groups object using pre-cached keys — avoids Object.keys()
-    // on every tokenize() call and re-uses the same code path regardless of
-    // how many groups the lexer has.
     const groups: { [groupName: string]: IToken[] } = {};
     for (let gi = 0; gi < this.groupKeys.length; gi++) {
       groups[this.groupKeys[gi]] = [];
@@ -810,12 +806,14 @@ export class Lexer {
   /* istanbul ignore next - place holder */
   private createTokenInstance!: (...args: any[]) => IToken;
 
-  // All three factory methods produce objects with the same property set so
-  // V8 assigns them a single hidden class.  Fields unused in a given tracking
-  // mode are set to undefined (line/column) or computed normally (offsets).
-  // payload and isInsertedInRecovery are always pre-declared so recovery code
-  // can set them without triggering a hidden-class transition.
-
+  /**
+   * All three factory variants produce the same property set so V8 assigns
+   * every IToken a single hidden class. Fields unused in a given tracking mode
+   * are set to undefined rather than omitted — omitting them would create a
+   * different hidden class and make token property accesses polymorphic.
+   * payload and isInsertedInRecovery are always pre-declared so recovery can
+   * set them without triggering a hidden-class transition.
+   */
   private createOffsetOnlyToken(
     image: string,
     startOffset: number,
