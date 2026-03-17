@@ -2,13 +2,13 @@
 
 Replace Chevrotain's LL(k) lookahead-based parser engine with a speculative
 backtracking engine derived from `@jesscss/parser`. The public API is preserved
-exactly. The `Lexer` and token utilities are untouched.
+exactly. The `Lexer` is improved but its interface is unchanged.
 
 ---
 
 ## Background
 
-Chevrotain's current engine has three structural performance costs:
+### Structural engine costs
 
 1. **Error allocation during backtracking.** `CONSUME()` failure throws
    `new MismatchedTokenException()` which extends `Error`. V8 always calls
@@ -19,30 +19,65 @@ Chevrotain's current engine has three structural performance costs:
 2. **Lookahead cache overhead.** Every `OR()`, `MANY()`, `OPTION()`, and
    `AT_LEAST_ONE()` call does a `Map.get()` keyed on a bit-encoded integer
    (`rule short name | method type | occurrence index`) to retrieve a
-   pre-computed lookahead function, then invokes that function to decide which
-   branch to take. This is a fixed per-production tax even when no backtracking
-   is needed.
+   pre-computed lookahead function, then invokes that function. This is a fixed
+   per-production tax even when no backtracking is needed.
 
 3. **Recording phase hidden-class pollution.** `enableRecording()` adds
    instance methods to the parser object; `disableRecording()` deletes them.
    In V8, adding/deleting own properties transitions the object to a new hidden
    class. Any inline cache (IC) that was optimized for the previous shape
-   becomes polymorphic or megamorphic until the JIT re-optimizes — degrading
-   all subsequent property accesses on the parser instance.
+   becomes polymorphic or megamorphic until the JIT re-optimizes.
 
-The replacement strategy:
+### Additional allocation costs found in audit
+
+4. **State save/restore clones the errors array.** `saveRecogState()` calls
+   `this.errors` (which may return a clone) and `this.RULE_STACK.slice()` on
+   every backtrack point. With speculative parsing, the save should be three
+   integers (position, errors length, stack depth) — no allocation at all.
+
+5. **Token and IToken object shapes are not fixed at creation.**
+   `createToken()` sets optional fields conditionally, so tokens with different
+   config have different hidden classes. `augmentTokenTypes()` then adds four
+   more fields — a shape transition on every token object. IToken has three
+   different factory functions (`createOffsetOnlyToken`, `createStartOnlyToken`,
+   `createFullToken`) producing three hidden classes; call sites accessing token
+   properties become polymorphic. `isInsertedInRecovery` is added to recovery
+   tokens after creation — another transition.
+
+6. **Category matching uses two redundant structures.** `categoryMatchesMap`
+   (object) and `categoryMatches` (array) both exist on every token type and
+   encode the same information. A `Uint32Array` bitset replaces both with O(1)
+   bitwise AND matching and eliminates two of the four fields added by
+   `augmentTokenTypes()`.
+
+7. **Lexer clones group structure on every `tokenize()` call.**
+   `cloneEmptyGroups()` is called at the start of each tokenization to reset
+   the result groups. It iterates all group definitions and creates new arrays.
+   Groups are static metadata — only the result arrays need resetting, not the
+   structure.
+
+8. **CST building allocates a new object and location object per rule.**
+   `cstInvocationStateUpdate()` calls `Object.create(null)` for each rule's
+   children dictionary and allocates a fresh location object with six `NaN`
+   fields. With deep grammars this is thousands of allocations per parse.
+   Additionally `addTerminalToCst` creates a single-element array `[token]`
+   for the first occurrence of each token type in a rule, causing hidden class
+   transitions on the children arrays.
+
+### Replacement strategies
 
 - **SPEC_FAIL symbol** replaces Error-based backtracking. V8 does not call
-  `captureStackTrace` for non-Error throws. A frozen Symbol throw+catch is
-  essentially a non-local goto — zero allocation, branch-predictor friendly.
+  `captureStackTrace` for non-Error throws. A Symbol throw+catch is a non-local
+  goto — zero allocation, branch-predictor friendly.
 - **Speculative execution** replaces lookahead pre-computation. `OR()` tries
-  alternatives in order; failed ones throw SPEC_FAIL, state is restored (a
-  single integer + array length reset), the next alternative is tried. No Map,
-  no lookahead functions, no key encoding.
+  alternatives in order; failed ones throw SPEC_FAIL, state is restored via
+  three integer assignments, the next alternative is tried.
+- **Fixed object shapes** from construction — all fields pre-declared with
+  sentinel values so V8 sees one hidden class per object type from birth.
+- **Bitset token matching** replaces `categoryMatchesMap` and `categoryMatches`
+  with a `Uint32Array` MATCH_SET, computed once in `augmentTokenTypes()`.
 - **Optional recording phase** means `performSelfAnalysis()` is a no-op by
-  default. The recording mechanism is preserved for users who need GAST tooling
-  (`serializeGrammar`, `generateCstDts`, `createSyntaxDiagramsCode`) but no
-  longer runs unconditionally.
+  default. The recording mechanism is preserved for GAST tooling.
 
 ---
 
@@ -52,8 +87,8 @@ The replacement strategy:
 | ----------------------------------------------------------------------- | ----------------------------------------------------- |
 | Full public API (`CstParser`, `EmbeddedActionsParser`, all DSL methods) | Unchanged                                             |
 | `OR1`–`OR9`, `CONSUME1`–`CONSUME9`, all numbered variants               | Kept as aliases                                       |
-| `Lexer` class and all token utilities                                   | Untouched                                             |
-| `createToken`, `tokenMatcher`, `EOF`, error classes                     | Untouched                                             |
+| `Lexer` class interface                                                 | Unchanged                                             |
+| `createToken`, `tokenMatcher`, `EOF`, error classes                     | Unchanged                                             |
 | `MismatchedTokenException` etc.                                         | Kept — still thrown for real (non-speculative) errors |
 | `performSelfAnalysis()`                                                 | Kept — now a no-op unless GAST is requested           |
 | `ILookaheadStrategy` / `LLkLookaheadStrategy`                           | Kept as deprecated no-ops                             |
@@ -70,6 +105,8 @@ The replacement strategy:
 | `getKeyForAutomaticLookahead`               | No longer needed                      |
 | `LLkLookaheadStrategy` implementation       | Replaced — interface stub kept        |
 | `isBackTrackingStack: boolean[]`            | Replaced by `IS_SPECULATING: boolean` |
+| `categoryMatches: number[]`                 | Replaced by `MATCH_SET` bitset        |
+| `categoryMatchesMap: object`                | Replaced by `MATCH_SET` bitset        |
 | `applyMixins` composition                   | Replaced by direct class hierarchy    |
 | `RecognizerEngine` / `RecognizerApi` traits | Merged into new base class            |
 
@@ -83,7 +120,8 @@ RecursiveDescentParser        ← new core (CONSUME, OR, MANY, state, SPEC_FAIL)
        └─ CstParser           ← CST stack, CONSUME/SUBRULE overrides, visitor constructors
 ```
 
-The `Lexer` class and all token utilities sit beside this hierarchy, unchanged.
+The `Lexer` class sits beside this hierarchy with an improved but
+interface-compatible implementation.
 
 ---
 
@@ -91,9 +129,116 @@ The `Lexer` class and all token utilities sit beside this hierarchy, unchanged.
 
 ---
 
+### Stage 0 — Settle token and IToken object shapes
+
+**Goal:** Fix all hidden class instability in the token layer. All token objects
+share one hidden class from birth; no shape transitions after construction.
+This stage is independent and can land before or in parallel with Stage 1.
+
+#### What changes
+
+**`TokenType` — pre-declare all fields in `createToken()`:**
+
+```ts
+function createToken(config: ITokenConfig): TokenType {
+  return {
+    name: config.name,
+    PATTERN: config.PATTERN ?? undefined,
+    LABEL: config.LABEL ?? undefined,
+    GROUP: config.GROUP ?? undefined,
+    PUSH_MODE: config.PUSH_MODE ?? undefined,
+    POP_MODE: config.POP_MODE ?? false,
+    LONGER_ALT: config.LONGER_ALT ?? undefined,
+    LINE_BREAKS: config.LINE_BREAKS ?? undefined,
+    START_CHARS_HINT: config.START_CHARS_HINT ?? undefined,
+    CATEGORIES: config.CATEGORIES ? [...config.CATEGORIES] : [],
+    // augmented — sentinel values, filled in by augmentTokenTypes()
+    tokenTypeIdx: 0,
+    isParent: false,
+    MATCH_SET: null, // ← new; replaces categoryMatches + categoryMatchesMap
+  };
+}
+```
+
+- `categoryMatches` and `categoryMatchesMap` are removed entirely.
+  `tokenMatcher()` and all internal category checks switch to bitset AND:
+  ```ts
+  function tokenStructuredMatcher(token: IToken, expected: TokenType): boolean {
+    return (
+      token.tokenTypeIdx === expected.tokenTypeIdx ||
+      (expected.isParent &&
+        !!(
+          expected.MATCH_SET![token.tokenTypeIdx >> 5] &
+          (1 << (token.tokenTypeIdx & 31))
+        ))
+    );
+  }
+  ```
+- `augmentTokenTypes()` computes `MATCH_SET` (Uint32Array, one bit per possible
+  tokenTypeIdx) and assigns `tokenTypeIdx` and `isParent`. No new properties
+  are added — only sentinel values are overwritten. No hidden class transition.
+
+**`IToken` — one shape for all position-tracking modes:**
+
+```ts
+// Single factory — positionTracking controls which fields get real values,
+// not whether the fields exist
+function createToken(...): IToken {
+  return {
+    image:                '',
+    startOffset:          0,
+    endOffset:            0,
+    startLine:            0,
+    endLine:              0,
+    startColumn:          0,
+    endColumn:            0,
+    tokenTypeIdx:         0,
+    tokenType:            tokType,
+    payload:              undefined,
+    isInsertedInRecovery: false,
+  }
+}
+```
+
+- `createOffsetOnlyToken`, `createStartOnlyToken`, `createFullToken` are
+  replaced by a single factory. The position-tracking mode controls which
+  fields are filled, not which fields exist.
+- `isInsertedInRecovery` pre-declared as `false` — no longer added post-hoc
+  during recovery. Recovery just sets it to `true`.
+- `payload` pre-declared as `undefined` — no longer conditionally added.
+
+**Lexer — fix `cloneEmptyGroups()` on every `tokenize()` call:**
+
+- Pre-allocate a `resultGroups` structure in the Lexer instance at construction
+  time with empty arrays for each group.
+- On `reset()` between calls, truncate each array to length 0 instead of
+  cloning the whole structure. Arrays retain their allocated capacity.
+
+**`createTokenInstance` — direct call, not dynamically assigned property:**
+
+- Currently `this.createTokenInstance` is a property assigned at lexer init
+  pointing to one of the three factory variants. Call sites must go through a
+  property lookup + indirect call — V8 cannot inline this reliably.
+- With a single factory, replace with a direct call. The `if/else` for tracking
+  mode happens inside the factory, which V8 can inline and optimize.
+
+#### Exit criteria
+
+- All `TokenType` objects have identical shape regardless of `createToken()`
+  config (verifiable via `%HaveSameMap` in V8 with `--allow-natives-syntax`).
+- All `IToken` objects have identical shape regardless of lexer
+  `positionTracking` mode.
+- `categoryMatches` and `categoryMatchesMap` do not appear on any token type.
+- `tokenMatcher()` produces identical results to the previous implementation
+  for all token/category combinations (existing tests pass).
+- `cloneEmptyGroups` is deleted; lexer uses reset-by-truncation.
+
+---
+
 ### Stage 1 — Replace Error-based backtracking with SPEC_FAIL
 
-**Goal:** Eliminate `Error.captureStackTrace` calls during speculative parsing.
+**Goal:** Eliminate `Error.captureStackTrace` calls during speculative parsing,
+and eliminate all heap allocation from the save/restore path.
 
 #### What changes
 
@@ -111,12 +256,38 @@ The `Lexer` class and all token utilities sit beside this hierarchy, unchanged.
 - `isBackTracking()` on the public API → returns `this.IS_SPECULATING` for
   backwards compat.
 
+**Fix `saveRecogState()` — replace array cloning with integer snapshots:**
+
+Currently `saveRecogState()` clones the errors array and slices the rule stack.
+With SPEC_FAIL, speculative failures never produce real errors, so save state is
+just three integers:
+
+```ts
+saveRecogState(): ParserSavepoint {
+  return {
+    pos:               this.currIdx,
+    errorsLength:      this.errors.length,
+    ruleStackDepth:    this.RULE_STACK_IDX,
+  }
+}
+
+reloadRecogState(saved: ParserSavepoint): void {
+  this.currIdx        = saved.pos
+  this.errors.length  = saved.errorsLength       // truncate, no allocation
+  this.RULE_STACK_IDX = saved.ruleStackDepth     // depth counter reset
+}
+```
+
+No array copies, no slice. The savepoint object itself is three integers — V8
+will often stack-allocate or scalar-replace this entirely in a hot loop.
+
 #### Exit criteria
 
 - All existing tests pass unchanged.
 - `BACKTRACK()` returns `false` on mismatch without allocating an Error.
 - A micro-benchmark of `BACKTRACK` on a failing rule shows zero `Error`
   objects created (verifiable via `--expose-gc` + `gc()` count).
+- `saveRecogState()` does not call `.slice()` or create array copies.
 
 ---
 
@@ -127,7 +298,7 @@ The `Lexer` class and all token utilities sit beside this hierarchy, unchanged.
 #### What changes
 
 - Rewrite `orInternal()` to iterate alternatives speculatively:
-  - Save state (`pos`, `errors.length`, stack lengths).
+  - Save state (`pos`, `errors.length`, stack depth) — three integers.
   - Set `IS_SPECULATING = true`.
   - Call `alt.ALT()`.
   - On `SPEC_FAIL`: restore state, try next alternative.
@@ -190,12 +361,12 @@ The numbered variants exist solely to provide unique `idx` values for
 
 ### Stage 4 — Decouple CST building from the recording phase
 
-**Goal:** `CstParser` works correctly without `performSelfAnalysis()` having run.
+**Goal:** `CstParser` works correctly without `performSelfAnalysis()` having
+run, and CST construction minimises per-rule allocation.
 
 #### What changes
 
-Currently `TreeBuilder` depends on GAST having been constructed to know CST
-child key names. Replace with runtime interception:
+**Runtime CST interception (replaces GAST-derived field names):**
 
 - `CstParser` overrides `consumeInternal()`:
   ```ts
@@ -213,13 +384,64 @@ child key names. Replace with runtime interception:
   ```
 - `RULE()` in `CstParser` wraps the implementation to push/pop `_cstStack`
   and call `_finalizeLocation(node)` on exit.
-- Location tracking (`nodeLocationTracking: "none" | "onlyOffset" | "full"`)
-  handled by assigning the appropriate update method at construction time —
-  same strategy as existing `TreeBuilder.initTreeBuilder()` but without GAST
-  dependency.
 - `getBaseCstVisitorConstructor()` uses the rule registry built by `RULE()`
   (rule names only — no GAST needed).
 - Delete the GAST-derived CST field-name pre-computation from `TreeBuilder`.
+
+**Fix CstNode allocation — pre-declared fixed shape:**
+
+`cstInvocationStateUpdate()` currently calls `Object.create(null)` for each
+rule's children dict, which creates a new object every invocation. Replace with
+a fixed-shape CstNode created via a factory that declares all fields upfront:
+
+```ts
+function createCstNode(name: string): CstNode {
+  return {
+    name,
+    children: Object.create(null),
+    recoveredNode: false,
+    location: undefined, // filled in if location tracking enabled
+  };
+}
+```
+
+The `location` object is also pre-declared with a fixed shape:
+
+```ts
+function createCstLocation(): CstNodeLocation {
+  return {
+    startOffset: NaN,
+    startLine: NaN,
+    startColumn: NaN,
+    endOffset: NaN,
+    endLine: NaN,
+    endColumn: NaN,
+  };
+}
+```
+
+This is allocated once per rule entry and overwritten — same number of objects
+but fixed shape so all location objects share one hidden class.
+
+**Fix `addTerminalToCst` single-element array creation:**
+
+```ts
+// Current — creates new single-element array on first occurrence:
+node.children[key] = [token];
+
+// Replacement — pre-allocate with capacity hint, or use ??= push pattern:
+(node.children[key] ??= []).push(token);
+```
+
+The `??=` pattern is already inline-cache-friendly and avoids the hidden class
+transition that `[token]` causes (empty array → 1-element array have different
+internal representations in V8).
+
+**Location tracking:**
+
+`nodeLocationTracking: "none" | "onlyOffset" | "full"` handled by assigning
+the appropriate update method at construction time — same strategy as existing
+`TreeBuilder.initTreeBuilder()` but without GAST dependency.
 
 #### Exit criteria
 
@@ -228,6 +450,8 @@ child key names. Replace with runtime interception:
 - All three `nodeLocationTracking` modes produce correct location info.
 - `getBaseCstVisitorConstructor()` returns a valid base class with all rule
   names present.
+- All `CstNodeLocation` objects share a single hidden class (verifiable via
+  `%HaveSameMap`).
 - Existing CST-based tests pass unchanged.
 
 ---
@@ -260,8 +484,7 @@ when explicitly requested.
   instance methods (no hidden class transitions after construction).
 - `performSelfAnalysis({ buildGast: true })` produces identical GAST output
   to the current mandatory recording pass.
-- `serializeGrammar()` works after opt-in, throws with a clear message without
-  opt-in.
+- `serializeGrammar()` works after opt-in, throws with a clear message without.
 - `generateCstDts()` and `createSyntaxDiagramsCode()` work after opt-in.
 - All grammar validation tests pass when opt-in is used.
 
@@ -339,18 +562,20 @@ Clean up the call graph for V8's inliner.
 ## Stage Dependencies
 
 ```
-Stage 1 (SPEC_FAIL)
+Stage 0 (token/IToken shapes)  ← independent, can land first or in parallel
+  │
+Stage 1 (SPEC_FAIL + saveRecogState)
   └─ Stage 2 (speculative OR)
        └─ Stage 3 (numbered variant aliases)
-            ├─ Stage 4 (runtime CST)
+            ├─ Stage 4 (runtime CST + CST allocation fixes)
             │    └─ Stage 5 (opt-in recording)
             │         └─ Stage 6 (flatten mixins)
             └─ Stage 7 (benchmarks)  ← can start after Stage 2
 ```
 
-Stages 4 and 5 can be developed in parallel once Stage 3 is done.
-Stage 7 can begin as soon as Stage 2 is complete — early benchmark data is
-useful for motivating Stages 4–6.
+Stage 0 is fully independent. Stages 4 and 5 can be developed in parallel once
+Stage 3 is done. Stage 7 can begin as soon as Stage 2 is complete — early
+benchmark data is useful for motivating Stages 4–6.
 
 ---
 
@@ -358,10 +583,14 @@ useful for motivating Stages 4–6.
 
 | File                                           | Role                            | Stage   |
 | ---------------------------------------------- | ------------------------------- | ------- |
+| `src/scan/tokens_public.ts`                    | `createToken()` factory         | 0       |
+| `src/scan/tokens.ts`                           | `augmentTokenTypes()`, matching | 0       |
+| `src/scan/lexer_public.ts`                     | Lexer, IToken factories         | 0       |
 | `src/parse/parser/traits/recognizer_engine.ts` | Core engine — primary target    | 1, 2, 6 |
 | `src/parse/parser/traits/looksahead.ts`        | Lookahead cache — deleted       | 2       |
 | `src/parse/parser/traits/recognizer_api.ts`    | DSL API surface                 | 3       |
 | `src/parse/parser/traits/tree_builder.ts`      | CST construction                | 4       |
+| `src/parse/cst/cst.ts`                         | CST helpers                     | 4       |
 | `src/parse/parser/traits/gast_recorder.ts`     | Recording phase                 | 5       |
 | `src/parse/parser/utils/apply_mixins.ts`       | Mixin system — deleted          | 6       |
 | `src/parse/parser/parser.ts`                   | Parser base + trait composition | 6       |
