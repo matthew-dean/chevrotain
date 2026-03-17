@@ -43,7 +43,7 @@ import {
 import {
   DEFAULT_RULE_CONFIG,
   END_OF_FILE,
-  IParserState,
+  IParserSavepoint,
   TokenMatcher,
 } from "../parser.js";
 import { IN_RULE_RECOVERY_EXCEPTION } from "./recoverable.js";
@@ -59,11 +59,24 @@ import { Rule } from "@chevrotain/gast";
 import { ParserMethodInternal } from "../types.js";
 
 /**
+ * Thrown instead of MismatchedTokenException during speculative parsing
+ * (IS_SPECULATING === true). A Symbol throw has zero allocation cost — V8
+ * never calls Error.captureStackTrace for non-Error throws, so every failed
+ * BACKTRACK() alternative costs nothing in GC pressure.
+ */
+export const SPEC_FAIL = Symbol("SPEC_FAIL");
+
+/**
  * This trait is responsible for the runtime parsing engine
  * Used by the official API (recognizer_api.ts)
  */
 export class RecognizerEngine {
-  isBackTrackingStack: boolean[];
+  /**
+   * True while inside a BACKTRACK() trial. Replaces the old isBackTrackingStack
+   * array — a boolean flag is cheaper to read/write and sufficient since
+   * speculation is not re-entrant in the new engine.
+   */
+  IS_SPECULATING: boolean;
   className: string;
   RULE_STACK: number[];
   RULE_OCCURRENCE_STACK: number[];
@@ -97,10 +110,10 @@ export class RecognizerEngine {
     this.tokenMatcher = tokenStructuredMatcherNoCategories;
     this.subruleIdx = 0;
     this.currRuleShortName = 0;
+    this.IS_SPECULATING = false;
 
     this.definedRulesNames = [];
     this.tokensMap = {};
-    this.isBackTrackingStack = [];
     this.RULE_STACK = [];
     this.RULE_STACK_IDX = -1;
     this.RULE_OCCURRENCE_STACK = [];
@@ -737,7 +750,7 @@ export class RecognizerEngine {
           : ruleName,
       );
 
-      delete e.partialCstResult;
+      e.partialCstResult = undefined;
     }
     throw e;
   }
@@ -774,12 +787,20 @@ export class RecognizerEngine {
     return consumedToken;
   }
 
+  /**
+   * Called when a CONSUME fails to match. During speculation (IS_SPECULATING)
+   * throws SPEC_FAIL — a Symbol with zero allocation cost — instead of
+   * allocating a MismatchedTokenException (which triggers captureStackTrace).
+   */
   consumeInternalError(
     this: MixedInParser,
     tokType: TokenType,
     nextToken: IToken,
     options: ConsumeMethodOpts | undefined,
   ): void {
+    if (this.IS_SPECULATING) {
+      throw SPEC_FAIL;
+    }
     let msg;
     const previousToken = this.LA(0);
     if (options !== undefined && options.ERR_MSG) {
@@ -828,32 +849,28 @@ export class RecognizerEngine {
     }
   }
 
-  saveRecogState(this: MixedInParser): IParserState {
-    // errors is a getter which will clone the errors array
-    const savedErrors = this.errors;
-    // Slice only the active portion of the pre-allocated stack
-    const savedRuleStack = this.RULE_STACK.slice(0, this.RULE_STACK_IDX + 1);
+  /**
+   * Captures the minimal parser state needed to restore after a failed
+   * BACKTRACK() trial: three integers, no array copies. Rule stack and CST
+   * stack are self-healing via the finally blocks in each rule wrapper, so
+   * only the lexer position and errors length need explicit restoration.
+   */
+  saveRecogState(this: MixedInParser): IParserSavepoint {
     return {
-      errors: savedErrors,
-      lexerState: this.exportLexerState(),
-      RULE_STACK: savedRuleStack,
-      CST_STACK: this.CST_STACK,
+      pos: this.currIdx,
+      errorsLength: this.errors.length,
+      ruleStackDepth: this.RULE_STACK_IDX,
     };
   }
 
-  reloadRecogState(this: MixedInParser, newState: IParserState) {
-    this.errors = newState.errors;
-    this.importLexerState(newState.lexerState);
-    // Copy saved stack back into the pre-allocated array and restore the index
-    const saved = newState.RULE_STACK;
-    for (let i = 0; i < saved.length; i++) {
-      this.RULE_STACK[i] = saved[i];
-    }
-    this.RULE_STACK_IDX = saved.length - 1;
-    // Restore cached short name from the restored stack
-    if (this.RULE_STACK_IDX >= 0) {
-      this.currRuleShortName = this.RULE_STACK[this.RULE_STACK_IDX];
-    }
+  /**
+   * Restores parser state from a savepoint captured by saveRecogState().
+   * Three integer assignments — no allocation, no array iteration.
+   */
+  reloadRecogState(this: MixedInParser, saved: IParserSavepoint): void {
+    this.currIdx = saved.pos;
+    this.errors.length = saved.errorsLength;
+    this.RULE_STACK_IDX = saved.ruleStackDepth;
   }
 
   ruleInvocationStateUpdate(
@@ -870,8 +887,12 @@ export class RecognizerEngine {
     this.cstInvocationStateUpdate(fullName);
   }
 
+  /**
+   * Returns true while inside a BACKTRACK() trial. Reads the boolean flag
+   * directly — O(1) with no array length check.
+   */
   isBackTracking(this: MixedInParser): boolean {
-    return this.isBackTrackingStack.length !== 0;
+    return this.IS_SPECULATING;
   }
 
   getCurrRuleFullName(this: MixedInParser): string {
@@ -891,7 +912,7 @@ export class RecognizerEngine {
     this.resetLexerState();
     this.subruleIdx = 0;
     this.currRuleShortName = 0;
-    this.isBackTrackingStack = [];
+    this.IS_SPECULATING = false;
     this.errors = [];
     // Reset depth counters but keep arrays allocated to avoid re-allocation.
     // Stale number values in unused slots are harmless.

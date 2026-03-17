@@ -461,7 +461,7 @@ function defineRecognizerSpecs(
           [PlusTok],
           {},
         ) as any;
-        parser.isBackTrackingStack.push(true);
+        parser.IS_SPECULATING = true;
         parser.onBeforeParse("someRule");
         expect(
           parser.shouldInRepetitionRecoveryBeTried(MinusTok, 1, true),

@@ -15,6 +15,7 @@ import {
 } from "@chevrotain/types";
 import { isRecognitionException } from "../../exceptions_public.js";
 import { DEFAULT_RULE_CONFIG, ParserDefinitionErrorType } from "../parser.js";
+import { SPEC_FAIL } from "./recognizer_engine.js";
 import { defaultGrammarValidatorErrorProvider } from "../../errors_public.js";
 import { validateRuleIsOverridden } from "../../grammar/checks.js";
 import { MixedInParser } from "./parser_traits.js";
@@ -681,6 +682,12 @@ export class RecognizerApi {
     return ruleImplementation;
   }
 
+  /**
+   * Returns a zero-argument predicate that speculatively runs `grammarRule`
+   * and returns true if it succeeds. On failure, state is restored via three
+   * integer assignments (no array copies). Uses SPEC_FAIL (a Symbol) as the
+   * failure signal so V8 never allocates an Error during failed alternatives.
+   */
   BACKTRACK<T>(
     this: MixedInParser,
     grammarRule: (...args: any[]) => T,
@@ -689,23 +696,21 @@ export class RecognizerApi {
     // Use coreRule to bypass root-level hooks (onBeforeParse/onAfterParse).
     // Backtracking is speculative and should not trigger parse lifecycle hooks.
     const ruleToCall = (grammarRule as any).coreRule ?? grammarRule;
-    return function () {
-      // save org state
-      this.isBackTrackingStack.push(1);
+    return function (this: MixedInParser) {
+      this.IS_SPECULATING = true;
       const orgState = this.saveRecogState();
       try {
         ruleToCall.apply(this, args);
-        // if no exception was thrown we have succeed parsing the rule.
         return true;
       } catch (e) {
-        if (isRecognitionException(e)) {
+        if (e === SPEC_FAIL || isRecognitionException(e)) {
           return false;
         } else {
           throw e;
         }
       } finally {
         this.reloadRecogState(orgState);
-        this.isBackTrackingStack.pop();
+        this.IS_SPECULATING = false;
       }
     };
   }

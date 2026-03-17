@@ -289,21 +289,23 @@ export class Recoverable {
     return currentRuleReSyncSet.includes(tokenTypeIdx);
   }
 
+  /**
+   * Scans forward until finding a token whose type is in the follow set,
+   * signalling where the parser can safely resume. Uses a Set built once by
+   * flattenFollowSet() so each token is an O(1) lookup instead of O(n) scan.
+   * LA_FAST is safe here because sentinel EOF tokens pad the end of tokVector.
+   */
   findReSyncTokenType(this: MixedInParser): TokenType {
-    const allPossibleReSyncTokTypes = this.flattenFollowSet();
-    // this loop will always terminate as EOF is always in the follow stack and also always (virtually) in the input
+    const reSyncSet = this.flattenFollowSet();
+    // always terminates: EOF is always in the follow set and always in the input
     let nextToken = this.LA_FAST(1);
     let k = 2;
     while (true) {
-      const foundMatch = allPossibleReSyncTokTypes.find((resyncTokType) => {
-        const canMatch = tokenMatcher(nextToken, resyncTokType);
-        return canMatch;
-      });
-      if (foundMatch !== undefined) {
-        return foundMatch;
+      const match = reSyncSet.get(nextToken.tokenTypeIdx);
+      if (match !== undefined) {
+        return match;
       }
-      nextToken = this.LA(k);
-      k++;
+      nextToken = this.LA_FAST(k++);
     }
   }
 
@@ -343,11 +345,29 @@ export class Recoverable {
     return result;
   }
 
-  flattenFollowSet(this: MixedInParser): TokenType[] {
-    const followStack = this.buildFullFollowKeyStack().map((currKey) => {
-      return this.getFollowSetFromFollowKey(currKey);
-    });
-    return <any>followStack.flat();
+  /**
+   * Builds a Map from concrete tokenTypeIdx → follow-set TokenType for the
+   * current rule stack. Keying by index instead of object reference gives O(1)
+   * lookup in findReSyncTokenType without a linear scan per token. Category
+   * types are expanded so every concrete member maps to its category — the
+   * category object is returned by findReSyncTokenType so callers that check
+   * isInCurrentRuleReSyncSet still get the right follow-set entry.
+   */
+  flattenFollowSet(this: MixedInParser): Map<number, TokenType> {
+    const result = new Map<number, TokenType>();
+    for (const key of this.buildFullFollowKeyStack()) {
+      for (const tokType of this.getFollowSetFromFollowKey(key)) {
+        if (tokType.isParent) {
+          for (const idx of tokType.categoryMatches!) {
+            if (!result.has(idx)) result.set(idx, tokType);
+          }
+        } else {
+          if (!result.has(tokType.tokenTypeIdx!))
+            result.set(tokType.tokenTypeIdx!, tokType);
+        }
+      }
+    }
+    return result;
   }
 
   getFollowSetFromFollowKey(

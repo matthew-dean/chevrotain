@@ -111,6 +111,17 @@ export interface IParserState {
   CST_STACK: CstNode[];
 }
 
+/**
+ * Lightweight snapshot used by saveRecogState/reloadRecogState.
+ * Three integers instead of array clones — V8 can scalar-replace this
+ * entirely in a hot BACKTRACK() loop.
+ */
+export interface IParserSavepoint {
+  pos: number;
+  errorsLength: number;
+  ruleStackDepth: number;
+}
+
 export type Predicate = () => boolean;
 
 export function EMPTY_ALT(): () => undefined;
