@@ -224,6 +224,28 @@ function createToken(...): IToken {
 - With a single factory, replace with a direct call. The `if/else` for tracking
   mode happens inside the factory, which V8 can inline and optimize.
 
+**Sentinel padding — replace push/pop loops with length assignment:**
+
+`onBeforeParse` pads `tokVector` with `maxLookahead + 1` EOF sentinels using a
+`.push()` loop, triggering array growth on every parse call. `onAfterParse`
+removes them with a `.at(-1).pop()` loop (polyfill overhead). Replace both with
+direct length manipulation:
+
+```ts
+// onBeforeParse
+const sentinelCount = this.maxLookahead + 1;
+this.tokVector.length = baseLength + sentinelCount; // no per-element cost
+this.tokVector.fill(END_OF_FILE, baseLength);
+
+// onAfterParse
+this.tokVector.length -= sentinelCount; // single assignment
+```
+
+**Trivial lexer cleanup:**
+
+`push_mode` (lexer_public.ts) assigns `currModePatternsLength` twice
+consecutively — the second assignment is a dead write. Delete it.
+
 #### Exit criteria
 
 - All `TokenType` objects have identical shape regardless of `createToken()`
@@ -282,6 +304,45 @@ reloadRecogState(saved: ParserSavepoint): void {
 
 No array copies, no slice. The savepoint object itself is three integers — V8
 will often stack-allocate or scalar-replace this entirely in a hot loop.
+
+**Fix `findReSyncTokenType()` — O(n²) → O(n):**
+
+Currently `flattenFollowSet()` builds a flat array of token types and
+`findReSyncTokenType()` scans it with `.find()` per lookahead position —
+O(follow set size) per token checked. Replace the array with a `Set`:
+
+```ts
+// flattenFollowSet returns Set<TokenType> instead of TokenType[]
+const reSyncSet = this.flattenFollowSet(); // build once
+while (true) {
+  if (reSyncSet.has(nextToken.tokenType)) return nextToken.tokenType;
+  nextToken = this.LA_FAST(k++);
+}
+```
+
+Also switch the inner `LA(k)` call to `LA_FAST(k)` — the loop already guards
+against going past EOF via the sentinel padding.
+
+**Fix `flattenFollowSet()` — triple allocation → single pass:**
+
+```ts
+// Current: buildFullFollowKeyStack().map(...).flat() — three allocations
+// Replacement: push directly into one Set
+flattenFollowSet(): Set<TokenType> {
+  const result = new Set<TokenType>()
+  for (const key of this.buildFullFollowKeyStack()) {
+    for (const tokType of this.getFollowSetFromFollowKey(key)) {
+      result.add(tokType)
+    }
+  }
+  return result
+}
+```
+
+Note: `buildFullFollowKeyStack()` uses `shortRuleNameToFull` which is going
+away in Stage 6. After Stage 6, `RULE_STACK` stores rule names directly,
+eliminating the integer → string lookup and the follow key string concatenation
+(`ruleName + idx + IN + inRule`) entirely.
 
 #### Exit criteria
 
