@@ -62,16 +62,16 @@ The replacement strategy:
 
 ## What Is Deleted
 
-| Item                                        | Reason                             |
-| ------------------------------------------- | ---------------------------------- |
-| `LooksAhead` trait                          | Replaced by speculative execution  |
-| `lookAheadFuncsCache`                       | No longer needed                   |
-| `preComputeLookaheadFunctions`              | No longer needed                   |
-| `getKeyForAutomaticLookahead`               | No longer needed                   |
-| `LLkLookaheadStrategy` implementation       | Replaced — interface stub kept     |
-| `isBackTrackingStack: boolean[]`            | Replaced by `speculating: boolean` |
-| `applyMixins` composition                   | Replaced by direct class hierarchy |
-| `RecognizerEngine` / `RecognizerApi` traits | Merged into new base class         |
+| Item                                        | Reason                                |
+| ------------------------------------------- | ------------------------------------- |
+| `LooksAhead` trait                          | Replaced by speculative execution     |
+| `lookAheadFuncsCache`                       | No longer needed                      |
+| `preComputeLookaheadFunctions`              | No longer needed                      |
+| `getKeyForAutomaticLookahead`               | No longer needed                      |
+| `LLkLookaheadStrategy` implementation       | Replaced — interface stub kept        |
+| `isBackTrackingStack: boolean[]`            | Replaced by `IS_SPECULATING: boolean` |
+| `applyMixins` composition                   | Replaced by direct class hierarchy    |
+| `RecognizerEngine` / `RecognizerApi` traits | Merged into new base class            |
 
 ---
 
@@ -99,15 +99,16 @@ The `Lexer` class and all token utilities sit beside this hierarchy, unchanged.
 
 - Add `const SPEC_FAIL = Object.freeze(Symbol('SPEC_FAIL'))` as the internal
   speculation sentinel.
-- Add `protected speculating: boolean = false` to the parser state.
-- In `consumeInternal()`: when `speculating === true` and the token does not
+- Add `IS_SPECULATING: boolean = false` to the parser state, mirroring the
+  `RECORDING_PHASE` convention.
+- In `consumeInternal()`: when `IS_SPECULATING === true` and the token does not
   match, throw `SPEC_FAIL` instead of `new MismatchedTokenException`.
-- In `BACKTRACK()`: set `speculating = true` before the trial, restore it
+- In `BACKTRACK()`: set `IS_SPECULATING = true` before the trial, restore it
   after, catch `SPEC_FAIL` as the failure signal.
 - Replace all `isRecognitionException(e)` checks in catch blocks with
   `e === SPEC_FAIL` where appropriate.
 - Remove `isBackTrackingStack: boolean[]` and `isBackTracking(): boolean`.
-- `isBackTracking()` on the public API → returns `this.speculating` for
+- `isBackTracking()` on the public API → returns `this.IS_SPECULATING` for
   backwards compat.
 
 #### Exit criteria
@@ -127,10 +128,10 @@ The `Lexer` class and all token utilities sit beside this hierarchy, unchanged.
 
 - Rewrite `orInternal()` to iterate alternatives speculatively:
   - Save state (`pos`, `errors.length`, stack lengths).
-  - Set `speculating = true`.
+  - Set `IS_SPECULATING = true`.
   - Call `alt.ALT()`.
   - On `SPEC_FAIL`: restore state, try next alternative.
-  - On success: restore `speculating`, return result.
+  - On success: restore `IS_SPECULATING`, return result.
   - Last alternative: call without speculation (errors surface normally).
   - If `alt.GATE` is provided and passes: commit without speculation.
 - Rewrite `manyInternal()`, `optionInternal()`, `atLeastOneInternal()`,
