@@ -1614,6 +1614,8 @@ export interface TokenType {
   };
   isParent?: boolean;
   START_CHARS_HINT?: (string | number)[];
+  /** @internal Bitset for O(1) category membership checks. Replaces categoryMatchesMap at runtime. */
+  MATCH_SET?: Uint32Array | null;
 }
 
 /**

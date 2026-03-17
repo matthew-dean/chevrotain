@@ -23,10 +23,13 @@ exactly. The `Lexer` is improved but its interface is unchanged.
    per-production tax even when no backtracking is needed.
 
 3. **Recording phase hidden-class pollution.** `enableRecording()` adds
-   instance methods to the parser object; `disableRecording()` deletes them.
-   In V8, adding/deleting own properties transitions the object to a new hidden
-   class. Any inline cache (IC) that was optimized for the previous shape
-   becomes polymorphic or megamorphic until the JIT re-optimizes.
+   instance methods to the parser object; `disableRecording()` deletes them
+   (~80 `delete` calls). In V8, adding/deleting own properties transitions the
+   object to a new hidden class. Any inline cache (IC) that was optimized for
+   the previous shape becomes polymorphic or megamorphic until the JIT
+   re-optimizes. Fix (Stage 5): stop shadowing prototype methods with instance
+   properties entirely — check `RECORDING_PHASE` inside the prototype methods
+   themselves so no `delete` is ever needed.
 
 ### Additional allocation costs found in audit
 
@@ -304,6 +307,21 @@ reloadRecogState(saved: ParserSavepoint): void {
 
 No array copies, no slice. The savepoint object itself is three integers — V8
 will often stack-allocate or scalar-replace this entirely in a hot loop.
+
+**Fix `delete e.partialCstResult` in `recognizer_engine.ts`:**
+
+`cstPostRule()` calls `delete e.partialCstResult` after consuming the partial
+result from an in-flight exception. `delete` causes a hidden-class transition on
+the exception object. Replace with assignment to `undefined`:
+
+```ts
+// Before:
+delete e.partialCstResult;
+// After:
+e.partialCstResult = undefined;
+```
+
+Cold path, but eliminates the transition.
 
 **Fix `findReSyncTokenType()` — O(n²) → O(n):**
 
@@ -621,6 +639,63 @@ Clean up the call graph for V8's inliner.
   the same input against both engines.
 - Results are reproducible across three consecutive benchmark runs (Benchmark.js
   `minSamples: 25` default).
+
+---
+
+## Development Process
+
+### Running tests
+
+Each stage ends with a green test suite. The standard commands are:
+
+```bash
+# From the repo root — compile + bundle + test the chevrotain package
+cd packages/chevrotain && bun run ci
+
+# Quick iteration during development (compile + mocha, no bundle step)
+cd packages/chevrotain && bun run build && bun run unit-tests
+
+# Full repo CI (format check + all subpackages)
+bun run ci
+```
+
+`bun run ci` in the `packages/chevrotain` directory expands to
+`bun run build test`, i.e. `clean → compile → bundle → coverage`.
+
+### Commit format
+
+This repo uses [Conventional Commits](https://www.conventionalcommits.org/).
+The commit-msg hook enforces it via `commitlint`. Use one of:
+
+```
+feat: <summary>          ← new capability visible to users
+fix: <summary>           ← bug fix
+perf: <summary>          ← performance improvement with no API change
+refactor: <summary>      ← internal restructuring, no behaviour change
+test: <summary>          ← test-only change
+chore: <summary>         ← build / tooling / meta change
+```
+
+Each stage lands as one commit (or a small series of `refactor:`/`perf:`
+commits if the diff is large). The commit message body should reference the
+relevant stage from this plan and state what exit criteria it satisfies.
+
+Example commit for Stage 0:
+
+```
+perf: settle TokenType and IToken hidden-class shapes (stage 0)
+
+- createToken() pre-declares all fields with sentinel values so every
+  TokenType object shares a single V8 hidden class from birth.
+- Three IToken factory variants unified: all produce the same property
+  set; positionTracking mode controls values, not shape.
+- MATCH_SET (Uint32Array bitset) replaces categoryMatchesMap for O(1)
+  category membership checks in tokenStructuredMatcher.
+- Lexer group-key caching replaces Object.keys() call per tokenize().
+- Dead write in push_mode removed.
+
+Exits: Stage 0 exit criteria — all existing tests pass.
+```
 
 ---
 

@@ -20,77 +20,56 @@ export function hasTokenLabel(
   return typeof obj.LABEL === "string" && obj.LABEL !== "";
 }
 
-const PARENT = "parent";
-const CATEGORIES = "categories";
-const LABEL = "label";
-const GROUP = "group";
-const PUSH_MODE = "push_mode";
-const POP_MODE = "pop_mode";
-const LONGER_ALT = "longer_alt";
-const LINE_BREAKS = "line_breaks";
-const START_CHARS_HINT = "start_chars_hint";
-
 export function createToken(config: ITokenConfig): TokenType {
-  return createTokenInternal(config);
-}
-
-function createTokenInternal(config: ITokenConfig): TokenType {
-  const pattern = config.pattern;
-
-  const tokenType: TokenType = <any>{};
-  tokenType.name = config.name;
-
-  if (pattern !== undefined) {
-    tokenType.PATTERN = pattern;
-  }
-
-  if (Object.hasOwn(config, PARENT)) {
+  if (Object.hasOwn(config, "parent")) {
     throw (
       "The parent property is no longer supported.\n" +
       "See: https://github.com/chevrotain/chevrotain/issues/564#issuecomment-349062346 for details."
     );
   }
 
-  if (Object.hasOwn(config, CATEGORIES)) {
-    // casting to ANY as this will be fixed inside `augmentTokenTypes``
-    tokenType.CATEGORIES = <any>config[CATEGORIES];
-  }
+  // Normalize CATEGORIES to an array at creation time.
+  const rawCats = config.categories;
+  const categories: TokenType[] = rawCats
+    ? Array.isArray(rawCats)
+      ? (rawCats as TokenType[])
+      : [rawCats as TokenType]
+    : [];
+
+  // ALL fields are pre-declared with sentinel values so every TokenType object
+  // shares a single V8 hidden class from birth. augmentTokenTypes() overwrites
+  // the augmented sentinel slots without adding new properties, eliminating
+  // hidden-class transitions on every token construction.
+  //
+  // Validators in lexer.ts that previously used Object.hasOwn() to detect
+  // "was this field explicitly configured?" have been updated to check
+  // `!== undefined` instead. Tests that verified properties were added
+  // post-creation are updated accordingly.
+  const tokenType: TokenType = {
+    name: config.name,
+    PATTERN: config.pattern ?? undefined,
+    LABEL: config.label ?? undefined,
+    GROUP: config.group ?? undefined,
+    PUSH_MODE: config.push_mode ?? undefined,
+    POP_MODE: config.pop_mode ?? undefined,
+    LONGER_ALT: config.longer_alt ?? undefined,
+    LINE_BREAKS: config.line_breaks ?? undefined,
+    START_CHARS_HINT: config.start_chars_hint ?? undefined,
+    CATEGORIES: categories,
+    // Augmented slots — sentinel values, overwritten by augmentTokenTypes().
+    tokenTypeIdx: 0,
+    isParent: false,
+    categoryMatches: [],
+    categoryMatchesMap: {},
+    MATCH_SET: null,
+  } as unknown as TokenType;
 
   augmentTokenTypes([tokenType]);
-
-  if (Object.hasOwn(config, LABEL)) {
-    tokenType.LABEL = config[LABEL];
-  }
-
-  if (Object.hasOwn(config, GROUP)) {
-    tokenType.GROUP = config[GROUP];
-  }
-
-  if (Object.hasOwn(config, POP_MODE)) {
-    tokenType.POP_MODE = config[POP_MODE];
-  }
-
-  if (Object.hasOwn(config, PUSH_MODE)) {
-    tokenType.PUSH_MODE = config[PUSH_MODE];
-  }
-
-  if (Object.hasOwn(config, LONGER_ALT)) {
-    tokenType.LONGER_ALT = config[LONGER_ALT];
-  }
-
-  if (Object.hasOwn(config, LINE_BREAKS)) {
-    tokenType.LINE_BREAKS = config[LINE_BREAKS];
-  }
-
-  if (Object.hasOwn(config, START_CHARS_HINT)) {
-    tokenType.START_CHARS_HINT = config[START_CHARS_HINT];
-  }
 
   return tokenType;
 }
 
 export const EOF = createToken({ name: "EOF", pattern: Lexer.NA });
-augmentTokenTypes([EOF]);
 
 export function createTokenInstance(
   tokType: TokenType,
@@ -112,6 +91,8 @@ export function createTokenInstance(
     endColumn,
     tokenTypeIdx: (<any>tokType).tokenTypeIdx,
     tokenType: tokType,
+    payload: undefined,
+    isInsertedInRecovery: false,
   };
 }
 

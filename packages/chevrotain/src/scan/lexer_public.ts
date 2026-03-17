@@ -1,7 +1,6 @@
 import {
   analyzeTokenTypes,
   charCodeToOptimizedIndex,
-  cloneEmptyGroups,
   DEFAULT_MODE,
   IAnalyzeResult,
   IPatternConfig,
@@ -88,6 +87,7 @@ export class Lexer {
   protected modes: string[] = [];
   protected defaultMode!: string;
   protected emptyGroups: { [groupName: string]: IToken } = {};
+  private groupKeys: string[] = [];
 
   private config: Required<ILexerConfig>;
   private trackStartLines: boolean = true;
@@ -262,6 +262,9 @@ export class Lexer {
       );
 
       this.defaultMode = actualDefinition.defaultMode;
+      // Cache group keys so tokenizeInternal can build the result groups object
+      // without calling Object.keys() on every tokenize() invocation.
+      this.groupKeys = Object.keys(this.emptyGroups);
 
       if (
         this.lexerDefinitionErrors.length > 0 &&
@@ -408,7 +411,13 @@ export class Lexer {
     const errors: ILexingError[] = [];
     let line = this.trackStartLines ? 1 : undefined;
     let column = this.trackStartLines ? 1 : undefined;
-    const groups: any = cloneEmptyGroups(this.emptyGroups);
+    // Build a fresh groups object using pre-cached keys — avoids Object.keys()
+    // on every tokenize() call and re-uses the same code path regardless of
+    // how many groups the lexer has.
+    const groups: { [groupName: string]: IToken[] } = {};
+    for (let gi = 0; gi < this.groupKeys.length; gi++) {
+      groups[this.groupKeys[gi]] = [];
+    }
     const trackLines = this.trackStartLines;
     const lineTerminatorPattern = this.config.lineTerminatorsPattern;
 
@@ -470,8 +479,6 @@ export class Lexer {
         this.charCodeToPatternIdxToConfig[newMode];
 
       patternIdxToConfig = this.patternIdxToConfig[newMode];
-      currModePatternsLength = patternIdxToConfig.length;
-
       currModePatternsLength = patternIdxToConfig.length;
       const modeCanBeOptimized =
         this.canModeBeOptimized[newMode] && this.config.safeMode === false;
@@ -803,17 +810,30 @@ export class Lexer {
   /* istanbul ignore next - place holder */
   private createTokenInstance!: (...args: any[]) => IToken;
 
+  // All three factory methods produce objects with the same property set so
+  // V8 assigns them a single hidden class.  Fields unused in a given tracking
+  // mode are set to undefined (line/column) or computed normally (offsets).
+  // payload and isInsertedInRecovery are always pre-declared so recovery code
+  // can set them without triggering a hidden-class transition.
+
   private createOffsetOnlyToken(
     image: string,
     startOffset: number,
     tokenTypeIdx: number,
     tokenType: TokenType,
-  ) {
+  ): IToken {
     return {
       image,
       startOffset,
+      endOffset: undefined,
+      startLine: undefined,
+      endLine: undefined,
+      startColumn: undefined,
+      endColumn: undefined,
       tokenTypeIdx,
       tokenType,
+      payload: undefined,
+      isInsertedInRecovery: false,
     };
   }
 
@@ -824,14 +844,19 @@ export class Lexer {
     tokenType: TokenType,
     startLine: number,
     startColumn: number,
-  ) {
+  ): IToken {
     return {
       image,
       startOffset,
+      endOffset: undefined,
       startLine,
+      endLine: startLine,
       startColumn,
+      endColumn: undefined,
       tokenTypeIdx,
       tokenType,
+      payload: undefined,
+      isInsertedInRecovery: false,
     };
   }
 
@@ -854,6 +879,8 @@ export class Lexer {
       endColumn: startColumn + imageLength - 1,
       tokenTypeIdx,
       tokenType,
+      payload: undefined,
+      isInsertedInRecovery: false,
     };
   }
 
