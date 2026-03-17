@@ -662,6 +662,33 @@ bun run ci
 `bun run ci` in the `packages/chevrotain` directory expands to
 `bun run build test`, i.e. `clean → compile → bundle → coverage`.
 
+### JSDoc
+
+Every function, method, or non-trivial field added or meaningfully changed in a
+stage gets a JSDoc comment explaining **what it does and why** — not restatements
+of the type signature. Focus on the performance rationale or contract that isn't
+obvious from the name alone.
+
+Good:
+
+```ts
+/**
+ * Bitset membership test replacing the old categoryMatchesMap object lookup.
+ * One bitwise AND instead of a property read + coercion — stays monomorphic
+ * because MATCH_SET is always a Uint32Array (or null for leaf tokens).
+ */
+```
+
+Avoid:
+
+```ts
+/** Returns true if the token matches the constructor. */ // obvious from the name
+```
+
+Rule of thumb: if you'd need to read the Background section of this plan to
+understand _why_ the code is written the way it is, that explanation belongs in
+a JSDoc on the code itself.
+
 ### Commit format
 
 This repo uses [Conventional Commits](https://www.conventionalcommits.org/).
