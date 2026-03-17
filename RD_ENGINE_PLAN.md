@@ -98,6 +98,17 @@ exactly. The `Lexer` is improved but its interface is unchanged.
 | Grammar recording mechanism                                             | Kept — made opt-in                                    |
 | `serializeGrammar`, `generateCstDts`, `createSyntaxDiagramsCode`        | Kept — require opt-in recording pass                  |
 
+## Candidate Exports for Removal
+
+TypeScript `export`s that do not appear in `packages/types/api.d.ts` are
+internal implementation details leaked through module boundaries. As each stage
+restructures the code, audit these exports and delete any that are no longer
+needed by the new architecture. Do not keep an export just because it exists —
+if it isn't part of the public API contract and isn't consumed by another
+internal module, remove it.
+
+---
+
 ## What Is Deleted
 
 | Item                                        | Reason                                |
