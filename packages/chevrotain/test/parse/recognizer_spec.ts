@@ -739,17 +739,19 @@ function defineRecognizerSpecs(
 
             this.RULE("goodRule", () => {
               this.CONSUME(IntTok);
-              // Duplicate CONSUME Idx error
+              // With auto-counting, two CONSUME calls get unique idx values
+              // so no duplicate error occurs.
               this.CONSUME(IntTok);
             });
             this.performSelfAnalysis();
           }
         }
 
+        // With auto-occurrence counting, duplicate CONSUME calls no longer
+        // produce definition errors — both skipValidations=true and false
+        // succeed.
         expect(() => new SkipValidationsParser(true)).to.not.throw();
-        expect(() => new SkipValidationsParser(false)).to.throw(
-          "Parser Definition Errors detected:",
-        );
+        expect(() => new SkipValidationsParser(false)).to.not.throw();
       });
 
       it("can only SAVE_ERROR for recognition exceptions", () => {

@@ -337,7 +337,19 @@ function recordOrProd(mainProdArg: any, occurrence: number): any {
 
   prevProd.definition.push(newOrProd);
 
+  // Save _dslCounter before iterating alternatives. During recording ALL
+  // alts are walked sequentially, each getting unique counter ranges.
+  // At runtime only ONE alt is chosen, so we record each alt's starting
+  // offset and the total delta. At runtime, _dslCounter is set to the
+  // chosen alt's starting offset before execution, and advanced to the
+  // total delta afterwards.
+  const savedDslCounter = this._dslCounter;
+  const altStarts: number[] = [];
+
   alts.forEach((currAlt) => {
+    // Record this alt's starting offset relative to savedDslCounter.
+    altStarts.push(this._dslCounter - savedDslCounter);
+
     const currAltFlat = new Alternative({ definition: [] });
     newOrProd.definition.push(currAltFlat);
     if (Object.hasOwn(currAlt, "IGNORE_AMBIGUITIES")) {
@@ -351,11 +363,25 @@ function recordOrProd(mainProdArg: any, occurrence: number): any {
     currAlt.ALT.call(this);
     this.recordingProdStack.pop();
   });
+
+  // Total delta across all alternatives.
+  const totalDelta = this._dslCounter - savedDslCounter;
+
+  // Store per-alt starting offsets and total delta so orInternal can set
+  // the counter to the correct offset before executing the chosen alt,
+  // and advance past the OR afterwards.
+  const mapKey = this.currRuleShortName | occurrence;
+  this._orCounterDeltas[mapKey] = totalDelta;
+  this._orAltCounterStarts[mapKey] = altStarts;
+
   return RECORDING_NULL_OBJECT;
 }
 
-function getIdxSuffix(idx: number): string {
-  return idx === 0 ? "" : `${idx}`;
+function getIdxSuffix(_idx: number): string {
+  // With auto-occurrence counting, the idx is an internal auto-assigned
+  // value, not the user's explicit method suffix. Always return empty
+  // so error messages show the base method name (CONSUME, SUBRULE, etc.).
+  return "";
 }
 
 function assertMethodIdxIsValid(idx: number): void {

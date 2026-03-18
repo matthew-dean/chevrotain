@@ -584,15 +584,13 @@ describe("The duplicate occurrence validations full flow", () => {
       });
     }
 
-    expect(() => new ErroneousOccurrenceNumUsageParser1()).to.throw(
-      "->SUBRULE1<- with argument: ->anotherRule<-",
-    );
-    expect(() => new ErroneousOccurrenceNumUsageParser1()).to.throw(
-      "appears more than once (2 times) in the top level rule: ->duplicateRef<-",
-    );
+    // With auto-occurrence counting, each SUBRULE call gets a unique idx
+    // automatically, so "duplicate" calls using the same numbered variant
+    // (e.g., SUBRULE1 twice) no longer produce definition errors.
+    expect(() => new ErroneousOccurrenceNumUsageParser1()).to.not.throw();
   });
 
-  it("will throw errors on duplicate Subrules references in the same top level rule", () => {
+  it("will not throw errors on duplicate Subrules references because auto-counting assigns unique indices", () => {
     class ErroneousOccurrenceNumUsageParser2 extends EmbeddedActionsParser {
       constructor(input: IToken[] = []) {
         super([PlusTok]);
@@ -606,15 +604,12 @@ describe("The duplicate occurrence validations full flow", () => {
       });
     }
 
-    expect(() => new ErroneousOccurrenceNumUsageParser2()).to.throw("CONSUME");
-    expect(() => new ErroneousOccurrenceNumUsageParser2()).to.throw("3");
-    expect(() => new ErroneousOccurrenceNumUsageParser2()).to.throw("PlusTok");
-    expect(() => new ErroneousOccurrenceNumUsageParser2()).to.throw(
-      "duplicateTerminal",
-    );
+    // Auto-counting gives each CONSUME a unique idx regardless of the variant
+    // suffix, so no duplicate-occurrence error is raised.
+    expect(() => new ErroneousOccurrenceNumUsageParser2()).to.not.throw();
   });
 
-  it("will throw errors on duplicate MANY productions in the same top level rule", () => {
+  it("will not throw errors on duplicate MANY productions because auto-counting assigns unique indices", () => {
     class ErroneousOccurrenceNumUsageParser3 extends EmbeddedActionsParser {
       constructor(input: IToken[] = []) {
         super([PlusTok, MinusTok]);
@@ -632,13 +627,8 @@ describe("The duplicate occurrence validations full flow", () => {
       });
     }
 
-    expect(() => new ErroneousOccurrenceNumUsageParser3()).to.throw("->MANY<-");
-    expect(() => new ErroneousOccurrenceNumUsageParser3()).to.throw(
-      "appears more than once (2 times) in the top level rule: ->duplicateMany<-",
-    );
-    expect(() => new ErroneousOccurrenceNumUsageParser3()).to.throw(
-      "https://chevrotain.io/docs/FAQ.html#NUMERICAL_SUFFIXES",
-    );
+    // Auto-counting gives each MANY a unique idx, so no duplicate error.
+    expect(() => new ErroneousOccurrenceNumUsageParser3()).to.not.throw();
   });
 
   it("won't detect issues in a Parser using Tokens created by extendToken(...) utility (anonymous)", () => {
@@ -767,7 +757,9 @@ describe("The Recorder runtime checks full flow", () => {
       });
     }
 
-    expect(() => new InvalidTokTypeParser()).to.throw("<CONSUME3>");
+    // With auto-counting, the idx suffix reflects the auto-assigned
+    // occurrence (0 → "CONSUME" without a number suffix).
+    expect(() => new InvalidTokTypeParser()).to.throw("<CONSUME>");
     expect(() => new InvalidTokTypeParser()).to.throw("argument is invalid");
     expect(() => new InvalidTokTypeParser()).to.throw("but got: <null>");
     expect(() => new InvalidTokTypeParser()).to.throw(
@@ -776,7 +768,7 @@ describe("The Recorder runtime checks full flow", () => {
   });
 
   context(
-    "will throw an error when trying to init a parser with an invalid method idx",
+    "lowercase methods with user-provided idx — auto-counting ignores the idx parameter",
     () => {
       it("consume", () => {
         class InvalidIdxParser extends EmbeddedActionsParser {
@@ -791,12 +783,9 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Invalid DSL Method idx value: <256>",
-        );
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Idx value must be a none negative value smaller than 256",
-        );
+        // With auto-counting, the user-provided idx is ignored and
+        // _dslCounter++ provides a valid occurrence index.
+        expect(() => new InvalidIdxParser()).to.not.throw();
       });
 
       it("subrule", () => {
@@ -817,12 +806,7 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Invalid DSL Method idx value: <-1>",
-        );
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Idx value must be a none negative value smaller than 256",
-        );
+        expect(() => new InvalidIdxParser()).to.not.throw();
       });
 
       it("option", () => {
@@ -840,12 +824,7 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Invalid DSL Method idx value: <666>",
-        );
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Idx value must be a none negative value smaller than 256",
-        );
+        expect(() => new InvalidIdxParser()).to.not.throw();
       });
 
       it("many", () => {
@@ -863,12 +842,7 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Invalid DSL Method idx value: <-333>",
-        );
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Idx value must be a none negative value smaller than 256",
-        );
+        expect(() => new InvalidIdxParser()).to.not.throw();
       });
 
       it("atLeastOne", () => {
@@ -886,12 +860,7 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Invalid DSL Method idx value: <1999>",
-        );
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Idx value must be a none negative value smaller than 256",
-        );
+        expect(() => new InvalidIdxParser()).to.not.throw();
       });
 
       it("or", () => {
@@ -913,12 +882,7 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Invalid DSL Method idx value: <543>",
-        );
-        expect(() => new InvalidIdxParser()).to.throw(
-          "Idx value must be a none negative value smaller than 256",
-        );
+        expect(() => new InvalidIdxParser()).to.not.throw();
       });
     },
   );
@@ -1459,7 +1423,9 @@ describe("The prefix ambiguity detection full flow", () => {
         ]);
       });
     }
-    expect(() => new PrefixAltAmbiguity()).to.throw("OR3");
+    // With auto-counting, OR3 gets auto-assigned idx=0, so the error
+    // message references <OR> (no number suffix for idx 0).
+    expect(() => new PrefixAltAmbiguity()).to.throw("<OR>");
     expect(() => new PrefixAltAmbiguity()).to.throw("Ambiguous alternatives");
     expect(() => new PrefixAltAmbiguity()).to.throw(
       "due to common lookahead prefix",
@@ -1674,8 +1640,10 @@ describe("The no non-empty lookahead validation", () => {
         }),
       );
     }
+    // With auto-counting, AT_LEAST_ONE_SEP5 gets auto-assigned idx=0,
+    // so the error message says <AT_LEAST_ONE_SEP> (no number suffix).
     expect(() => new EmptyLookaheadParserAtLeastOneSep()).to.throw(
-      "The repetition <AT_LEAST_ONE_SEP5>",
+      "The repetition <AT_LEAST_ONE_SEP>",
     );
     expect(() => new EmptyLookaheadParserAtLeastOneSep()).to.throw(
       "within Rule <someRule>",
@@ -1692,8 +1660,9 @@ describe("The no non-empty lookahead validation", () => {
 
       public someRule = this.RULE("someRule", () => this.MANY2(() => {}));
     }
+    // MANY2 gets auto-assigned idx=0 → <MANY>
     expect(() => new EmptyLookaheadParserMany()).to.throw(
-      "The repetition <MANY2>",
+      "The repetition <MANY>",
     );
     expect(() => new EmptyLookaheadParserMany()).to.throw(
       "<someRule> can never consume any tokens",
@@ -1715,8 +1684,9 @@ describe("The no non-empty lookahead validation", () => {
         }),
       );
     }
+    // MANY_SEP3 gets auto-assigned idx=0 → <MANY_SEP>
     expect(() => new EmptyLookaheadParserManySep()).to.throw(
-      "The repetition <MANY_SEP3>",
+      "The repetition <MANY_SEP>",
     );
     expect(() => new EmptyLookaheadParserManySep()).to.throw(
       "within Rule <someRule>",

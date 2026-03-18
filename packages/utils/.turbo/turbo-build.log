@@ -1,0 +1,3 @@
+$ npm-run-all clean compile
+$ shx rm -rf lib coverage
+$ tsc

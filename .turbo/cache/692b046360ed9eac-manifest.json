@@ -1,0 +1,146 @@
+{
+  "files": {
+    "packages/utils/lib/test/timer_spec.js": {
+      "size": 662,
+      "mtime_nanos": 1773868759870174901,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/test": {
+      "size": 0,
+      "mtime_nanos": 0,
+      "mode": 0,
+      "is_dir": true
+    },
+    "packages/utils/lib/src/to-fast-properties.js.map": {
+      "size": 597,
+      "mtime_nanos": 1773868759868251929,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/src/timer.d.ts": {
+      "size": 86,
+      "mtime_nanos": 1773868759867384006,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/src/timer.js.map": {
+      "size": 395,
+      "mtime_nanos": 1773868759866903835,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/src/to-fast-properties.d.ts": {
+      "size": 66,
+      "mtime_nanos": 1773868759868545431,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/src/to-fast-properties.js": {
+      "size": 1008,
+      "mtime_nanos": 1773868759868316887,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/src": {
+      "size": 0,
+      "mtime_nanos": 0,
+      "mode": 0,
+      "is_dir": true
+    },
+    "packages/utils/lib/tsconfig.tsbuildinfo": {
+      "size": 41819,
+      "mtime_nanos": 1773868759872816837,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/src/print.d.ts": {
+      "size": 114,
+      "mtime_nanos": 1773868759865900245,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/src/print.js.map": {
+      "size": 439,
+      "mtime_nanos": 1773868759864315108,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib": {
+      "size": 0,
+      "mtime_nanos": 0,
+      "mode": 0,
+      "is_dir": true
+    },
+    "packages/utils/lib/src/api.d.ts": {
+      "size": 153,
+      "mtime_nanos": 1773868759869193102,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/src/api.js": {
+      "size": 184,
+      "mtime_nanos": 1773868759869030684,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/src/timer.js": {
+      "size": 238,
+      "mtime_nanos": 1773868759866970377,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/src/api.js.map": {
+      "size": 236,
+      "mtime_nanos": 1773868759868972434,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/.turbo/turbo-build.log": {
+      "size": 60,
+      "mtime_nanos": 1773868759892307355,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/test/timer_spec.d.ts": {
+      "size": 11,
+      "mtime_nanos": 1773868759870455820,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/test/timer_spec.js.map": {
+      "size": 862,
+      "mtime_nanos": 1773868759870117317,
+      "mode": 420,
+      "is_dir": false
+    },
+    "packages/utils/lib/src/print.js": {
+      "size": 461,
+      "mtime_nanos": 1773868759864412775,
+      "mode": 420,
+      "is_dir": false
+    }
+  },
+  "order": [
+    "packages/utils/.turbo/turbo-build.log",
+    "packages/utils/lib",
+    "packages/utils/lib/src",
+    "packages/utils/lib/src/api.d.ts",
+    "packages/utils/lib/src/api.js",
+    "packages/utils/lib/src/api.js.map",
+    "packages/utils/lib/src/print.d.ts",
+    "packages/utils/lib/src/print.js",
+    "packages/utils/lib/src/print.js.map",
+    "packages/utils/lib/src/timer.d.ts",
+    "packages/utils/lib/src/timer.js",
+    "packages/utils/lib/src/timer.js.map",
+    "packages/utils/lib/src/to-fast-properties.d.ts",
+    "packages/utils/lib/src/to-fast-properties.js",
+    "packages/utils/lib/src/to-fast-properties.js.map",
+    "packages/utils/lib/test",
+    "packages/utils/lib/test/timer_spec.d.ts",
+    "packages/utils/lib/test/timer_spec.js",
+    "packages/utils/lib/test/timer_spec.js.map",
+    "packages/utils/lib/tsconfig.tsbuildinfo"
+  ]
+}
