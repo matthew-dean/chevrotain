@@ -413,7 +413,7 @@ export class RecognizerEngine {
       return undefined;
     }
 
-    const startPos = this.currIdx;
+    const startLexPos = this.exportLexerState();
     const startErrors = this._errors.length;
     const startRuleStack = this.RULE_STACK_IDX;
     const cstSave = this.saveCstTop();
@@ -421,9 +421,12 @@ export class RecognizerEngine {
       const result = action.call(this);
       // Stuck guard: if body didn't advance pos, or recovery added
       // errors (meaning the optional content wasn't really present), undo.
-      if (this.currIdx === startPos || this._errors.length > startErrors) {
+      if (
+        this.exportLexerState() === startLexPos ||
+        this._errors.length > startErrors
+      ) {
         this.restoreCstTop(cstSave);
-        this.currIdx = startPos;
+        this.importLexerState(startLexPos);
         this._errors.length = startErrors;
         this.RULE_STACK_IDX = startRuleStack;
         return undefined;
@@ -432,7 +435,7 @@ export class RecognizerEngine {
     } catch (e) {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
         this.restoreCstTop(cstSave);
-        this.currIdx = startPos;
+        this.importLexerState(startLexPos);
         this._errors.length = startErrors;
         this.RULE_STACK_IDX = startRuleStack;
         return undefined;
@@ -494,7 +497,7 @@ export class RecognizerEngine {
 
     // First iteration: mandatory — run committed.
     {
-      const firstPos = this.currIdx;
+      const firstLexPos = this.exportLexerState();
       const firstErrors = this._errors.length;
       const firstRuleStack = this.RULE_STACK_IDX;
       const firstCstSave = this.saveCstTop();
@@ -503,7 +506,7 @@ export class RecognizerEngine {
       } catch (e) {
         if (e === SPEC_FAIL || isRecognitionException(e)) {
           this.restoreCstTop(firstCstSave);
-          this.currIdx = firstPos;
+          this.importLexerState(firstLexPos);
           this._errors.length = firstErrors;
           this.RULE_STACK_IDX = firstRuleStack;
           throw this.raiseEarlyExitException(
@@ -524,7 +527,7 @@ export class RecognizerEngine {
     const lookaheadFunc = this.makeSpecLookahead(action);
     while (lookaheadFunc()) {
       if (gate !== undefined && !gate.call(this)) break;
-      const iterPos = this.currIdx;
+      const iterLexPos = this.exportLexerState();
       const iterErrors = this._errors.length;
       const iterRuleStack = this.RULE_STACK_IDX;
       const cstSave = this.saveCstTop();
@@ -537,7 +540,7 @@ export class RecognizerEngine {
         // the tokens can be consumed by whatever follows AT_LEAST_ONE.
         if (e === SPEC_FAIL || isRecognitionException(e)) {
           this.restoreCstTop(cstSave);
-          this.currIdx = iterPos;
+          this.importLexerState(iterLexPos);
           this._errors.length = iterErrors;
           this.RULE_STACK_IDX = iterRuleStack;
           break;
@@ -545,9 +548,9 @@ export class RecognizerEngine {
         throw e;
       }
       // Stuck guard: body consumed no tokens → restore and stop.
-      if (this.currIdx <= iterPos) {
+      if (this.exportLexerState() <= iterLexPos) {
         this.restoreCstTop(cstSave);
-        this.currIdx = iterPos;
+        this.importLexerState(iterLexPos);
         this._errors.length = iterErrors;
         this.RULE_STACK_IDX = iterRuleStack;
         break;
@@ -592,7 +595,7 @@ export class RecognizerEngine {
 
     // First iteration: mandatory — no IS_SPECULATING, let it throw/recover normally.
     {
-      const firstPos = this.currIdx;
+      const firstLexPos = this.exportLexerState();
       const firstErrors = this._errors.length;
       const firstRuleStack = this.RULE_STACK_IDX;
       const firstCstSave = this.saveCstTop();
@@ -601,7 +604,7 @@ export class RecognizerEngine {
       } catch (e) {
         if (e === SPEC_FAIL || isRecognitionException(e)) {
           this.restoreCstTop(firstCstSave);
-          this.currIdx = firstPos;
+          this.importLexerState(firstLexPos);
           this._errors.length = firstErrors;
           this.RULE_STACK_IDX = firstRuleStack;
           throw this.raiseEarlyExitException(
@@ -682,7 +685,7 @@ export class RecognizerEngine {
 
     while (notStuck) {
       if (gate !== undefined && !gate.call(this)) break;
-      const iterPos = this.currIdx;
+      const iterLexPos = this.exportLexerState();
       const iterErrors = this._errors.length;
       const iterRuleStack = this.RULE_STACK_IDX;
       const cstSave = this.saveCstTop();
@@ -694,7 +697,7 @@ export class RecognizerEngine {
         this.IS_SPECULATING = wasSpeculating;
         if (e === SPEC_FAIL) {
           this.restoreCstTop(cstSave);
-          this.currIdx = iterPos;
+          this.importLexerState(iterLexPos);
           this._errors.length = iterErrors;
           this.RULE_STACK_IDX = iterRuleStack;
           break;
@@ -706,9 +709,9 @@ export class RecognizerEngine {
         throw e;
       }
       // Stuck guard: body consumed no tokens → stop to prevent infinite loops.
-      if (this.currIdx <= iterPos) {
+      if (this.exportLexerState() <= iterLexPos) {
         this.restoreCstTop(cstSave);
-        this.currIdx = iterPos;
+        this.importLexerState(iterLexPos);
         this._errors.length = iterErrors;
         this.RULE_STACK_IDX = iterRuleStack;
         notStuck = false;
@@ -759,7 +762,7 @@ export class RecognizerEngine {
     const separator = options.SEP;
 
     // Optional first iteration — try without IS_SPECULATING.
-    const firstPos = this.currIdx;
+    const firstLexPos = this.exportLexerState();
     const firstErrors = this._errors.length;
     const firstRuleStack = this.RULE_STACK_IDX;
     const firstCstSave = this.saveCstTop();
@@ -768,7 +771,7 @@ export class RecognizerEngine {
     } catch (e) {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
         this.restoreCstTop(firstCstSave);
-        this.currIdx = firstPos;
+        this.importLexerState(firstLexPos);
         this._errors.length = firstErrors;
         this.RULE_STACK_IDX = firstRuleStack;
         return; // zero iterations — MANY_SEP is optional
@@ -776,9 +779,9 @@ export class RecognizerEngine {
       throw e;
     }
     // Stuck guard: first element consumed no tokens → treat as zero iterations.
-    if (this.currIdx <= firstPos) {
+    if (this.exportLexerState() <= firstLexPos) {
       this.restoreCstTop(firstCstSave);
-      this.currIdx = firstPos;
+      this.importLexerState(firstLexPos);
       this._errors.length = firstErrors;
       this.RULE_STACK_IDX = firstRuleStack;
       return;
@@ -821,7 +824,7 @@ export class RecognizerEngine {
     action: GrammarAction<any>,
   ): () => boolean {
     return () => {
-      const savedPos = this.currIdx;
+      const savedLexPos = this.exportLexerState();
       const savedErrors = this._errors.length;
       const savedRuleStack = this.RULE_STACK_IDX;
       const cstSave = this.saveCstTop();
@@ -841,7 +844,7 @@ export class RecognizerEngine {
         this._earlyExitLookahead = false;
         this.IS_SPECULATING = prev;
         this.restoreCstTop(cstSave);
-        this.currIdx = savedPos;
+        this.importLexerState(savedLexPos);
         this._errors.length = savedErrors;
         this.RULE_STACK_IDX = savedRuleStack;
       }
@@ -950,8 +953,28 @@ export class RecognizerEngine {
     const fastMap = this._orFastMaps[mapKey];
     if (fastMap !== undefined) {
       const fastAltIdx = fastMap[la1TypeIdx];
-      if (fastAltIdx !== undefined) {
-        return alts[fastAltIdx].ALT.call(this) as T;
+      // -1 sentinel means LA(1) is known-ambiguous — skip fast path
+      if (fastAltIdx !== undefined && fastAltIdx !== -1) {
+        // Guard with try/catch: for unambiguous grammars (JSON, CSS) the fast
+        // alt always succeeds and the catch never fires. For grammars that are
+        // ambiguous at LL(1), a failure invalidates this cache entry so the
+        // next call falls through to the full speculative loop.
+        const fastLexPos = this.exportLexerState();
+        const fastErrors = this._errors.length;
+        const fastRuleStack = this.RULE_STACK_IDX;
+        const fastCstSave = this.saveCstTop();
+        try {
+          return alts[fastAltIdx].ALT.call(this) as T;
+        } catch (_e) {
+          // Restore and mark as ambiguous so the fast path is never taken for
+          // this LA(1) token again.
+          this.restoreCstTop(fastCstSave);
+          this.importLexerState(fastLexPos);
+          this._errors.length = fastErrors;
+          this.RULE_STACK_IDX = fastRuleStack;
+          fastMap[la1TypeIdx] = -1;
+          // fall through to full speculative loop
+        }
       }
     }
 
@@ -959,12 +982,10 @@ export class RecognizerEngine {
     let bestAltIdx = -1;
     let uniqueBest = false;
 
-    // Capture entry state as plain integers — no object allocation.
-    // CST snapshot is taken once before the loop; it's a no-op when CST
-    // is disabled (EmbeddedActionsParser / outputCst:false).
-    // For alts that fail with progress === 0, state was never mutated,
-    // so we skip restore entirely.
-    const startPos = this.currIdx;
+    // Capture entry state using exportLexerState so custom lexers (e.g.
+    // scannerless parsers that override exportLexerState/importLexerState)
+    // have their state properly saved and restored.
+    const startLexPos = this.exportLexerState();
     const startErrors = this._errors.length;
     const startRuleStack = this.RULE_STACK_IDX;
     const cstSave = this.saveCstTop();
@@ -985,26 +1006,31 @@ export class RecognizerEngine {
             fm = [];
             this._orFastMaps[mapKey] = fm;
           }
-          fm[la1TypeIdx] = i;
+          // If another alt already claimed this LA(1), mark as ambiguous.
+          if (fm[la1TypeIdx] !== undefined && fm[la1TypeIdx] !== i) {
+            fm[la1TypeIdx] = -1;
+          } else {
+            fm[la1TypeIdx] = i;
+          }
         }
         return result;
       } catch (e) {
         this.IS_SPECULATING = wasSpeculating;
         if (e === SPEC_FAIL || isRecognitionException(e)) {
-          const progress = this.currIdx - startPos;
+          const progress = this.exportLexerState() - startLexPos;
           if (progress > bestProgress) {
             bestProgress = progress;
             bestAltIdx = i;
             uniqueBest = true;
           } else if (progress === bestProgress && bestProgress > 0) {
-            // Tie: multiple alts consumed the same number of tokens. Cannot
+            // Tie: multiple alts consumed the same amount. Cannot
             // safely commit to either — raise a proper NoViableAlt instead.
             uniqueBest = false;
           }
           // Only restore if this alt actually consumed tokens.
           if (progress > 0) {
             this.restoreCstTop(cstSave);
-            this.currIdx = startPos;
+            this.importLexerState(startLexPos);
             this._errors.length = startErrors;
             this.RULE_STACK_IDX = startRuleStack;
           }
