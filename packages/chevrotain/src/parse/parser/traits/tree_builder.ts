@@ -263,6 +263,10 @@ export class TreeBuilder {
    * typically 0-3 at an OR/OPTION/MANY decision point.
    */
   saveCstTopImpl(this: MixedInParser): CstTopSave | null {
+    // Stage 3 guards in consumeInternal/cstPostTerminal/cstFinallyStateUpdate
+    // already skip all CST mutations when IS_SPECULATING=true, so the top node
+    // is always unchanged during speculation — nothing to save.
+    if (this.IS_SPECULATING) return null;
     const top = this.CST_STACK[this.CST_STACK.length - 1];
     if (top === undefined) return null;
     const savedChildren: Record<string, any[]> = Object.create(null);

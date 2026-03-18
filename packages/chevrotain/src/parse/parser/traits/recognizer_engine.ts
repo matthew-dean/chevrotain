@@ -415,7 +415,6 @@ export class RecognizerEngine {
 
     const startLexPos = this.exportLexerState();
     const startErrors = this._errors.length;
-    const startRuleStack = this.RULE_STACK_IDX;
     const cstSave = this.saveCstTop();
     try {
       const result = action.call(this);
@@ -428,7 +427,6 @@ export class RecognizerEngine {
         this.restoreCstTop(cstSave);
         this.importLexerState(startLexPos);
         this._errors.length = startErrors;
-        this.RULE_STACK_IDX = startRuleStack;
         return undefined;
       }
       return result;
@@ -437,7 +435,6 @@ export class RecognizerEngine {
         this.restoreCstTop(cstSave);
         this.importLexerState(startLexPos);
         this._errors.length = startErrors;
-        this.RULE_STACK_IDX = startRuleStack;
         return undefined;
       }
       throw e;
@@ -499,7 +496,6 @@ export class RecognizerEngine {
     {
       const firstLexPos = this.exportLexerState();
       const firstErrors = this._errors.length;
-      const firstRuleStack = this.RULE_STACK_IDX;
       const firstCstSave = this.saveCstTop();
       try {
         action.call(this);
@@ -508,7 +504,6 @@ export class RecognizerEngine {
           this.restoreCstTop(firstCstSave);
           this.importLexerState(firstLexPos);
           this._errors.length = firstErrors;
-          this.RULE_STACK_IDX = firstRuleStack;
           throw this.raiseEarlyExitException(
             prodOccurrence,
             PROD_TYPE.REPETITION_MANDATORY,
@@ -529,7 +524,6 @@ export class RecognizerEngine {
       if (gate !== undefined && !gate.call(this)) break;
       const iterLexPos = this.exportLexerState();
       const iterErrors = this._errors.length;
-      const iterRuleStack = this.RULE_STACK_IDX;
       const cstSave = this.saveCstTop();
       try {
         // Run committed — any recovery happens inside the subrule's invokeRuleCatch.
@@ -542,7 +536,6 @@ export class RecognizerEngine {
           this.restoreCstTop(cstSave);
           this.importLexerState(iterLexPos);
           this._errors.length = iterErrors;
-          this.RULE_STACK_IDX = iterRuleStack;
           break;
         }
         throw e;
@@ -552,7 +545,6 @@ export class RecognizerEngine {
         this.restoreCstTop(cstSave);
         this.importLexerState(iterLexPos);
         this._errors.length = iterErrors;
-        this.RULE_STACK_IDX = iterRuleStack;
         break;
       }
     }
@@ -597,7 +589,6 @@ export class RecognizerEngine {
     {
       const firstLexPos = this.exportLexerState();
       const firstErrors = this._errors.length;
-      const firstRuleStack = this.RULE_STACK_IDX;
       const firstCstSave = this.saveCstTop();
       try {
         (action as GrammarAction<OUT>).call(this);
@@ -606,7 +597,6 @@ export class RecognizerEngine {
           this.restoreCstTop(firstCstSave);
           this.importLexerState(firstLexPos);
           this._errors.length = firstErrors;
-          this.RULE_STACK_IDX = firstRuleStack;
           throw this.raiseEarlyExitException(
             prodOccurrence,
             PROD_TYPE.REPETITION_MANDATORY_WITH_SEPARATOR,
@@ -683,12 +673,13 @@ export class RecognizerEngine {
     // lookaheadFunc built lazily on first exit (for recovery pass below)
     let lookaheadFunc: (() => boolean) | undefined;
 
+    // IS_SPECULATING=true skips CST building (Stage 3) and error building, so
+    // no CST save/restore or error-length save/restore is needed here —
+    // only the lexer position requires rollback on SPEC_FAIL.
+    // RULE_STACK_IDX is always self-correcting via ruleFinallyStateUpdate (finally).
     while (notStuck) {
       if (gate !== undefined && !gate.call(this)) break;
       const iterLexPos = this.exportLexerState();
-      const iterErrors = this._errors.length;
-      const iterRuleStack = this.RULE_STACK_IDX;
-      const cstSave = this.saveCstTop();
       this.IS_SPECULATING = true;
       try {
         action.call(this);
@@ -696,24 +687,17 @@ export class RecognizerEngine {
       } catch (e) {
         this.IS_SPECULATING = wasSpeculating;
         if (e === SPEC_FAIL) {
-          this.restoreCstTop(cstSave);
           this.importLexerState(iterLexPos);
-          this._errors.length = iterErrors;
-          this.RULE_STACK_IDX = iterRuleStack;
           break;
         }
         if (isRecognitionException(e as Error)) {
-          this.restoreCstTop(cstSave);
           throw e;
         }
         throw e;
       }
       // Stuck guard: body consumed no tokens → stop to prevent infinite loops.
       if (this.exportLexerState() <= iterLexPos) {
-        this.restoreCstTop(cstSave);
         this.importLexerState(iterLexPos);
-        this._errors.length = iterErrors;
-        this.RULE_STACK_IDX = iterRuleStack;
         notStuck = false;
         break;
       }
@@ -764,7 +748,6 @@ export class RecognizerEngine {
     // Optional first iteration — try without IS_SPECULATING.
     const firstLexPos = this.exportLexerState();
     const firstErrors = this._errors.length;
-    const firstRuleStack = this.RULE_STACK_IDX;
     const firstCstSave = this.saveCstTop();
     try {
       action.call(this);
@@ -773,7 +756,6 @@ export class RecognizerEngine {
         this.restoreCstTop(firstCstSave);
         this.importLexerState(firstLexPos);
         this._errors.length = firstErrors;
-        this.RULE_STACK_IDX = firstRuleStack;
         return; // zero iterations — MANY_SEP is optional
       }
       throw e;
@@ -783,7 +765,6 @@ export class RecognizerEngine {
       this.restoreCstTop(firstCstSave);
       this.importLexerState(firstLexPos);
       this._errors.length = firstErrors;
-      this.RULE_STACK_IDX = firstRuleStack;
       return;
     }
 
@@ -823,11 +804,11 @@ export class RecognizerEngine {
     this: MixedInParser,
     action: GrammarAction<any>,
   ): () => boolean {
+    // IS_SPECULATING=true means CST building and error building are both skipped
+    // (Stage 3), so no CST save/restore or RULE_STACK_IDX save is needed —
+    // only the lexer position requires rollback.
     return () => {
       const savedLexPos = this.exportLexerState();
-      const savedErrors = this._errors.length;
-      const savedRuleStack = this.RULE_STACK_IDX;
-      const cstSave = this.saveCstTop();
       const prev = this.IS_SPECULATING;
       this.IS_SPECULATING = true;
       // _earlyExitLookahead: abort the action after the first successful CONSUME,
@@ -843,10 +824,7 @@ export class RecognizerEngine {
       } finally {
         this._earlyExitLookahead = false;
         this.IS_SPECULATING = prev;
-        this.restoreCstTop(cstSave);
         this.importLexerState(savedLexPos);
-        this._errors.length = savedErrors;
-        this.RULE_STACK_IDX = savedRuleStack;
       }
     };
   }
@@ -960,20 +938,29 @@ export class RecognizerEngine {
         // ambiguous at LL(1), a failure invalidates this cache entry so the
         // next call falls through to the full speculative loop.
         const fastLexPos = this.exportLexerState();
-        const fastErrors = this._errors.length;
-        const fastRuleStack = this.RULE_STACK_IDX;
-        const fastCstSave = this.saveCstTop();
-        try {
-          return alts[fastAltIdx].ALT.call(this) as T;
-        } catch (_e) {
-          // Restore and mark as ambiguous so the fast path is never taken for
-          // this LA(1) token again.
-          this.restoreCstTop(fastCstSave);
-          this.importLexerState(fastLexPos);
-          this._errors.length = fastErrors;
-          this.RULE_STACK_IDX = fastRuleStack;
-          fastMap[la1TypeIdx] = -1;
-          // fall through to full speculative loop
+        if (wasSpeculating) {
+          // IS_SPECULATING is already true: Stage 3 skips CST and error building,
+          // so only the lexer position needs save/restore on failure.
+          try {
+            return alts[fastAltIdx].ALT.call(this) as T;
+          } catch (_e) {
+            this.importLexerState(fastLexPos);
+            fastMap[la1TypeIdx] = -1;
+            // fall through to full speculative loop
+          }
+        } else {
+          // IS_SPECULATING is false: alt runs committed — save CST and errors.
+          const fastErrors = this._errors.length;
+          const fastCstSave = this.saveCstTop();
+          try {
+            return alts[fastAltIdx].ALT.call(this) as T;
+          } catch (_e) {
+            this.restoreCstTop(fastCstSave);
+            this.importLexerState(fastLexPos);
+            this._errors.length = fastErrors;
+            fastMap[la1TypeIdx] = -1;
+            // fall through to full speculative loop
+          }
         }
       }
     }
@@ -982,13 +969,12 @@ export class RecognizerEngine {
     let bestAltIdx = -1;
     let uniqueBest = false;
 
-    // Capture entry state using exportLexerState so custom lexers (e.g.
-    // scannerless parsers that override exportLexerState/importLexerState)
-    // have their state properly saved and restored.
+    // Capture entry lexer state so custom lexers (e.g. scannerless parsers
+    // that override exportLexerState/importLexerState) are handled correctly.
+    // IS_SPECULATING=true skips CST mutations and error building (Stage 3), so
+    // only the lexer position needs save/restore between alts.
+    // RULE_STACK_IDX is self-correcting via ruleFinallyStateUpdate (finally).
     const startLexPos = this.exportLexerState();
-    const startErrors = this._errors.length;
-    const startRuleStack = this.RULE_STACK_IDX;
-    const cstSave = this.saveCstTop();
 
     for (let i = 0; i < alts.length; i++) {
       const alt = alts[i];
@@ -1027,12 +1013,9 @@ export class RecognizerEngine {
             // safely commit to either — raise a proper NoViableAlt instead.
             uniqueBest = false;
           }
-          // Only restore if this alt actually consumed tokens.
+          // Only restore lexer position if this alt actually consumed tokens.
           if (progress > 0) {
-            this.restoreCstTop(cstSave);
             this.importLexerState(startLexPos);
-            this._errors.length = startErrors;
-            this.RULE_STACK_IDX = startRuleStack;
           }
           // continue to next alternative
         } else {
