@@ -618,19 +618,17 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       expect(parser.topRule()).to.equal("alt1");
       expect(parser.errors).to.be.empty;
 
-      // Verify both alts are in the fast-path candidate list for token A
-      const fastCandidates = (parser as any)._orFastCandidates ?? {};
-      const mapKeys = Object.keys(fastCandidates);
+      // Verify that both alts are recorded for token A's tokenTypeIdx.
+      // With the direct map, two alts matching the same tokenTypeIdx → ambiguous (-1).
+      const fastMaps = (parser as any)._orFastMaps ?? {};
+      const mapKeys = Object.keys(fastMaps);
       expect(mapKeys.length).to.be.greaterThan(0);
-      const candidates = fastCandidates[mapKeys[0]];
-      expect(candidates).to.be.an("array");
-      expect(candidates).to.include(
-        0,
-        "alt 0 should be cached (failed with progress)",
+      const map = fastMaps[mapKeys[0]];
+      const aTypeIdx = (A as any).tokenTypeIdx;
+      expect(map[aTypeIdx]).to.equal(
+        -1,
+        "both alts match token A → ambiguous entry (-1)",
       );
-      expect(candidates).to.include(1, "alt 1 should be cached (succeeded)");
-      // Candidates should be sorted by declaration order
-      expect(candidates).to.deep.equal([0, 1]);
 
       // Parse 2: input [A, B] → fast path finds both candidates,
       //          tries alt 0 first → succeeds
@@ -686,25 +684,22 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       expect(parser.topRule()).to.equal("if");
       expect(parser.errors).to.be.empty;
 
-      // Parse 2 (same token): triggers fast path, populates _orFirstTokenInfoCache
+      // Parse 2 (same token): hits fast path via direct map
       parser.input = [createRegularToken(IfKeyword, "if")];
       expect(parser.topRule()).to.equal("if");
       expect(parser.errors).to.be.empty;
 
-      // Verify first-token info marks Keyword as category (fast path will filter by it)
-      const fastCandidates = (parser as any)._orFastCandidates ?? {};
-      const firstTokenInfo = (parser as any)._orFirstTokenInfoCache ?? {};
-      const mapKeys = Object.keys(fastCandidates);
+      // Verify the fast map has IfKeyword's tokenTypeIdx mapped to alt 0
+      const fastMaps = (parser as any)._orFastMaps ?? {};
+      const mapKeys = Object.keys(fastMaps);
       expect(mapKeys.length).to.be.greaterThan(0);
       const mapKey = mapKeys[0];
-      const infoArr = firstTokenInfo[mapKey];
-      expect(infoArr).to.be.an("array");
-      expect(infoArr![0].isCategory).to.be.true;
-      expect(infoArr![0].tokenType).to.equal(Keyword);
+      const map = fastMaps[mapKey];
+      expect(map[(IfKeyword as any).tokenTypeIdx]).to.equal(0);
 
-      // Parse 3: ElseKeyword (different token, same category) → should hit fast path
-      // Before fix: we'd have no candidate for ElseKeyword.tokenTypeIdx, slow loop.
-      // After fix: tokenMatcher(ElseKeyword, Keyword) = true, fast path.
+      // Parse 3: ElseKeyword (different token, same category) → first time
+      // hits the slow path which records ElseKeyword.tokenTypeIdx → alt 0.
+      // After that, fast path handles it directly.
       parser.input = [createRegularToken(ElseKeyword, "else")];
       expect(parser.topRule()).to.equal("else");
       expect(parser.errors).to.be.empty;
@@ -996,20 +991,20 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       // The simplest behavioral proof: a third parse with different inner
       // gate state but same outer input still picks outer alt 0 without
       // hitting the slow loop. We can't directly observe fast vs slow, but
-      // we can verify outer alt 0 is in _orFastCandidates (token-cached).
-      const fastCandidates = (parser as any)._orFastCandidates ?? {};
+      // we can verify outer alt 0 is in _orFastMaps (token-cached).
+      const fastMaps = (parser as any)._orFastMaps ?? {};
       const gatedPrefixAlts = (parser as any)._orGatedPrefixAlts ?? {};
 
-      // Find outer OR's mapKey: the outer OR has 2 alts; we only observed
-      // alt 0 (SUBRULE) when parsing [A], so candidates = [0]. The inner OR
-      // has gated-prefix alts (alt 0 has gated OPTION). So the outer OR is
-      // the one with candidates including 0 and no gated-prefix alts.
+      // Find outer OR's mapKey: the outer OR observed alt 0 (SUBRULE) with
+      // LA(1)=A, so fastMaps has A.tokenTypeIdx → 0. The inner OR has
+      // gated-prefix alts. So the outer OR is the one whose map has an entry
+      // for A.tokenTypeIdx and has no gated-prefix alts.
       let outerMapKey: string | undefined;
-      for (const key of Object.keys(fastCandidates)) {
-        const candidates = fastCandidates[key];
+      for (const key of Object.keys(fastMaps)) {
+        const map = fastMaps[key];
         if (
-          candidates !== undefined &&
-          candidates.includes(0) &&
+          map !== undefined &&
+          map[(A as any).tokenTypeIdx] === 0 &&
           gatedPrefixAlts[key] === undefined
         ) {
           outerMapKey = key;

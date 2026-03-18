@@ -29,9 +29,9 @@
   "types": "./chevrotain.d.ts",
   "exports": {
     ".": {
+      "types": "./chevrotain.d.ts",
       "import": "./lib/src/api.js",
-      "require": "./lib/src/api.js",
-      "types": "./chevrotain.d.ts"
+      "require": "./lib/src/api.js"
     }
   },
   "files": [

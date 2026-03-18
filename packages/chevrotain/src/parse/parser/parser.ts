@@ -260,6 +260,9 @@ export class Parser {
     if (Object.keys(this.gastProductionsCache).length > 0) {
       return;
     }
+    // Must run before any recording-phase manipulation of `this` —
+    // same as performSelfAnalysis(). Without it the parser is 3-4x slower.
+    toFastProperties(this);
     try {
       this.enableRecording();
       this.definedRulesNames.forEach((currRuleName: string) => {

@@ -30,7 +30,7 @@ import {
   MismatchedTokenException,
   NotAllInputParsedException,
 } from "../../exceptions_public.js";
-import { getOrFirstTokenInfo, PROD_TYPE } from "../../grammar/lookahead.js";
+import { PROD_TYPE } from "../../grammar/lookahead.js";
 import {
   AbstractNextTerminalAfterProductionWalker,
   NextTerminalAfterAtLeastOneSepWalker,
@@ -60,38 +60,45 @@ import { ParserMethodInternal } from "../types.js";
 export const SPEC_FAIL = Symbol("SPEC_FAIL");
 
 /**
- * Records alt index `altIdx` as a fast-path candidate for the given mapKey.
- * The candidate list is filtered at lookup by exact tokenTypeIdx or category
- * (tokenMatcher) depending on what the first CONSUME in that alt expects.
- * Also includes any preceding gated alts whose gates may have been closed
- * when the slow loop ran — they could match this token when gates open later.
- * The candidate list is kept sorted by alt index (declaration order = priority).
+ * Records that `altIdx` matched when LA(1) had `tokenTypeIdx` for the OR
+ * site identified by `mapKey`. Populates the direct tokenTypeIdx→altIdx
+ * fast-dispatch map. If two different alts match the same tokenTypeIdx,
+ * marks the entry as ambiguous (-1) so the fast path falls through to
+ * the full speculative loop.
  */
-function addOrCandidate(
-  orFastCandidates: Record<number, number[]>,
+/**
+ * Records that `altIdx` matched when LA(1) had `tokenTypeIdx` for the OR
+ * site identified by `mapKey`. Populates the direct tokenTypeIdx→altIdx
+ * fast-dispatch map. If two different alts match the same tokenTypeIdx,
+ * or if a preceding alt has an OR-level GATE (priority must be resolved
+ * by the slow path), marks the entry as ambiguous (-1).
+ */
+function addOrFastMapEntry(
+  orFastMaps: Record<number, Record<number, number>>,
   mapKey: number,
+  tokenTypeIdx: number,
   altIdx: number,
   alts: IOrAlt<any>[],
 ): void {
-  let list = orFastCandidates[mapKey];
-  if (list === undefined) {
-    list = [];
-    orFastCandidates[mapKey] = list;
+  let map = orFastMaps[mapKey];
+  if (map === undefined) {
+    map = Object.create(null);
+    orFastMaps[mapKey] = map;
   }
-  // Include preceding gated alts: their gates were closed when the slow
-  // loop ran, but they could match this token when gates open later.
+  // If any preceding alt has a GATE, gate priority must be resolved by
+  // the slow path — mark as ambiguous. For gate-free grammars (JSON, CSS)
+  // this loop body never executes.
   for (let g = 0; g < altIdx; g++) {
-    if (alts[g].GATE !== undefined && !list.includes(g)) {
-      list.push(g);
+    if (alts[g].GATE !== undefined) {
+      map[tokenTypeIdx] = -1;
+      return;
     }
   }
-  if (!list.includes(altIdx)) {
-    list.push(altIdx);
-  }
-  // Keep sorted by declaration order so the fast path tries candidates
-  // in priority order.
-  if (list.length > 1) {
-    list.sort((a, b) => a - b);
+  const existing = map[tokenTypeIdx];
+  if (existing === undefined) {
+    map[tokenTypeIdx] = altIdx;
+  } else if (existing !== altIdx && existing >= 0) {
+    map[tokenTypeIdx] = -1; // ambiguous
   }
 }
 
@@ -144,19 +151,15 @@ export class RecognizerEngine {
   // Updated on rule entry/exit and state reload.
   currRuleShortName: number;
   /**
-   * Lazy LL(1) fast-path candidates, keyed by `currRuleShortName | occurrence`.
-   * Each entry is an array of alt indices we've observed to match. Filtered at
-   * lookup by exact tokenTypeIdx or category (tokenMatcher) per alt.
+   * Lazy LL(1) fast-dispatch map, keyed by `currRuleShortName | occurrence`.
+   * Inner key is `tokenTypeIdx` of the LA(1) token → alt index that matched.
+   * Built from observations in the slow path. Direct O(1) lookup, no
+   * allocation on the hot path.
+   *
+   * A value of `-1` means ambiguous (multiple alts observed for this
+   * tokenTypeIdx) — fall through to the slow path.
    */
-  _orFastCandidates: Record<number, number[]>;
-  /**
-   * Cached first-token info per OR alt: tokenType and isCategory (exact vs
-   * bitset). Populated from GAST when first needed for a mapKey.
-   */
-  _orFirstTokenInfoCache: Record<
-    number,
-    { tokenType: TokenType | undefined; isCategory: boolean }[]
-  >;
+  _orFastMaps: Record<number, Record<number, number>>;
   /**
    * Per-OR set of alt indices whose first-token set is gate-dependent
    * (they have a gated OPTION/MANY/AT_LEAST_ONE before their first CONSUME).
@@ -193,8 +196,7 @@ export class RecognizerEngine {
     this.IS_SPECULATING = false;
     this._isInTrueBacktrack = false;
     this._earlyExitLookahead = false;
-    this._orFastCandidates = Object.create(null);
-    this._orFirstTokenInfoCache = Object.create(null);
+    this._orFastMaps = Object.create(null);
     this._orGatedPrefixAlts = Object.create(null);
     this._orAltStartLexPos = 0;
     this._orAltHasGatedPrefix = false;
@@ -995,95 +997,83 @@ export class RecognizerEngine {
     const savedAltHasGatedPrefix = this._orAltHasGatedPrefix;
 
     // -----------------------------------------------------------------------
-    // Fast-dispatch path — LL(1) candidate filter, populated lazily.
+    // Fast-dispatch path — direct tokenTypeIdx→altIdx map, zero allocation.
     //
-    // `_orFastCandidates[mapKey]` holds alt indices we've observed to match.
-    // Filtered at lookup by exact tokenTypeIdx or category (tokenMatcher)
-    // depending on what the first CONSUME in each alt expects.
+    // `_orFastMaps[mapKey][la1.tokenTypeIdx]` gives the alt index observed to
+    // match this LA(1) token. Built lazily from slow-path observations.
+    // For gate-free, unambiguous LL(1) grammars (e.g. JSON) this is the
+    // hottest path: one property lookup → committed ALT call.
     //
-    // Gates further restrict the candidate list: each candidate's GATE
-    // (if any) is checked, and the first candidate whose gate passes is
-    // tried committed (no speculation overhead). For gate-free, unambiguous
-    // LL(1) grammars (e.g. JSON, CSS) the candidate list is always length 1
-    // and there are no gates to check — this is the fastest path.
-    //
-    // If no candidate succeeds (rare: LL(1)-ambiguous grammar, or all gates
-    // closed), we fall through to the full speculative loop below.
+    // Gated-prefix alts (gate-dependent first-token set) are checked
+    // separately via `_orGatedPrefixAlts` — they must always be speculated.
     // -----------------------------------------------------------------------
     const la1 = this.LA_FAST(1);
+    const la1TypeIdx = la1.tokenTypeIdx;
     const mapKey = this.currRuleShortName | occurrence;
-    const rawCandidates = this._orFastCandidates[mapKey];
+    const fastMap = this._orFastMaps[mapKey];
     const gatedPrefixAlts = this._orGatedPrefixAlts[mapKey];
-    let firstTokenInfo = this._orFirstTokenInfoCache[mapKey];
-    if (firstTokenInfo === undefined && rawCandidates !== undefined) {
-      const ruleName = this.shortRuleNameToFull[this.currRuleShortName];
-      const rule =
-        ruleName !== undefined
-          ? this.gastProductionsCache[ruleName]
-          : undefined;
-      if (rule !== undefined) {
-        firstTokenInfo = getOrFirstTokenInfo(rule, occurrence);
-        this._orFirstTokenInfoCache[mapKey] = firstTokenInfo;
-      }
-    }
-    const candidates =
-      rawCandidates !== undefined && firstTokenInfo !== undefined
-        ? rawCandidates.filter((altIdx) => {
-            const info = firstTokenInfo![altIdx];
-            if (info === undefined || info.tokenType === undefined)
-              return false;
-            return this.tokenMatcher(la1, info.tokenType);
-          })
-        : undefined;
-    if (
-      (candidates !== undefined && candidates.length > 0) ||
-      gatedPrefixAlts !== undefined
-    ) {
-      // Merge token-based candidates with gated-prefix alts (which must
-      // always be speculated regardless of LA(1)). Iterate in declaration
-      // order to respect priority.
-      const maxAlt = alts.length;
-      let cIdx = 0;
-      let gIdx = 0;
-      for (let altIdx = 0; altIdx < maxAlt; altIdx++) {
-        const inCandidates =
-          candidates !== undefined &&
-          cIdx < candidates.length &&
-          candidates[cIdx] === altIdx;
-        const inGated =
-          gatedPrefixAlts !== undefined &&
-          gIdx < gatedPrefixAlts.length &&
-          gatedPrefixAlts[gIdx] === altIdx;
-        if (inCandidates) cIdx++;
-        if (inGated) gIdx++;
-        if (!inCandidates && !inGated) continue;
+    if (fastMap !== undefined || gatedPrefixAlts !== undefined) {
+      const fastAltIdx =
+        fastMap !== undefined ? fastMap[la1TypeIdx] : undefined;
 
-        const alt = alts[altIdx];
-        // Gates restrict: if this alt has an OR-level gate and it fails, skip.
-        if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
-
-        // Try this candidate. On failure, restore and continue.
-        const fastLexPos = this.exportLexerState();
-        if (wasSpeculating) {
-          try {
-            return alt.ALT.call(this) as T;
-          } catch (_e) {
-            this.importLexerState(fastLexPos);
-          }
-        } else {
-          const fastErrors = this._errors.length;
-          const fastCstSave = this.saveCstTop();
-          try {
-            return alt.ALT.call(this) as T;
-          } catch (_e) {
-            this.restoreCstTop(fastCstSave);
-            this.importLexerState(fastLexPos);
-            this._errors.length = fastErrors;
+      // Direct dispatch: single unambiguous candidate for this tokenTypeIdx.
+      if (
+        fastAltIdx !== undefined &&
+        fastAltIdx >= 0 &&
+        (gatedPrefixAlts === undefined ||
+          !gatedPrefixAlts.some((g) => g < fastAltIdx))
+      ) {
+        const alt = alts[fastAltIdx];
+        if (alt.GATE === undefined || alt.GATE.call(this)) {
+          const fastLexPos = this.currIdx;
+          if (wasSpeculating) {
+            try {
+              return alt.ALT.call(this) as T;
+            } catch (_e) {
+              this.currIdx = fastLexPos;
+            }
+          } else {
+            const fastErrors = this._errors.length;
+            const fastCstSave = this.saveCstTop();
+            try {
+              return alt.ALT.call(this) as T;
+            } catch (_e) {
+              this.restoreCstTop(fastCstSave);
+              this.currIdx = fastLexPos;
+              this._errors.length = fastErrors;
+            }
           }
         }
       }
-      // All candidates failed or were gated out — fall through to full
-      // speculative loop (there may be alts not yet observed for this LA(1)).
+
+      // Gated-prefix alts must always be tried when present — they cannot
+      // be cached by LA(1) alone. Try each speculatively.
+      if (gatedPrefixAlts !== undefined) {
+        for (let gIdx = 0; gIdx < gatedPrefixAlts.length; gIdx++) {
+          const altIdx = gatedPrefixAlts[gIdx];
+          const alt = alts[altIdx];
+          if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
+          const fastLexPos = this.currIdx;
+          if (wasSpeculating) {
+            try {
+              return alt.ALT.call(this) as T;
+            } catch (_e) {
+              this.currIdx = fastLexPos;
+            }
+          } else {
+            const fastErrors = this._errors.length;
+            const fastCstSave = this.saveCstTop();
+            try {
+              return alt.ALT.call(this) as T;
+            } catch (_e) {
+              this.restoreCstTop(fastCstSave);
+              this.currIdx = fastLexPos;
+              this._errors.length = fastErrors;
+            }
+          }
+        }
+      }
+      // Fast path exhausted — fall through to full speculative loop.
     }
 
     let bestProgress = -1;
@@ -1122,7 +1112,7 @@ export class RecognizerEngine {
             if (gpa.length > 1) gpa.sort((a, b) => a - b);
           }
         } else {
-          addOrCandidate(this._orFastCandidates, mapKey, i, alts);
+          addOrFastMapEntry(this._orFastMaps, mapKey, la1TypeIdx, i, alts);
         }
         this._orAltStartLexPos = savedAltStartLexPos;
         this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
@@ -1148,7 +1138,7 @@ export class RecognizerEngine {
               if (gpa.length > 1) gpa.sort((a, b) => a - b);
             }
           } else if (progress > 0) {
-            addOrCandidate(this._orFastCandidates, mapKey, i, alts);
+            addOrFastMapEntry(this._orFastMaps, mapKey, la1TypeIdx, i, alts);
           }
           if (progress > 0) {
             this.importLexerState(startLexPos);

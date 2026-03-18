@@ -70,7 +70,11 @@ exactly. The `Lexer` is improved but its interface is unchanged.
   - ✅ All DSL methods in `recognizer_api.ts` check `this.RECORDING_PHASE` and route to `*InternalRecord` methods
   - ✅ `enableRecording()` simplified to `this.RECORDING_PHASE = true` (no instance method assignment loop)
   - ✅ `disableRecording()` simplified to `this.RECORDING_PHASE = false` (no `delete` loop — eliminates ~80 hidden-class transitions)
-- ⬜ Stage 6 — Flatten mixin architecture
+- ✅ Stage 6 — Make `performSelfAnalysis()` optional (lazy init on first `input` set or GAST API call)
+  - ✅ `ensureGastProductionsCachePopulated()` runs recording + validation lazily when cache is empty
+  - ✅ `input` setter calls `ensureGastProductionsCachePopulated()` instead of throwing when `selfAnalysisDone=false`
+  - ✅ `getGAstProductions()` / `getSerializedGastProductions()` lazy-populate before returning
+  - ✅ `toFastProperties(this)` called in lazy path before recording (matches explicit `performSelfAnalysis()`)
 - ⬜ Stage 7 — Flatten mixin architecture
 
 ---
@@ -695,7 +699,58 @@ Implementation:
 
 ---
 
-### Stage 5 — performSelfAnalysis optional (not required)
+### Stage 5 — Recording phase: eliminate hidden-class pollution
+
+**Goal:** `enableRecording()` / `disableRecording()` no longer add or delete
+instance methods on the parser object. This eliminates ~80 hidden-class
+transitions that occur during every `performSelfAnalysis()` call.
+
+#### What changed
+
+**RECORDING_PHASE guards in prototype methods:**
+
+Every DSL method in `recognizer_api.ts` (`CONSUME`, `CONSUME1`–`CONSUME9`,
+`OR`, `OR1`–`OR9`, `MANY`, `OPTION`, `AT_LEAST_ONE`, `SUBRULE`, their
+`_SEP` variants, `ACTION`, `BACKTRACK`, and lowercase generics) now checks
+`this.RECORDING_PHASE` at the top and routes to the corresponding
+`*InternalRecord` method:
+
+```ts
+CONSUME(this: MixedInParser, tokType: TokenType, options?: ConsumeMethodOpts): IToken {
+  if (this.RECORDING_PHASE) return this.consumeInternalRecord(tokType, 0, options);
+  return this.consumeInternal(tokType, 0, options);
+}
+```
+
+The `RECORDING_PHASE` branch is never taken during normal parsing. V8 JIT
+profiles it as "never-taken" and folds it away after warmup — zero cost on
+the hot path.
+
+**Simplified `enableRecording` / `disableRecording`:**
+
+```ts
+enableRecording(this: MixedInParser): void {
+  this.RECORDING_PHASE = true;
+}
+disableRecording(this: MixedInParser) {
+  this.RECORDING_PHASE = false;
+}
+```
+
+The loop that added ~80 instance properties (shadowing prototype methods)
+and the corresponding `delete` loop are both removed. The parser object's
+V8 hidden class is now stable across recording.
+
+#### Exit criteria
+
+- `enableRecording()` / `disableRecording()` do not add or delete instance
+  properties.
+- All existing GAST recording tests pass unchanged.
+- Parser object hidden class is identical before and after recording.
+
+---
+
+### Stage 6 — performSelfAnalysis optional (not required)
 
 **Goal:** `performSelfAnalysis()` is **optional** instead of required. If called,
 it runs recording and validation. If not called, the first use (set `input` or
@@ -734,7 +789,7 @@ call GAST APIs) runs the work lazily — do not fail.
 
 ---
 
-### Stage 6 — Flatten mixin architecture
+### Stage 7 — Flatten mixin architecture
 
 **Goal:** Replace `applyMixins` composition with a direct class hierarchy.
 Clean up the call graph for V8's inliner.
@@ -774,7 +829,7 @@ Clean up the call graph for V8's inliner.
 
 ---
 
-### Stage 7 — Benchmarks
+### Stage 8 — Benchmarks
 
 **Goal:** Quantify all gains with the existing benchmark infrastructure.
 
@@ -896,16 +951,16 @@ Exits: Stage 0 exit criteria — all existing tests pass.
 Stage 0 (token/IToken shapes)  ← prerequisite for everything
   └─ Stage 1 (SPEC_FAIL + saveRecogState)
        └─ Stage 2 (speculative OR)
-            └─ Stage 3 (numbered variant aliases)
-                 ├─ Stage 4 (runtime CST + CST allocation fixes)
-                 │    └─ Stage 5 (performSelfAnalysis + lazy GAST fallback)
-                 │         └─ Stage 6 (flatten mixins)
-                 └─ Stage 7 (benchmarks)  ← can start after Stage 2
+            └─ Stage 3 (skip GAST traversal during speculation)
+                 ├─ Stage 4a/4b/4c (OR fast-dispatch + CST watermark + allocation fixes)
+                 │    └─ Stage 5 (recording phase hidden-class fix)
+                 │         └─ Stage 6 (performSelfAnalysis optional)
+                 │              └─ Stage 7 (flatten mixins)
+                 └─ Stage 8 (benchmarks)  ← can start after Stage 2
 ```
 
-Stages 4 and 5 can be developed in parallel once Stage 3 is done.
-Stage 7 can begin as soon as Stage 2 is complete — early benchmark data is
-useful for motivating Stages 4–6.
+Stage 8 can begin as soon as Stage 2 is complete — early benchmark data is
+useful for motivating later stages.
 
 ---
 
@@ -916,13 +971,13 @@ useful for motivating Stages 4–6.
 | `src/scan/tokens_public.ts`                    | `createToken()` factory         | 0       |
 | `src/scan/tokens.ts`                           | `augmentTokenTypes()`, matching | 0       |
 | `src/scan/lexer_public.ts`                     | Lexer, IToken factories         | 0       |
-| `src/parse/parser/traits/recognizer_engine.ts` | Core engine — primary target    | 1, 2, 6 |
+| `src/parse/parser/traits/recognizer_engine.ts` | Core engine — primary target    | 1, 2, 7 |
 | `src/parse/parser/traits/looksahead.ts`        | Lookahead cache — deleted       | 2       |
-| `src/parse/parser/traits/recognizer_api.ts`    | DSL API surface                 | 3       |
-| `src/parse/parser/traits/tree_builder.ts`      | CST construction                | 4       |
-| `src/parse/cst/cst.ts`                         | CST helpers                     | 4       |
+| `src/parse/parser/traits/recognizer_api.ts`    | DSL API surface                 | 3, 5    |
+| `src/parse/parser/traits/tree_builder.ts`      | CST construction                | 4b, 4c  |
+| `src/parse/cst/cst.ts`                         | CST helpers                     | 4b, 4c  |
 | `src/parse/parser/traits/gast_recorder.ts`     | Recording phase                 | 5       |
-| `src/parse/parser/utils/apply_mixins.ts`       | Mixin system — deleted          | 6       |
-| `src/parse/parser/parser.ts`                   | Parser base + trait composition | 6       |
-| `benchmark_web/lib/bench_logic.js`             | Benchmark runner                | 7       |
+| `src/parse/parser/parser.ts`                   | Parser base + trait composition | 6, 7    |
+| `src/parse/parser/utils/apply_mixins.ts`       | Mixin system — deleted          | 7       |
+| `benchmark_web/lib/bench_logic.js`             | Benchmark runner                | 8       |
 | `packages/types/api.d.ts`                      | Public types — unchanged        | —       |
