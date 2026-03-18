@@ -63,7 +63,7 @@ export const SPEC_FAIL = Symbol("SPEC_FAIL");
 // correct but preceding gated alts must be checked first. Decoding is just
 // `entry - GATED_OFFSET`. For gate-free grammars all entries are 0-255 so
 // the check `>= GATED_OFFSET` is a single integer comparison — zero cost.
-const GATED_OFFSET = 256;
+export const GATED_OFFSET = 256;
 
 /**
  * Records that `altIdx` matched when LA(1) had `tokenTypeIdx`. When a
@@ -834,18 +834,23 @@ export class RecognizerEngine {
       // Reset counter for this iteration to match GAST recording.
       this._dslCounter = savedRepDslCounter;
       const iterLexPos = this.exportLexerState();
+      const iterErrors = this._errors.length;
+      const iterCstSave = this.saveCstTop();
       this.IS_SPECULATING = true;
       try {
         action.call(this);
         this.IS_SPECULATING = wasSpeculating;
       } catch (e) {
         this.IS_SPECULATING = wasSpeculating;
-        if (e === SPEC_FAIL) {
+        if (e === SPEC_FAIL || isRecognitionException(e as Error)) {
+          // Restore full state and exit the loop, exactly like
+          // @jesscss/parser. This enables deep backtracking — a MANY body
+          // that fails partway through (e.g., qualifiedRule consuming a
+          // selector then failing on CONSUME(RCurly)) is unwound cleanly.
           this.importLexerState(iterLexPos);
+          this.restoreCstTop(iterCstSave);
+          this._errors.length = iterErrors;
           break;
-        }
-        if (isRecognitionException(e as Error)) {
-          throw e;
         }
         throw e;
       }
