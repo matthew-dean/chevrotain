@@ -5,6 +5,7 @@
  *   node benchmark.mjs                        # our local build
  *   node benchmark.mjs --lib <path>           # compare a different build
  *   node benchmark.mjs --parser json|css      # select parser (default: all)
+ *   node benchmark.mjs --cst                  # use CstParser (default: EmbeddedActionsParser)
  *   node benchmark.mjs --iterations 5000      # override iteration count
  *
  * To compare against the published npm version:
@@ -32,6 +33,7 @@ const libPath = getArg(
 );
 const mode = getArg("--mode", "warm"); // "warm" | "cold" | "first-parse" | "construction" | "all"
 const selectedParser = getArg("--parser", "all");
+const useCst = args.includes("--cst");
 const ITERATIONS = parseInt(getArg("--iterations", "5000"), 10);
 const WARMUP = Math.max(100, Math.floor(ITERATIONS * 0.1));
 
@@ -44,7 +46,9 @@ const libUrl =
     : pathToFileURL(path.resolve(process.cwd(), libPath)).href;
 
 const chevrotain = await import(libUrl);
-const { createToken, Lexer, EmbeddedActionsParser } = chevrotain;
+const { createToken, Lexer, EmbeddedActionsParser, CstParser } = chevrotain;
+const ParserBase = useCst ? CstParser : EmbeddedActionsParser;
+const parserConfig = useCst ? {} : { outputCst: false };
 
 // ---------------------------------------------------------------------------
 // JSON parser
@@ -90,9 +94,9 @@ function makeJsonParser() {
 
   const lexer = new Lexer(jsonTokens, { positionTracking: "onlyOffset" });
 
-  class JsonParser extends EmbeddedActionsParser {
+  class JsonParser extends ParserBase {
     constructor() {
-      super(jsonTokens, { outputCst: false });
+      super(jsonTokens, parserConfig);
 
       const $ = this;
 
@@ -239,9 +243,9 @@ function makeCssParser() {
 
   const lexer = new Lexer(cssTokens, { positionTracking: "onlyOffset" });
 
-  class CssParser extends EmbeddedActionsParser {
+  class CssParser extends ParserBase {
     constructor() {
-      super(cssTokens, { outputCst: false });
+      super(cssTokens, parserConfig);
       const $ = this;
 
       $.RULE("stylesheet", () => {
@@ -377,6 +381,7 @@ if (selectedParser === "all" || selectedParser === "css")
 
 console.log(`\nChevrotain parser benchmark`);
 console.log(`  lib:        ${libUrl}`);
+console.log(`  parser type: ${useCst ? "CstParser" : "EmbeddedActionsParser"}`);
 console.log(`  mode:       ${mode}`);
 console.log(
   `  iterations: ${ITERATIONS.toLocaleString()} (+ ${WARMUP.toLocaleString()} warmup)`,

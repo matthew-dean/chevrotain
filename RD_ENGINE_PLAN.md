@@ -7,10 +7,43 @@ exactly. The `Lexer` is improved but its interface is unchanged.
 ## Stage Checklist
 
 - ✅ Stage 0 — Token/IToken hidden-class shapes, JSDoc, MATCH_SET bitset
+  - ✅ `createToken()` pre-declares all fields with sentinel values (one hidden class from birth)
+  - ✅ `MATCH_SET` (Uint32Array bitset) replaces `categoryMatches` + `categoryMatchesMap`
+  - ✅ `tokenStructuredMatcher` uses bitwise AND instead of object property lookup
+  - ✅ `augmentTokenTypes()` overwrites sentinels instead of adding new properties
+  - ✅ Single `IToken` factory replaces three position-tracking variants
+  - ✅ `isInsertedInRecovery` pre-declared as `false` (no post-hoc property addition)
+  - ✅ Lexer `cloneEmptyGroups` replaced with reset-by-truncation
 - ✅ Stage 1 — `SPEC_FAIL` symbol, `IS_SPECULATING` boolean, `IParserSavepoint` (3-int savepoint)
+  - ✅ `SPEC_FAIL` symbol replaces `Error`-based backtracking (no `captureStackTrace`)
+  - ✅ `IS_SPECULATING` boolean replaces `isBackTrackingStack: boolean[]`
+  - ✅ `saveRecogState()` returns 3 integers instead of cloning arrays
+  - ✅ `consumeInternal()` throws `SPEC_FAIL` instead of `new MismatchedTokenException` when speculating
+  - ✅ `flattenFollowSet()` returns `Set` instead of triple-allocation `.map().flat()`
+  - ✅ `findReSyncTokenType()` uses `Set.has()` instead of `.find()`
 - ✅ Stage 2 — Replace LL(k) precomputed lookahead with speculative backtracking engine
+  - ✅ `orInternal()` tries alternatives speculatively with SPEC_FAIL
+  - ✅ `manyInternal()`, `optionInternal()`, `atLeastOneInternal()` use speculative pattern
+  - ✅ `preComputeLookaheadFunctions()` deleted
+  - ✅ `lookAheadFuncsCache` and key-encoding utilities deleted
+  - ✅ `LLkLookaheadStrategy` kept as deprecated no-op stub
 - ✅ Stage 3 — Skip GAST traversal in `raiseNoAltException`/`raiseEarlyExitException` when `IS_SPECULATING=true`
-- ⬜ Stage 4 — Benchmark (CSS / JSON / ES5); measure speedup vs LL(k) baseline
+  - ✅ GAST traversal skipped in error-building paths during speculation
+- ✅ Stage 4a — Eliminate savepoint objects and add lazy LL(1) fast-dispatch for OR
+  - ✅ `orInternal()` saves state as plain integer locals (no savepoint object allocation)
+  - ✅ `_orFastMaps` lazy LL(1) cache: maps `tokenTypeIdx → altIndex` per OR site
+  - ✅ Fast-dispatched alts skip `IS_SPECULATING`, save/restore, and try/catch entirely
+  - ✅ `manyInternalLogic` reverted to speculative-body approach with integer locals
+  - ✅ CST save/restore via `saveCstTop()`/`restoreCstTop()` (array cloning — to be replaced by watermarks)
+- ⬜ Stage 4b — Watermark-based CST save/restore (replace array cloning)
+  - ⬜ `saveCstTopImpl()` records children array `.length` values instead of `.slice()` cloning
+  - ⬜ `restoreCstTopImpl()` truncates arrays via `.length = savedLen` instead of replacing children object
+  - ⬜ Verify error recovery tests still pass (recovery disabled during speculation via `!this.isBackTracking()` guard)
+  - ⬜ Benchmark CstParser before/after to measure save/restore allocation reduction
+- ⬜ Stage 4c — CST allocation fixes
+  - ⬜ `cstInvocationStateUpdate()` uses fixed-shape `createCstNode()` factory
+  - ⬜ `CstNodeLocation` objects use fixed-shape `createCstLocation()` factory
+  - ⬜ `addTerminalToCst` uses `??= []` push pattern instead of `[token]` single-element array
 - ⬜ Stage 5 — Recording phase: remove hidden-class pollution from `enableRecording`/`disableRecording`
 
 ---
@@ -463,9 +496,63 @@ The numbered variants exist solely to provide unique `idx` values for
 ### Stage 4 — Decouple CST building from the recording phase
 
 **Goal:** `CstParser` works correctly without `performSelfAnalysis()` having
-run, and CST construction minimises per-rule allocation.
+run, and CST construction minimises per-rule allocation. Speculative OR
+attempts do not pay for CST save/restore array cloning.
 
 #### What changes
+
+**Watermark-based CST save/restore (replaces array cloning):**
+
+The current `saveCstTopImpl()` clones every children array on the top CST node
+before each speculative OR attempt. This is the dominant allocation cost during
+OR slow-path speculation. Replace with a watermark strategy:
+
+- `saveCstTop()`: record the `.length` of each existing children array as
+  plain integers. No `.slice()`, no `Object.create(null)`, no allocation
+  beyond a small watermark object.
+- `restoreCstTop()`: truncate each children array back to its saved length
+  via `.length = savedLen`. New keys added during the failed alt are left as
+  empty arrays (semantically harmless — the key exists with `[]`, equivalent
+  to absent for CST consumers who check `.length`).
+
+```ts
+saveCstTopImpl(): CstTopSave {
+  const top = this.CST_STACK[this.CST_STACK.length - 1];
+  if (top === undefined) return null;
+  const watermarks: [string, number][] = [];
+  const src = top.children;
+  for (const key of Object.keys(src)) {
+    watermarks.push([key, src[key].length]);
+  }
+  return {
+    watermarks,
+    location: top.location !== undefined
+      ? ({ ...top.location } as Record<string, number>)
+      : undefined,
+  };
+}
+
+restoreCstTopImpl(save: CstTopSave): void {
+  if (save === null) return;
+  const top = this.CST_STACK[this.CST_STACK.length - 1];
+  if (top === undefined) return;
+  // Truncate existing arrays back to their pre-speculation lengths.
+  for (const [key, len] of save.watermarks) {
+    top.children[key].length = len;
+  }
+  // New keys added during the failed alt now have entries but length 0.
+  // This is semantically correct — no need to delete (which would cause
+  // hidden-class transitions on the children object).
+  if (save.location !== undefined) {
+    (top as any).location = save.location;
+  }
+}
+```
+
+This is safe because recovery is disabled during speculation
+(`!this.isBackTracking()` guard in `invokeRuleCatch`), so the partial CST
+from a failed speculative alt is never consumed by recovery logic. Child
+CstNodes created by SUBRULEs inside a failed alt become garbage naturally.
 
 **Runtime CST interception (replaces GAST-derived field names):**
 
@@ -544,6 +631,17 @@ internal representations in V8).
 the appropriate update method at construction time — same strategy as existing
 `TreeBuilder.initTreeBuilder()` but without GAST dependency.
 
+#### Future exploration: fully deferred CST creation
+
+The watermark approach still creates child CstNodes during failed speculative
+attempts (they become garbage). A more aggressive optimisation would defer all
+CST object creation until an alt is committed — collecting tokens and child
+references into lightweight frame-buffer arrays during speculation, and only
+materializing `CstNode` objects on success. This would eliminate all GC
+pressure from failed alts. The key invariant that makes this safe: recovery
+mode is disabled during speculation (`!this.isBackTracking()`), so partial
+CST nodes are never needed during speculative attempts.
+
 #### Exit criteria
 
 - `CstParser` produces identical CST output with and without
@@ -553,6 +651,7 @@ the appropriate update method at construction time — same strategy as existing
   names present.
 - All `CstNodeLocation` objects share a single hidden class (verifiable via
   `%HaveSameMap`).
+- `saveCstTopImpl` does not call `.slice()` or allocate array copies.
 - Existing CST-based tests pass unchanged.
 
 ---
