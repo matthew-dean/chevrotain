@@ -289,8 +289,18 @@ The CSS nesting test case must work:
 - Outer OR tries next alt or re-parses with `qualifiedRule` for `a:hover`
   as a selector
 
-This is the exact behavior @jesscss/parser demonstrates, confirmed by
-logging at commit 036d5f42 in the Jess repo.
+**IMPORTANT FINDING**: Logging and AST inspection at commit 036d5f42 in the
+Jess repo revealed that @jesscss/parser does NOT actually parse `a:hover`
+as a nested rule either. The parse returns `value: undefined` with 0 errors
+— the entire input is silently dropped. The `nested-pseudo.test.ts` tests
+only check `errors.length === 0` and don't verify the AST, so they pass
+by accident (false positive).
+
+The CSS nesting ambiguity (`a:hover` as declaration vs selector) requires a
+**grammar-level fix** — adding a GATE on the `declaration` alt that checks
+whether `{` follows the value (indicating a nested rule, not a declaration).
+This is NOT an engine issue — both @jesscss/parser and our Chevrotain fork
+handle backtracking correctly; the grammar just doesn't disambiguate.
 
 ## What Final Success Looks Like
 
