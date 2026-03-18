@@ -4,6 +4,7 @@ import {
   NoViableAltException,
 } from "../../src/parse/exceptions_public.js";
 import { augmentTokenTypes } from "../../src/scan/tokens.js";
+import { createToken } from "../../src/scan/tokens_public.js";
 import { createRegularToken } from "../utils/matchers.js";
 import { IToken, TokenType } from "@chevrotain/types";
 import { expect } from "chai";
@@ -640,6 +641,72 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       // Parse 3: input [A, C] again → fast path, alt 0 fails, alt 1 succeeds
       parser.input = [createRegularToken(A), createRegularToken(C)];
       expect(parser.topRule()).to.equal("alt1");
+      expect(parser.errors).to.be.empty;
+    });
+
+    it("fast-path works for category CONSUME (not just exact token)", () => {
+      // Before the fix: fast path was keyed by exact tokenTypeIdx only. When
+      // the first CONSUME was a category (e.g. Keyword), only the first-observed
+      // token (e.g. IfKeyword) was cached. ElseKeyword would miss the fast path.
+      // After the fix: we record and filter by exact vs category per alt, so
+      // any token in the category hits the fast path on first sight.
+      const Keyword = createToken({ name: "Keyword" });
+      const IfKeyword = createToken({
+        name: "IfKeyword",
+        pattern: /if/,
+        categories: [Keyword],
+      });
+      const ElseKeyword = createToken({
+        name: "ElseKeyword",
+        pattern: /else/,
+        categories: [Keyword],
+      });
+      const Ident = createToken({ name: "Ident", pattern: /[a-z]+/ });
+      const CAT_TOKENS = [Keyword, IfKeyword, ElseKeyword, Ident];
+      augmentTokenTypes(CAT_TOKENS);
+
+      class CategoryFastPathParser extends EmbeddedActionsParser {
+        constructor() {
+          super(CAT_TOKENS, {});
+          this.performSelfAnalysis();
+        }
+
+        public topRule = this.RULE("topRule", () => {
+          return this.OR([
+            { ALT: () => this.CONSUME1(Keyword).image || "keyword" },
+            { ALT: () => this.CONSUME2(Ident).image || "ident" },
+          ]);
+        });
+      }
+
+      const parser = new CategoryFastPathParser();
+
+      // Parse 1: IfKeyword → succeeds, alt 0 cached (category match)
+      parser.input = [createRegularToken(IfKeyword, "if")];
+      expect(parser.topRule()).to.equal("if");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 2 (same token): triggers fast path, populates _orFirstTokenInfoCache
+      parser.input = [createRegularToken(IfKeyword, "if")];
+      expect(parser.topRule()).to.equal("if");
+      expect(parser.errors).to.be.empty;
+
+      // Verify first-token info marks Keyword as category (fast path will filter by it)
+      const fastCandidates = (parser as any)._orFastCandidates ?? {};
+      const firstTokenInfo = (parser as any)._orFirstTokenInfoCache ?? {};
+      const mapKeys = Object.keys(fastCandidates);
+      expect(mapKeys.length).to.be.greaterThan(0);
+      const mapKey = mapKeys[0];
+      const infoArr = firstTokenInfo[mapKey];
+      expect(infoArr).to.be.an("array");
+      expect(infoArr![0].isCategory).to.be.true;
+      expect(infoArr![0].tokenType).to.equal(Keyword);
+
+      // Parse 3: ElseKeyword (different token, same category) → should hit fast path
+      // Before fix: we'd have no candidate for ElseKeyword.tokenTypeIdx, slow loop.
+      // After fix: tokenMatcher(ElseKeyword, Keyword) = true, fast path.
+      parser.input = [createRegularToken(ElseKeyword, "else")];
+      expect(parser.topRule()).to.equal("else");
       expect(parser.errors).to.be.empty;
     });
 
