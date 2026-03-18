@@ -935,7 +935,7 @@ describe("lookahead Regular Tokens Mode", () => {
     it("will throw an error when two alternatives have the same single token (lookahead 1) prefix", () => {
       class OrAmbiguityLookAheadParser extends EmbeddedActionsParser {
         constructor(input: IToken[] = []) {
-          super(ALL_TOKENS, {});
+          super(ALL_TOKENS, { recoveryEnabled: true });
 
           this.performSelfAnalysis();
           this.input = input;
@@ -982,7 +982,7 @@ describe("lookahead Regular Tokens Mode", () => {
     it("will throw an error when two alternatives have the same multi token (lookahead > 1) prefix", () => {
       class OrAmbiguityMultiTokenLookAheadParser extends EmbeddedActionsParser {
         constructor(input: IToken[] = []) {
-          super(ALL_TOKENS, {});
+          super(ALL_TOKENS, { recoveryEnabled: true });
 
           this.performSelfAnalysis();
           this.input = input;

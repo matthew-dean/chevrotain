@@ -72,19 +72,25 @@ export class ErrorHandler {
     if (this.IS_SPECULATING) throw SPEC_FAIL;
     const ruleName = this.getCurrRuleFullName();
     const ruleGrammar = this.getGAstProductions()[ruleName];
-    const lookAheadPathsPerAlternative = getLookaheadPathsForOptionalProd(
-      occurrence,
-      ruleGrammar,
-      prodType,
-      this.maxLookahead,
-    );
-    const insideProdPaths = lookAheadPathsPerAlternative[0];
+
+    // GAST is only available when recoveryEnabled (recording ran).
+    // Without it, build a simpler error message without expected-token paths.
+    let insideProdPaths: TokenType[][] | undefined;
+    if (ruleGrammar !== undefined) {
+      const lookAheadPathsPerAlternative = getLookaheadPathsForOptionalProd(
+        occurrence,
+        ruleGrammar,
+        prodType,
+        this.maxLookahead,
+      );
+      insideProdPaths = lookAheadPathsPerAlternative[0];
+    }
     const actualTokens = [];
     for (let i = 1; i <= this.maxLookahead; i++) {
       actualTokens.push(this.LA(i));
     }
     const msg = this.errorMessageProvider.buildEarlyExitMessage({
-      expectedIterationPaths: insideProdPaths,
+      expectedIterationPaths: insideProdPaths ?? [],
       actual: actualTokens,
       previous: this.LA(0),
       customUserDescription: userDefinedErrMsg,

@@ -341,7 +341,7 @@ export class TreeBuilder {
     if (this.baseCstVisitorConstructor === undefined) {
       const newBaseCstVisitorConstructor = createBaseSemanticVisitorConstructor(
         this.className,
-        Object.keys(this.gastProductionsCache),
+        this.definedRulesNames,
       );
       this.baseCstVisitorConstructor = newBaseCstVisitorConstructor;
       return newBaseCstVisitorConstructor;
@@ -358,7 +358,7 @@ export class TreeBuilder {
     if (this.baseCstVisitorWithDefaultsConstructor === undefined) {
       const newConstructor = createBaseVisitorConstructorWithDefaults(
         this.className,
-        Object.keys(this.gastProductionsCache),
+        this.definedRulesNames,
         this.getBaseCstVisitorConstructor(),
       );
       this.baseCstVisitorWithDefaultsConstructor = newConstructor;

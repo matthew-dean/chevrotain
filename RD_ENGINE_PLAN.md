@@ -31,10 +31,32 @@ exactly. The `Lexer` is improved but its interface is unchanged.
   - ✅ GAST traversal skipped in error-building paths during speculation
 - ✅ Stage 4a — Eliminate savepoint objects and add lazy LL(1) fast-dispatch for OR
   - ✅ `orInternal()` saves state as plain integer locals (no savepoint object allocation)
-  - ✅ `_orFastMaps` lazy LL(1) cache: maps `tokenTypeIdx → altIndex` per OR site
-  - ✅ Fast-dispatched alts skip `IS_SPECULATING`, save/restore, and try/catch entirely
+  - ✅ `_orFastMaps` lazy LL(1) cache: maps `tokenTypeIdx → altIndex[]` (multi-candidate) per OR site
+  - ✅ Fast-dispatched alts try candidates in declaration order with gate checks
   - ✅ `manyInternalLogic` reverted to speculative-body approach with integer locals
   - ✅ CST save/restore via `saveCstTop()`/`restoreCstTop()` (array cloning — to be replaced by watermarks)
+- ✅ Stage 4a.1 — Fix OR gate correctness + multi-candidate fast-dispatch
+  - ✅ **Bug fix**: fast-dispatch cache now stores candidate _list_ per LA(1) token, not single alt index
+  - ✅ Gates checked on fast path: each candidate's GATE evaluated before dispatch (context-sensitive)
+  - ✅ Gated alts preceding an observed candidate are added to the candidate list (their gates may have been closed during observation)
+  - ✅ Failed alts with progress > 0 added to candidate list (they matched LA(1) but failed later — may succeed with different context/continuation)
+  - ✅ Candidates never removed on failure (internal gated OPTIONs can change between calls)
+  - ✅ `addOrCandidate()` helper maintains sorted candidate list per `(mapKey, tokenTypeIdx)`
+  - ✅ **Gated-prefix tracking**: alts with gated OPTION/MANY/AT_LEAST_ONE before first CONSUME are excluded from token-based caching
+    - ✅ `_orAltHasGatedPrefix` flag set by `optionInternalLogic`, `manyInternalLogic`, `atLeastOneInternalLogic` when gate fires before first CONSUME
+    - ✅ `_orGatedPrefixAlts[mapKey]` records per-OR alt indices with gate-dependent first-token sets
+    - ✅ Fast-path merges token-based candidates with gated-prefix alts in declaration order
+    - ✅ Gate-free grammars (JSON, CSS) see zero overhead (`_orGatedPrefixAlts` is undefined)
+  - ✅ **Bug fix**: nested OR (via SUBRULE) no longer corrupts outer OR's `_orAltStartLexPos`/`_orAltHasGatedPrefix` — save/restore at `orInternal` entry/exit
+  - ✅ **Bug fix**: `_orGatedPrefixAlts` kept sorted after each push (cross-call discovery order could produce unsorted lists, breaking merge iteration)
+  - ✅ Test: gated alt takes priority when gate opens after gate-free alt was cached
+  - ✅ Test: gated OPTION inside alt body — candidate survives fast-path failure
+  - ✅ Test: failed alt with progress cached (verified via `_orFastMaps` inspection)
+  - ✅ Test: non-gated OPTION at start of ALT is stable in cache
+  - ✅ Test: gated OPTION nested inside SUBRULE handled correctly
+  - ✅ Test: gated OPTION closed on first run, open on later run — alt still tried (correctness bug demo)
+  - ✅ Test: nested OR must not corrupt outer OR gated-prefix tracking (inspects `_orFastMaps`/`_orGatedPrefixAlts` per mapKey)
+  - ✅ Test: `_orGatedPrefixAlts` remains sorted across multiple calls with out-of-order discovery
 - ✅ Stage 4b — Watermark-based CST save/restore (replace array cloning)
   - ✅ `saveCstTopImpl()` records children array `.length` values instead of `.slice()` cloning
   - ✅ `restoreCstTopImpl()` truncates arrays via `.length = savedLen` instead of replacing children object
@@ -44,7 +66,12 @@ exactly. The `Lexer` is improved but its interface is unchanged.
   - ✅ `cstInvocationStateUpdate()` uses fixed-shape `createCstNode()` factory (pre-declares `location: undefined`)
   - ✅ `CstNodeLocation` objects use fixed-shape per-mode factories (`createCstLocationOnlyOffset`, `createCstLocationFull`)
   - ✅ `addTerminalToCst` / `addNoneTerminalToCst` use `??= []` push pattern instead of `[token]` single-element array
-- ⬜ Stage 5 — Recording phase: remove hidden-class pollution from `enableRecording`/`disableRecording`
+- ✅ Stage 5 — Recording phase: remove hidden-class pollution from `enableRecording`/`disableRecording`
+  - ✅ All DSL methods in `recognizer_api.ts` check `this.RECORDING_PHASE` and route to `*InternalRecord` methods
+  - ✅ `enableRecording()` simplified to `this.RECORDING_PHASE = true` (no instance method assignment loop)
+  - ✅ `disableRecording()` simplified to `this.RECORDING_PHASE = false` (no `delete` loop — eliminates ~80 hidden-class transitions)
+- ⬜ Stage 6 — Make `performSelfAnalysis()` opt-in (skip recording pass by default)
+- ⬜ Stage 7 — Flatten mixin architecture
 
 ---
 
@@ -461,198 +488,219 @@ eliminating the integer → string lookup and the follow key string concatenatio
 
 ---
 
-### Stage 3 — Remove numbered DSL variants as real implementations
+### Stage 3 — Skip GAST traversal and error building during speculation
 
-**Goal:** Make `OR1`–`OR9` etc. true aliases with no extra overhead.
+**Goal:** Eliminate all expensive work (GAST traversal, Error object
+construction) from the hot speculative path.
 
-#### What changes
+#### What changed
 
-The numbered variants exist solely to provide unique `idx` values for
-`getKeyForAutomaticLookahead`. With the cache gone, `idx` is meaningless.
+**`raiseNoAltException` / `raiseEarlyExitException`:**
 
-- In `recognizer_api.ts`, replace all `OR1`–`OR9` implementations with:
-  ```ts
-  OR1 = this.OR;
-  OR2 = this.OR;
-  // ... etc
-  ```
-  Same for `CONSUME1`–`CONSUME9`, `SUBRULE1`–`SUBRULE9`, `MANY1`–`MANY9`,
-  `OPTION1`–`OPTION9`, `AT_LEAST_ONE1`–`AT_LEAST_ONE9`,
-  `MANY_SEP1`–`MANY_SEP9`, `AT_LEAST_ONE_SEP1`–`AT_LEAST_ONE_SEP9`.
-- Remove the `idx` / `occurrence` parameter threading from internal methods
-  (`orInternal`, `consumeInternal`, etc.) where it was only used for cache
-  key computation.
-- Keep `idx` in GAST node construction (needed for Stage 5 recording pass).
+- When `IS_SPECULATING === true`, throw `SPEC_FAIL` immediately without
+  traversing the GAST to build error context. The error is never visible to
+  the user (speculation rolls back), so constructing it is pure waste.
 
-#### Exit criteria
+**CST node building skipped during speculation:**
 
-- All existing tests pass unchanged.
-- A grammar using `OR1`, `OR3`, `OR7` in the same rule produces correct output.
-- The `idx` parameter still threads through to GAST recording (verified by
-  Stage 5 tests).
+- `cstInvocationStateUpdate` / `cstFinallyStateUpdate` / `cstPostTerminal` /
+  `cstPostNonTerminal` are no-ops when `IS_SPECULATING === true`. Nodes built
+  during a failed speculative attempt are immediately garbage — no point
+  allocating them.
+
+**Error building skipped during speculation:**
+
+- `consumeInternal` already throws `SPEC_FAIL` directly. No
+  `MismatchedTokenException` is constructed. Combined with the above, zero
+  heap allocation occurs on the speculative failure path.
+
+#### Note: "numbered variant aliases" analysis
+
+The original Stage 3 plan was to make `OR1`–`OR9` etc. true aliases.
+Analysis showed this is not viable:
+
+- `_orFastMaps` key = `currRuleShortName | occurrence` — aliasing all variants
+  to `occurrence=0` would collapse the cache for rules with multiple OR calls.
+- `CONSUME`/`SUBRULE` indices are needed for error recovery follow sets and
+  `RULE_OCCURRENCE_STACK`.
+- All variants need distinct indices for GAST recording accuracy.
+  The one-liner wrappers are trivially inlined by V8; no action needed.
 
 ---
 
-### Stage 4 — Decouple CST building from the recording phase
+### Stage 4b — Watermark-based CST save/restore
 
-**Goal:** `CstParser` works correctly without `performSelfAnalysis()` having
-run, and CST construction minimises per-rule allocation. Speculative OR
-attempts do not pay for CST save/restore array cloning.
+**Goal:** Eliminate `.slice()` array cloning in `saveCstTopImpl()`. Speculative
+OR attempts pay only O(k) integer writes instead of O(k) array copies.
 
-#### What changes
+#### What changed
 
-**Watermark-based CST save/restore (replaces array cloning):**
-
-The current `saveCstTopImpl()` clones every children array on the top CST node
-before each speculative OR attempt. This is the dominant allocation cost during
-OR slow-path speculation. Replace with a watermark strategy:
-
-- `saveCstTop()`: record the `.length` of each existing children array as
-  plain integers. No `.slice()`, no `Object.create(null)`, no allocation
-  beyond a small watermark object.
-- `restoreCstTop()`: truncate each children array back to its saved length
-  via `.length = savedLen`. New keys added during the failed alt are left as
-  empty arrays (semantically harmless — the key exists with `[]`, equivalent
-  to absent for CST consumers who check `.length`).
-
-```ts
-saveCstTopImpl(): CstTopSave {
-  const top = this.CST_STACK[this.CST_STACK.length - 1];
-  if (top === undefined) return null;
-  const watermarks: [string, number][] = [];
-  const src = top.children;
-  for (const key of Object.keys(src)) {
-    watermarks.push([key, src[key].length]);
-  }
-  return {
-    watermarks,
-    location: top.location !== undefined
-      ? ({ ...top.location } as Record<string, number>)
-      : undefined,
-  };
-}
-
-restoreCstTopImpl(save: CstTopSave): void {
-  if (save === null) return;
-  const top = this.CST_STACK[this.CST_STACK.length - 1];
-  if (top === undefined) return;
-  // Truncate existing arrays back to their pre-speculation lengths.
-  for (const [key, len] of save.watermarks) {
-    top.children[key].length = len;
-  }
-  // New keys added during the failed alt now have entries but length 0.
-  // This is semantically correct — no need to delete (which would cause
-  // hidden-class transitions on the children object).
-  if (save.location !== undefined) {
-    (top as any).location = save.location;
-  }
-}
-```
+`saveCstTopImpl()` now records the `.length` of each existing children array
+as plain integers. `restoreCstTopImpl()` truncates via `.length = savedLen`.
+No array copies. New keys added during a failed alt remain as empty arrays
+(semantically equivalent to absent for `.length`-checking consumers).
 
 This is safe because recovery is disabled during speculation
-(`!this.isBackTracking()` guard in `invokeRuleCatch`), so the partial CST
-from a failed speculative alt is never consumed by recovery logic. Child
-CstNodes created by SUBRULEs inside a failed alt become garbage naturally.
-
-**Runtime CST interception (replaces GAST-derived field names):**
-
-- `CstParser` overrides `consumeInternal()`:
-  ```ts
-  const tok = super.consumeInternal(tokenType, opts);
-  const key = opts?.LABEL ?? tokenType.name;
-  (this._cstStack.at(-1).children[key] ??= []).push(tok);
-  return tok;
-  ```
-- `CstParser` overrides `subruleInternal()`:
-  ```ts
-  const node = super.subruleInternal(rule, opts) as CstNode;
-  const key = opts?.LABEL ?? rule.ruleName;
-  (this._cstStack.at(-1).children[key] ??= []).push(node);
-  return node;
-  ```
-- `RULE()` in `CstParser` wraps the implementation to push/pop `_cstStack`
-  and call `_finalizeLocation(node)` on exit.
-- `getBaseCstVisitorConstructor()` uses the rule registry built by `RULE()`
-  (rule names only — no GAST needed).
-- Delete the GAST-derived CST field-name pre-computation from `TreeBuilder`.
-
-**Fix CstNode allocation — pre-declared fixed shape:**
-
-`cstInvocationStateUpdate()` currently calls `Object.create(null)` for each
-rule's children dict, which creates a new object every invocation. Replace with
-a fixed-shape CstNode created via a factory that declares all fields upfront:
-
-```ts
-function createCstNode(name: string): CstNode {
-  return {
-    name,
-    children: Object.create(null),
-    recoveredNode: false,
-    location: undefined, // filled in if location tracking enabled
-  };
-}
-```
-
-The `location` object is also pre-declared with a fixed shape:
-
-```ts
-function createCstLocation(): CstNodeLocation {
-  return {
-    startOffset: NaN,
-    startLine: NaN,
-    startColumn: NaN,
-    endOffset: NaN,
-    endLine: NaN,
-    endColumn: NaN,
-  };
-}
-```
-
-This is allocated once per rule entry and overwritten — same number of objects
-but fixed shape so all location objects share one hidden class.
-
-**Fix `addTerminalToCst` single-element array creation:**
-
-```ts
-// Current — creates new single-element array on first occurrence:
-node.children[key] = [token];
-
-// Replacement — pre-allocate with capacity hint, or use ??= push pattern:
-(node.children[key] ??= []).push(token);
-```
-
-The `??=` pattern is already inline-cache-friendly and avoids the hidden class
-transition that `[token]` causes (empty array → 1-element array have different
-internal representations in V8).
-
-**Location tracking:**
-
-`nodeLocationTracking: "none" | "onlyOffset" | "full"` handled by assigning
-the appropriate update method at construction time — same strategy as existing
-`TreeBuilder.initTreeBuilder()` but without GAST dependency.
-
-#### Future exploration: fully deferred CST creation
-
-The watermark approach still creates child CstNodes during failed speculative
-attempts (they become garbage). A more aggressive optimisation would defer all
-CST object creation until an alt is committed — collecting tokens and child
-references into lightweight frame-buffer arrays during speculation, and only
-materializing `CstNode` objects on success. This would eliminate all GC
-pressure from failed alts. The key invariant that makes this safe: recovery
-mode is disabled during speculation (`!this.isBackTracking()`), so partial
-CST nodes are never needed during speculative attempts.
+(`!this.isBackTracking()` guard in `invokeRuleCatch`), so partial CST nodes
+from failed alts are never consumed by recovery logic.
 
 #### Exit criteria
 
-- `CstParser` produces identical CST output with and without
-  `performSelfAnalysis()` having been called.
-- All three `nodeLocationTracking` modes produce correct location info.
-- `getBaseCstVisitorConstructor()` returns a valid base class with all rule
-  names present.
-- All `CstNodeLocation` objects share a single hidden class (verifiable via
-  `%HaveSameMap`).
 - `saveCstTopImpl` does not call `.slice()` or allocate array copies.
 - Existing CST-based tests pass unchanged.
+
+---
+
+### Stage 4c — CST allocation fixes
+
+**Goal:** Every `CstNode` and `CstNodeLocation` object shares one V8 hidden
+class from birth. Child array push uses the IC-friendly `??=` pattern.
+
+#### What changed
+
+**`createCstNode(name)`:** pre-declares `location: undefined` so assignment by
+`setInitialNodeLocation` writes to an existing property (no hidden-class
+transition).
+
+**`createCstLocationOnlyOffset()` / `createCstLocationFull()`:** two separate
+fixed-shape factories — one per location-tracking mode. All objects in a mode
+share one hidden class.
+
+**`addTerminalToCst` / `addNoneTerminalToCst`:** use `??= []` push instead of
+`= [token]` on first occurrence. Avoids the internal V8 transition from empty
+array to single-element array (which breaks monomorphic child-array access).
+
+#### Exit criteria
+
+- All `CstNodeLocation` objects in a given mode share a single hidden class.
+- Existing CST-based tests pass unchanged.
+
+---
+
+### Stage 4a.1 — Fix OR gate correctness + multi-candidate fast-dispatch
+
+**Goal:** The `_orFastMaps` fast-dispatch cache correctly handles GATE
+functions and LL(1)-ambiguous grammars. Gates are context-sensitive (they can
+return different values between calls), so the cache must store all _possible_
+candidates per LA(1) token, and gates must be evaluated at dispatch time.
+
+#### What changed
+
+**Multi-candidate fast map (replaces single-alt cache):**
+
+The original fast map stored `tokenTypeIdx → single altIndex`, marking
+ambiguous entries as `-1` (disabling the fast path entirely). This had two
+correctness issues:
+
+1. **Gate bypass**: A gate-free alt cached for LA(1)=A would be dispatched
+   directly, even when a higher-priority gated alt's gate was now open.
+2. **Lost candidates**: If two alts could match the same LA(1) token, the
+   fast path was disabled (`-1`), even though both candidates could be tried
+   in order.
+
+The new design stores `tokenTypeIdx → number[]` — an array of candidate alt
+indices, sorted by declaration order. At dispatch time:
+
+1. Iterate candidates for this LA(1) token.
+2. Check each candidate's GATE (if any). Skip if gate fails.
+3. Try the first candidate whose gate passes. On failure, try the next.
+4. If all candidates fail or are gated out, fall through to the full
+   speculative loop (there may be alts not yet observed for this LA(1)).
+
+For gate-free, unambiguous LL(1) grammars (e.g. JSON, CSS) the candidate
+list is always length 1 and there are no gates to check — zero overhead
+compared to the original single-alt design.
+
+**`addOrCandidate()` helper:**
+
+Extracted the fast-map population logic into a standalone function. Called
+from both the success path and the failure-with-progress path in the slow
+speculative loop. On each call it:
+
+- Adds the observed alt index to the candidate list (if not already present).
+- Adds any preceding gated alts to the candidate list (their gates may have
+  been closed during the slow loop, but they could match this token when
+  their gates open on a future call).
+- Keeps the list sorted by declaration order.
+
+**Failure-with-progress caching:**
+
+When an alt fails in the slow loop but consumed tokens (`progress > 0`), it
+is now added to the fast-map candidate list for its LA(1) token. This is
+important for alts with internal context-dependent behavior (e.g. gated
+OPTIONs, parametrized rules) — the alt matched this token type but failed
+for context-specific reasons, and may succeed on a future call.
+
+**Candidate stability:**
+
+Candidates are never removed from the fast-map list on failure. An alt that
+fails on the fast path (e.g. because an internal gated OPTION was closed)
+stays in the candidate list. On a future call where the gate opens, it will
+succeed again. This is correct because error recovery is disabled during
+speculation (`!this.isBackTracking()` guard), so transient fast-path
+failures are safe to retry.
+
+**Gated-prefix tracking (`_orAltHasGatedPrefix` / `_orGatedPrefixAlts`):**
+
+An alt whose body starts with a gated OPTION/MANY/AT_LEAST_ONE (before any
+CONSUME) has a gate-dependent first-token set: which LA(1) tokens it can
+match changes depending on gate state. These alts cannot be cached by LA(1)
+alone — they must always be speculated.
+
+Example: `{ ALT: () => { OPTION({ GATE: flag, DEF: CONSUME(A) }); CONSUME(B); } }`
+
+- When `flag=true`: matches LA(1)=A (OPTION takes A, then B) or LA(1)=B
+- When `flag=false`: matches LA(1)=B only (OPTION skipped)
+
+If the first observation has `flag=false`, alt 0 only matches LA(1)=B. The
+token-based cache records it for B but not A. On a later call with `flag=true`
+and LA(1)=A, the cache has no entry for alt 0 — wrong result.
+
+Implementation:
+
+- `_orAltStartLexPos`: lexer position at the start of the current OR alt.
+- `_orAltHasGatedPrefix`: set to `true` by `optionInternalLogic`,
+  `manyInternalLogic`, or `atLeastOneInternalLogic` when they encounter a
+  gate and `exportLexerState() === _orAltStartLexPos` (no tokens consumed yet).
+- `_orGatedPrefixAlts[mapKey]`: per-OR list of alt indices with gated
+  prefixes. These alts are NOT added to `_orFastMaps` — instead they are
+  always speculated on the fast path.
+- Fast-path merge: iterates both `candidates` (token-based, from
+  `_orFastMaps`) and `gatedPrefixAlts` in declaration order, trying each.
+  For gate-free grammars, `gatedPrefixAlts` is `undefined` — zero overhead.
+- **Save/restore around `orInternal`**: `_orAltStartLexPos` and
+  `_orAltHasGatedPrefix` are saved at entry and restored at every exit
+  point of `orInternal` (success return, post-loop error paths). This
+  prevents nested ORs (reached via SUBRULEs) from corrupting the outer
+  OR's gated-prefix tracking.
+- **`_orGatedPrefixAlts` kept sorted**: after each `push`, the list is
+  sorted by alt index. Without this, cross-call discovery order (e.g.
+  alt 2 discovered on call 1, alt 0 on call 2) would produce an unsorted
+  list, breaking the fast-path merge iteration which assumes sorted order.
+
+#### Key invariants
+
+1. **Gates evaluated at dispatch time, never at cache time.** The candidate
+   list records which alts _can possibly_ match a given LA(1) token. Gates
+   further restrict the list on each call.
+2. **Candidates are never invalidated.** Internal gating state (gated
+   OPTIONs, parametrized rules) can change between calls, so a failing
+   candidate may succeed next time.
+3. **Gated-prefix alts are always speculated.** Alts with gate-dependent
+   first-token sets are never in the token-based cache — they appear in
+   `_orGatedPrefixAlts` and are tried on every fast-path invocation.
+4. **Recovery is disabled during speculation.** Partial CST nodes from failed
+   fast-path attempts are never consumed by recovery logic.
+
+#### Exit criteria
+
+- All existing predicate/gate tests pass unchanged.
+- New tests cover: gated alt priority, gated OPTION inside alt body, gated
+  OPTION nested in SUBRULE, failure-with-progress caching (with `_orFastMaps`
+  inspection), non-gated OPTION stability, gated OPTION closed on first run
+  then open on later run (correctness regression test).
+- Gate-free unambiguous grammars (JSON, CSS) show no performance regression.
+- 776 tests passing, 0 new failures.
 
 ---
 

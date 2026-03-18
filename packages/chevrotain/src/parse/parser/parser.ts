@@ -165,6 +165,16 @@ export class Parser {
         toFastProperties(this);
       });
 
+      // Grammar recording, resolving, validation, and follow-set computation
+      // are only needed when error recovery is enabled — recovery uses
+      // GAST-derived follow sets for resync. The speculative engine handles
+      // OR/OPTION/MANY via backtracking at runtime, not pre-computed lookahead.
+      // CST visitor construction uses definedRulesNames (populated by RULE()),
+      // not gastProductionsCache, so it works without recording.
+      if (!this.recoveryEnabled) {
+        return;
+      }
+
       this.TRACE_INIT("Grammar Recording", () => {
         try {
           this.enableRecording();
@@ -206,22 +216,31 @@ export class Parser {
             errMsgProvider: defaultGrammarValidatorErrorProvider,
             grammarName: className,
           });
-          const lookaheadValidationErrors = validateLookahead({
-            lookaheadStrategy: this.lookaheadStrategy,
-            rules: Object.values(this.gastProductionsCache),
-            tokenTypes: Object.values(this.tokensMap),
-            grammarName: className,
-          });
-          this.definitionErrors = this.definitionErrors.concat(
-            validationErrors,
-            lookaheadValidationErrors,
-          );
+          this.definitionErrors =
+            this.definitionErrors.concat(validationErrors);
+
+          // Lookahead ambiguity validation is only meaningful when error
+          // recovery is enabled (LL(k) follow-set based). The speculative
+          // engine handles LL(1) ambiguity at runtime via multi-candidate
+          // fast-dispatch, so these checks produce false positives for
+          // grammars that are correct under speculation.
+          if (this.recoveryEnabled) {
+            const lookaheadValidationErrors = validateLookahead({
+              lookaheadStrategy: this.lookaheadStrategy,
+              rules: Object.values(this.gastProductionsCache),
+              tokenTypes: Object.values(this.tokensMap),
+              grammarName: className,
+            });
+            this.definitionErrors = this.definitionErrors.concat(
+              lookaheadValidationErrors,
+            );
+          }
         }
       });
 
       // this analysis may fail if the grammar is not perfectly valid
       if (this.definitionErrors.length === 0) {
-        // The results of these computations are not needed unless error recovery is enabled.
+        // Follow sets are only needed for resync recovery.
         if (this.recoveryEnabled) {
           this.TRACE_INIT("computeAllProdsFollows", () => {
             const allFollows = computeAllProdsFollows(
@@ -230,11 +249,6 @@ export class Parser {
             this.resyncFollows = allFollows;
           });
         }
-
-        // Lookahead precomputation removed: OR/OPTION/MANY now use speculative
-        // backtracking at runtime (IS_SPECULATING + SPEC_FAIL) instead of
-        // pre-built lookahead functions. lookaheadStrategy.initialize and
-        // preComputeLookaheadFunctions are no longer called.
       }
 
       if (

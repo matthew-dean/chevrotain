@@ -89,103 +89,10 @@ export class GastRecorder {
 
   enableRecording(this: MixedInParser): void {
     this.RECORDING_PHASE = true;
-
-    this.TRACE_INIT("Enable Recording", () => {
-      /**
-       * Warning Dark Voodoo Magic upcoming!
-       * We are "replacing" the public parsing DSL methods API
-       * With **new** alternative implementations on the Parser **instance**
-       *
-       * So far this is the only way I've found to avoid performance regressions during parsing time.
-       * - Approx 30% performance regression was measured on Chrome 75 Canary when attempting to replace the "internal"
-       *   implementations directly instead.
-       */
-      for (let i = 0; i < 10; i++) {
-        const idx = i > 0 ? i : "";
-        this[`CONSUME${idx}` as "CONSUME"] = function (arg1, arg2) {
-          return this.consumeInternalRecord(arg1, i, arg2);
-        };
-        this[`SUBRULE${idx}` as "SUBRULE"] = function (arg1, arg2) {
-          return this.subruleInternalRecord(arg1, i, arg2) as any;
-        };
-        this[`OPTION${idx}` as "OPTION"] = function (arg1) {
-          return this.optionInternalRecord(arg1, i);
-        };
-        this[`OR${idx}` as "OR"] = function (arg1) {
-          return this.orInternalRecord(arg1, i);
-        };
-        this[`MANY${idx}` as "MANY"] = function (arg1) {
-          this.manyInternalRecord(i, arg1);
-        };
-        this[`MANY_SEP${idx}` as "MANY_SEP"] = function (arg1) {
-          this.manySepFirstInternalRecord(i, arg1);
-        };
-        this[`AT_LEAST_ONE${idx}` as "AT_LEAST_ONE"] = function (arg1) {
-          this.atLeastOneInternalRecord(i, arg1);
-        };
-        this[`AT_LEAST_ONE_SEP${idx}` as "AT_LEAST_ONE_SEP"] = function (arg1) {
-          this.atLeastOneSepFirstInternalRecord(i, arg1);
-        };
-      }
-
-      // DSL methods with the idx(suffix) as an argument
-      this[`consume`] = function (idx, arg1, arg2) {
-        return this.consumeInternalRecord(arg1, idx, arg2);
-      };
-      this[`subrule`] = function (idx, arg1, arg2) {
-        return this.subruleInternalRecord(arg1, idx, arg2) as any;
-      };
-      this[`option`] = function (idx, arg1) {
-        return this.optionInternalRecord(arg1, idx);
-      };
-      this[`or`] = function (idx, arg1) {
-        return this.orInternalRecord(arg1, idx);
-      };
-      this[`many`] = function (idx, arg1) {
-        this.manyInternalRecord(idx, arg1);
-      };
-      this[`atLeastOne`] = function (idx, arg1) {
-        this.atLeastOneInternalRecord(idx, arg1);
-      };
-
-      this.ACTION = this.ACTION_RECORD;
-      this.BACKTRACK = this.BACKTRACK_RECORD;
-      this.LA = this.LA_RECORD;
-    });
   }
 
   disableRecording(this: MixedInParser) {
     this.RECORDING_PHASE = false;
-    // By deleting these **instance** properties, any future invocation
-    // will be deferred to the original methods on the **prototype** object
-    // This seems to get rid of any incorrect optimizations that V8 may
-    // do during the recording phase.
-    this.TRACE_INIT("Deleting Recording methods", () => {
-      const that: any = this;
-
-      for (let i = 0; i < 10; i++) {
-        const idx = i > 0 ? i : "";
-        delete that[`CONSUME${idx}`];
-        delete that[`SUBRULE${idx}`];
-        delete that[`OPTION${idx}`];
-        delete that[`OR${idx}`];
-        delete that[`MANY${idx}`];
-        delete that[`MANY_SEP${idx}`];
-        delete that[`AT_LEAST_ONE${idx}`];
-        delete that[`AT_LEAST_ONE_SEP${idx}`];
-      }
-
-      delete that[`consume`];
-      delete that[`subrule`];
-      delete that[`option`];
-      delete that[`or`];
-      delete that[`many`];
-      delete that[`atLeastOne`];
-
-      delete that.ACTION;
-      delete that.BACKTRACK;
-      delete that.LA;
-    });
   }
 
   //   Parser methods are called inside an ACTION?

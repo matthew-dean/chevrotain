@@ -33,6 +33,7 @@ import { ParserMethodInternal } from "../types.js";
  */
 export class RecognizerApi {
   ACTION<T>(this: MixedInParser, impl: () => T): T {
+    if (this.RECORDING_PHASE) return this.ACTION_RECORD(impl);
     return impl.call(this);
   }
 
@@ -42,6 +43,8 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
     return this.consumeInternal(tokType, idx, options);
   }
 
@@ -51,6 +54,8 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
@@ -59,6 +64,8 @@ export class RecognizerApi {
     idx: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
     return this.optionInternal(actionORMethodDef, idx);
   }
 
@@ -67,6 +74,7 @@ export class RecognizerApi {
     idx: number,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>,
   ): any {
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, idx);
     return this.orInternal(altsOrOpts, idx);
   }
 
@@ -75,6 +83,10 @@ export class RecognizerApi {
     idx: number,
     actionORMethodDef: GrammarAction<any> | DSLMethodOpts<any>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
     return this.manyInternal(idx, actionORMethodDef);
   }
 
@@ -83,6 +95,10 @@ export class RecognizerApi {
     idx: number,
     actionORMethodDef: GrammarAction<any> | DSLMethodOptsWithErr<any>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
     return this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
@@ -91,6 +107,8 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, 0, options);
     return this.consumeInternal(tokType, 0, options);
   }
 
@@ -99,6 +117,8 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, 1, options);
     return this.consumeInternal(tokType, 1, options);
   }
 
@@ -107,6 +127,8 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, 2, options);
     return this.consumeInternal(tokType, 2, options);
   }
 
@@ -115,6 +137,8 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, 3, options);
     return this.consumeInternal(tokType, 3, options);
   }
 
@@ -123,6 +147,8 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, 4, options);
     return this.consumeInternal(tokType, 4, options);
   }
 
@@ -131,6 +157,8 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, 5, options);
     return this.consumeInternal(tokType, 5, options);
   }
 
@@ -139,6 +167,8 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, 6, options);
     return this.consumeInternal(tokType, 6, options);
   }
 
@@ -147,6 +177,8 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, 7, options);
     return this.consumeInternal(tokType, 7, options);
   }
 
@@ -155,6 +187,8 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, 8, options);
     return this.consumeInternal(tokType, 8, options);
   }
 
@@ -163,6 +197,8 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, 9, options);
     return this.consumeInternal(tokType, 9, options);
   }
 
@@ -171,6 +207,8 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, 0, options) as R;
     return this.subruleInternal(ruleToCall, 0, options);
   }
 
@@ -179,6 +217,8 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, 1, options) as R;
     return this.subruleInternal(ruleToCall, 1, options);
   }
 
@@ -187,6 +227,8 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, 2, options) as R;
     return this.subruleInternal(ruleToCall, 2, options);
   }
 
@@ -195,6 +237,8 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, 3, options) as R;
     return this.subruleInternal(ruleToCall, 3, options);
   }
 
@@ -203,6 +247,8 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, 4, options) as R;
     return this.subruleInternal(ruleToCall, 4, options);
   }
 
@@ -211,6 +257,8 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, 5, options) as R;
     return this.subruleInternal(ruleToCall, 5, options);
   }
 
@@ -219,6 +267,8 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, 6, options) as R;
     return this.subruleInternal(ruleToCall, 6, options);
   }
 
@@ -227,6 +277,8 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, 7, options) as R;
     return this.subruleInternal(ruleToCall, 7, options);
   }
 
@@ -235,6 +287,8 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, 8, options) as R;
     return this.subruleInternal(ruleToCall, 8, options);
   }
 
@@ -243,6 +297,8 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, 9, options) as R;
     return this.subruleInternal(ruleToCall, 9, options);
   }
 
@@ -250,6 +306,8 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, 0) as OUT;
     return this.optionInternal(actionORMethodDef, 0);
   }
 
@@ -257,6 +315,8 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, 1) as OUT;
     return this.optionInternal(actionORMethodDef, 1);
   }
 
@@ -264,6 +324,8 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, 2) as OUT;
     return this.optionInternal(actionORMethodDef, 2);
   }
 
@@ -271,6 +333,8 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, 3) as OUT;
     return this.optionInternal(actionORMethodDef, 3);
   }
 
@@ -278,6 +342,8 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, 4) as OUT;
     return this.optionInternal(actionORMethodDef, 4);
   }
 
@@ -285,6 +351,8 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, 5) as OUT;
     return this.optionInternal(actionORMethodDef, 5);
   }
 
@@ -292,6 +360,8 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, 6) as OUT;
     return this.optionInternal(actionORMethodDef, 6);
   }
 
@@ -299,6 +369,8 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, 7) as OUT;
     return this.optionInternal(actionORMethodDef, 7);
   }
 
@@ -306,6 +378,8 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, 8) as OUT;
     return this.optionInternal(actionORMethodDef, 8);
   }
 
@@ -313,6 +387,8 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, 9) as OUT;
     return this.optionInternal(actionORMethodDef, 9);
   }
 
@@ -320,6 +396,7 @@ export class RecognizerApi {
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, 0) as T;
     return this.orInternal(altsOrOpts, 0);
   }
 
@@ -327,6 +404,7 @@ export class RecognizerApi {
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, 1) as T;
     return this.orInternal(altsOrOpts, 1);
   }
 
@@ -334,6 +412,7 @@ export class RecognizerApi {
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, 2) as T;
     return this.orInternal(altsOrOpts, 2);
   }
 
@@ -341,6 +420,7 @@ export class RecognizerApi {
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, 3) as T;
     return this.orInternal(altsOrOpts, 3);
   }
 
@@ -348,6 +428,7 @@ export class RecognizerApi {
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, 4) as T;
     return this.orInternal(altsOrOpts, 4);
   }
 
@@ -355,6 +436,7 @@ export class RecognizerApi {
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, 5) as T;
     return this.orInternal(altsOrOpts, 5);
   }
 
@@ -362,6 +444,7 @@ export class RecognizerApi {
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, 6) as T;
     return this.orInternal(altsOrOpts, 6);
   }
 
@@ -369,6 +452,7 @@ export class RecognizerApi {
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, 7) as T;
     return this.orInternal(altsOrOpts, 7);
   }
 
@@ -376,6 +460,7 @@ export class RecognizerApi {
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, 8) as T;
     return this.orInternal(altsOrOpts, 8);
   }
 
@@ -383,6 +468,7 @@ export class RecognizerApi {
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, 9) as T;
     return this.orInternal(altsOrOpts, 9);
   }
 
@@ -390,6 +476,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(0, actionORMethodDef);
+      return;
+    }
     this.manyInternal(0, actionORMethodDef);
   }
 
@@ -397,6 +487,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(1, actionORMethodDef);
+      return;
+    }
     this.manyInternal(1, actionORMethodDef);
   }
 
@@ -404,6 +498,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(2, actionORMethodDef);
+      return;
+    }
     this.manyInternal(2, actionORMethodDef);
   }
 
@@ -411,6 +509,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(3, actionORMethodDef);
+      return;
+    }
     this.manyInternal(3, actionORMethodDef);
   }
 
@@ -418,6 +520,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(4, actionORMethodDef);
+      return;
+    }
     this.manyInternal(4, actionORMethodDef);
   }
 
@@ -425,6 +531,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(5, actionORMethodDef);
+      return;
+    }
     this.manyInternal(5, actionORMethodDef);
   }
 
@@ -432,6 +542,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(6, actionORMethodDef);
+      return;
+    }
     this.manyInternal(6, actionORMethodDef);
   }
 
@@ -439,6 +553,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(7, actionORMethodDef);
+      return;
+    }
     this.manyInternal(7, actionORMethodDef);
   }
 
@@ -446,6 +564,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(8, actionORMethodDef);
+      return;
+    }
     this.manyInternal(8, actionORMethodDef);
   }
 
@@ -453,46 +575,90 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(9, actionORMethodDef);
+      return;
+    }
     this.manyInternal(9, actionORMethodDef);
   }
 
   MANY_SEP<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(0, options);
+      return;
+    }
     this.manySepFirstInternal(0, options);
   }
 
   MANY_SEP1<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(1, options);
+      return;
+    }
     this.manySepFirstInternal(1, options);
   }
 
   MANY_SEP2<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(2, options);
+      return;
+    }
     this.manySepFirstInternal(2, options);
   }
 
   MANY_SEP3<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(3, options);
+      return;
+    }
     this.manySepFirstInternal(3, options);
   }
 
   MANY_SEP4<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(4, options);
+      return;
+    }
     this.manySepFirstInternal(4, options);
   }
 
   MANY_SEP5<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(5, options);
+      return;
+    }
     this.manySepFirstInternal(5, options);
   }
 
   MANY_SEP6<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(6, options);
+      return;
+    }
     this.manySepFirstInternal(6, options);
   }
 
   MANY_SEP7<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(7, options);
+      return;
+    }
     this.manySepFirstInternal(7, options);
   }
 
   MANY_SEP8<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(8, options);
+      return;
+    }
     this.manySepFirstInternal(8, options);
   }
 
   MANY_SEP9<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(9, options);
+      return;
+    }
     this.manySepFirstInternal(9, options);
   }
 
@@ -500,6 +666,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(0, actionORMethodDef);
+      return;
+    }
     this.atLeastOneInternal(0, actionORMethodDef);
   }
 
@@ -507,6 +677,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(1, actionORMethodDef);
+      return;
+    }
     return this.atLeastOneInternal(1, actionORMethodDef);
   }
 
@@ -514,6 +688,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(2, actionORMethodDef);
+      return;
+    }
     this.atLeastOneInternal(2, actionORMethodDef);
   }
 
@@ -521,6 +699,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(3, actionORMethodDef);
+      return;
+    }
     this.atLeastOneInternal(3, actionORMethodDef);
   }
 
@@ -528,6 +710,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(4, actionORMethodDef);
+      return;
+    }
     this.atLeastOneInternal(4, actionORMethodDef);
   }
 
@@ -535,6 +721,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(5, actionORMethodDef);
+      return;
+    }
     this.atLeastOneInternal(5, actionORMethodDef);
   }
 
@@ -542,6 +732,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(6, actionORMethodDef);
+      return;
+    }
     this.atLeastOneInternal(6, actionORMethodDef);
   }
 
@@ -549,6 +743,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(7, actionORMethodDef);
+      return;
+    }
     this.atLeastOneInternal(7, actionORMethodDef);
   }
 
@@ -556,6 +754,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(8, actionORMethodDef);
+      return;
+    }
     this.atLeastOneInternal(8, actionORMethodDef);
   }
 
@@ -563,6 +765,10 @@ export class RecognizerApi {
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(9, actionORMethodDef);
+      return;
+    }
     this.atLeastOneInternal(9, actionORMethodDef);
   }
 
@@ -570,6 +776,10 @@ export class RecognizerApi {
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(0, options);
+      return;
+    }
     this.atLeastOneSepFirstInternal(0, options);
   }
 
@@ -577,6 +787,10 @@ export class RecognizerApi {
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(1, options);
+      return;
+    }
     this.atLeastOneSepFirstInternal(1, options);
   }
 
@@ -584,6 +798,10 @@ export class RecognizerApi {
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(2, options);
+      return;
+    }
     this.atLeastOneSepFirstInternal(2, options);
   }
 
@@ -591,6 +809,10 @@ export class RecognizerApi {
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(3, options);
+      return;
+    }
     this.atLeastOneSepFirstInternal(3, options);
   }
 
@@ -598,6 +820,10 @@ export class RecognizerApi {
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(4, options);
+      return;
+    }
     this.atLeastOneSepFirstInternal(4, options);
   }
 
@@ -605,6 +831,10 @@ export class RecognizerApi {
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(5, options);
+      return;
+    }
     this.atLeastOneSepFirstInternal(5, options);
   }
 
@@ -612,6 +842,10 @@ export class RecognizerApi {
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(6, options);
+      return;
+    }
     this.atLeastOneSepFirstInternal(6, options);
   }
 
@@ -619,6 +853,10 @@ export class RecognizerApi {
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(7, options);
+      return;
+    }
     this.atLeastOneSepFirstInternal(7, options);
   }
 
@@ -626,6 +864,10 @@ export class RecognizerApi {
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(8, options);
+      return;
+    }
     this.atLeastOneSepFirstInternal(8, options);
   }
 
@@ -633,6 +875,10 @@ export class RecognizerApi {
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(9, options);
+      return;
+    }
     this.atLeastOneSepFirstInternal(9, options);
   }
 
@@ -693,6 +939,7 @@ export class RecognizerApi {
     grammarRule: (...args: any[]) => T,
     args?: any[],
   ): () => boolean {
+    if (this.RECORDING_PHASE) return this.BACKTRACK_RECORD(grammarRule, args);
     // Use coreRule to bypass root-level hooks (onBeforeParse/onAfterParse).
     // Backtracking is speculative and should not trigger parse lifecycle hooks.
     const ruleToCall = (grammarRule as any).coreRule ?? grammarRule;

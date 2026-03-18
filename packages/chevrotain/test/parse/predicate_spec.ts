@@ -441,4 +441,623 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       expect(gateOpenInputA).to.equal("aaab");
     });
   });
+
+  describe("OR GATE must be checked even after fast-dispatch cache is populated", () => {
+    it("gated alt takes priority when gate passes, even after gate-free alt was cached", () => {
+      // Scenario:
+      // - Alt 0: GATED (gate = () => this.useGatedAlt), consumes token A → returns "gated"
+      // - Alt 1: gate-free, also consumes token A → returns "ungated"
+      //
+      // Parse 1: gate OFF → alt 0 skipped, alt 1 succeeds → cached for LA(1)=A
+      // Parse 2: gate ON  → fast path must NOT skip alt 0's gate check
+      //
+      // Without the fix, parse 2 dispatches directly to cached alt 1,
+      // ignoring alt 0 even though its gate now passes.
+
+      class GateFastPathParser extends EmbeddedActionsParser {
+        public useGatedAlt = false;
+
+        constructor() {
+          super(ALL_TOKENS, {});
+          this.performSelfAnalysis();
+        }
+
+        public topRule = this.RULE("topRule", () => {
+          return this.OR([
+            {
+              GATE: () => this.useGatedAlt,
+              ALT: () => {
+                this.CONSUME1(A);
+                return "gated";
+              },
+            },
+            {
+              ALT: () => {
+                this.CONSUME2(A);
+                return "ungated";
+              },
+            },
+          ]);
+        });
+      }
+
+      const parser = new GateFastPathParser();
+
+      // Parse 1: gate closed → alt 1 wins, gets cached for LA(1) = A
+      parser.useGatedAlt = false;
+      parser.input = [createRegularToken(A)];
+      expect(parser.topRule()).to.equal("ungated");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 2: gate still closed → alt 1 should still win
+      parser.useGatedAlt = false;
+      parser.input = [createRegularToken(A)];
+      expect(parser.topRule()).to.equal("ungated");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 3: gate OPEN → alt 0 should win (higher priority, gate passes)
+      parser.useGatedAlt = true;
+      parser.input = [createRegularToken(A)];
+      expect(parser.topRule()).to.equal("gated");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 4: gate closed again → alt 1 should win again
+      parser.useGatedAlt = false;
+      parser.input = [createRegularToken(A)];
+      expect(parser.topRule()).to.equal("ungated");
+      expect(parser.errors).to.be.empty;
+    });
+
+    it("alt with gated OPTION at start remains a fast-path candidate after failure", () => {
+      // Scenario:
+      // - Alt 0: starts with OPTION(GATE: flag, DEF: CONSUME(A)), then CONSUME(B)
+      // - Alt 1: CONSUME(A)
+      //
+      // Parse 1: flag ON  → OPTION consumes A, then CONSUME(B) → alt 0 succeeds
+      //          → alt 0 is cached as candidate for LA(1)=A
+      // Parse 2: flag OFF → OPTION skipped, CONSUME(B) fails on A → alt 0 fails
+      //          → fast path must NOT remove alt 0 from candidates
+      //          → alt 1 succeeds
+      // Parse 3: flag ON again → alt 0 should succeed again (still a candidate)
+
+      class GatedOptionParser extends EmbeddedActionsParser {
+        public optionFlag = true;
+
+        constructor() {
+          super(ALL_TOKENS, {});
+          this.performSelfAnalysis();
+        }
+
+        public topRule = this.RULE("topRule", () => {
+          return this.OR([
+            {
+              ALT: () => {
+                this.OPTION({
+                  GATE: () => this.optionFlag,
+                  DEF: () => this.CONSUME1(A),
+                });
+                this.CONSUME1(B);
+                return "optionAlt";
+              },
+            },
+            {
+              ALT: () => {
+                this.CONSUME2(A);
+                return "plainAlt";
+              },
+            },
+          ]);
+        });
+      }
+
+      const parser = new GatedOptionParser();
+
+      // Parse 1: flag ON → OPTION takes A, then B consumed → "optionAlt"
+      parser.optionFlag = true;
+      parser.input = [createRegularToken(A), createRegularToken(B)];
+      expect(parser.topRule()).to.equal("optionAlt");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 2: flag OFF, input is just A → OPTION skipped, CONSUME(B) fails
+      //          → falls to alt 1 which consumes A → "plainAlt"
+      parser.optionFlag = false;
+      parser.input = [createRegularToken(A)];
+      expect(parser.topRule()).to.equal("plainAlt");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 3: flag ON again → alt 0 must still be in the candidate list
+      parser.optionFlag = true;
+      parser.input = [createRegularToken(A), createRegularToken(B)];
+      expect(parser.topRule()).to.equal("optionAlt");
+      expect(parser.errors).to.be.empty;
+    });
+
+    it("failed alt with progress is added to fast-path cache", () => {
+      // Two alts start with the same token (A) but require different
+      // continuations. When alt 0 fails after consuming A (progress > 0),
+      // it should still be recorded in the fast-path candidate list for
+      // LA(1)=A. On the next call where alt 0's input is valid, the fast
+      // path should include it.
+      //
+      // Alt 0: CONSUME(A), CONSUME(B) → needs [A, B]
+      // Alt 1: CONSUME(A), CONSUME(C) → needs [A, C]
+
+      class FailWithProgressParser extends EmbeddedActionsParser {
+        constructor() {
+          super(ALL_TOKENS, {});
+          this.performSelfAnalysis();
+        }
+
+        public topRule = this.RULE("topRule", () => {
+          return this.OR([
+            {
+              ALT: () => {
+                this.CONSUME1(A);
+                this.CONSUME1(B);
+                return "alt0";
+              },
+            },
+            {
+              ALT: () => {
+                this.CONSUME2(A);
+                this.CONSUME1(C);
+                return "alt1";
+              },
+            },
+          ]);
+        });
+      }
+
+      const parser = new FailWithProgressParser();
+
+      // Parse 1: input [A, C] → alt 0 consumes A, fails on B (progress > 0)
+      //          → alt 0 added to cache for LA(1)=A despite failure
+      //          → alt 1 succeeds → also added to cache
+      parser.input = [createRegularToken(A), createRegularToken(C)];
+      expect(parser.topRule()).to.equal("alt1");
+      expect(parser.errors).to.be.empty;
+
+      // Verify both alts are in the fast-path candidate list for token A
+      const tokenAIdx = (A as any).tokenTypeIdx;
+      const fastMaps = (parser as any)._orFastMaps;
+      const mapKeys = Object.keys(fastMaps);
+      expect(mapKeys.length).to.be.greaterThan(0);
+      const candidates = fastMaps[mapKeys[0]][tokenAIdx];
+      expect(candidates).to.be.an("array");
+      expect(candidates).to.include(
+        0,
+        "alt 0 should be cached (failed with progress)",
+      );
+      expect(candidates).to.include(1, "alt 1 should be cached (succeeded)");
+      // Candidates should be sorted by declaration order
+      expect(candidates).to.deep.equal([0, 1]);
+
+      // Parse 2: input [A, B] → fast path finds both candidates,
+      //          tries alt 0 first → succeeds
+      parser.input = [createRegularToken(A), createRegularToken(B)];
+      expect(parser.topRule()).to.equal("alt0");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 3: input [A, C] again → fast path, alt 0 fails, alt 1 succeeds
+      parser.input = [createRegularToken(A), createRegularToken(C)];
+      expect(parser.topRule()).to.equal("alt1");
+      expect(parser.errors).to.be.empty;
+    });
+
+    it("non-gated OPTION at start of ALT is stable in the fast-path cache", () => {
+      // A non-gated OPTION always attempts its body — no context-dependent
+      // skipping. The alt is deterministic for a given LA(1):
+      // - LA(1)=A → OPTION consumes A, then CONSUME(B) or CONSUME(C)
+      // - LA(1)=B → OPTION skipped, CONSUME(B)
+      //
+      // Once cached, the same LA(1) always takes the same path.
+
+      class NonGatedOptionParser extends EmbeddedActionsParser {
+        constructor() {
+          super(ALL_TOKENS, {});
+          this.performSelfAnalysis();
+        }
+
+        public topRule = this.RULE("topRule", () => {
+          return this.OR([
+            {
+              ALT: () => {
+                this.OPTION(() => this.CONSUME1(A));
+                this.CONSUME1(B);
+                return "alt0";
+              },
+            },
+            {
+              ALT: () => {
+                this.CONSUME2(A);
+                this.CONSUME1(C);
+                return "alt1";
+              },
+            },
+          ]);
+        });
+      }
+
+      const parser = new NonGatedOptionParser();
+
+      // Parse 1: [A, B] → alt 0 OPTION takes A, CONSUME(B) → "alt0"
+      parser.input = [createRegularToken(A), createRegularToken(B)];
+      expect(parser.topRule()).to.equal("alt0");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 2: [B] → alt 0 OPTION skipped, CONSUME(B) → "alt0"
+      parser.input = [createRegularToken(B)];
+      expect(parser.topRule()).to.equal("alt0");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 3: [A, C] → alt 0 OPTION takes A, CONSUME(B) fails on C
+      //          → alt 1 takes A, CONSUME(C) → "alt1"
+      parser.input = [createRegularToken(A), createRegularToken(C)];
+      expect(parser.topRule()).to.equal("alt1");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 4: repeat [A, B] → still works (alt 0 still cached for LA(1)=A)
+      parser.input = [createRegularToken(A), createRegularToken(B)];
+      expect(parser.topRule()).to.equal("alt0");
+      expect(parser.errors).to.be.empty;
+    });
+
+    it("gated OPTION nested inside a SUBRULE is handled correctly", () => {
+      // The gated OPTION is inside a sub-rule, not directly in the ALT body.
+      // Progress tracking works by lexer position, so nesting depth doesn't
+      // matter — if the SUBRULE's body consumed tokens, progress > 0.
+      //
+      // Alt 0: SUBRULE(helper) where helper = OPTION(GATE, CONSUME(A)) + CONSUME(B)
+      // Alt 1: CONSUME(A)
+
+      class NestedGatedOptionParser extends EmbeddedActionsParser {
+        public optionFlag = true;
+
+        constructor() {
+          super(ALL_TOKENS, {});
+          this.performSelfAnalysis();
+        }
+
+        public helper = this.RULE("helper", () => {
+          this.OPTION({
+            GATE: () => this.optionFlag,
+            DEF: () => this.CONSUME1(A),
+          });
+          this.CONSUME1(B);
+        });
+
+        public topRule = this.RULE("topRule", () => {
+          return this.OR([
+            {
+              ALT: () => {
+                this.SUBRULE(this.helper);
+                return "subruleAlt";
+              },
+            },
+            {
+              ALT: () => {
+                this.CONSUME2(A);
+                return "plainAlt";
+              },
+            },
+          ]);
+        });
+      }
+
+      const parser = new NestedGatedOptionParser();
+
+      // Parse 1: flag ON, [A, B] → helper OPTION takes A, CONSUME(B) → "subruleAlt"
+      parser.optionFlag = true;
+      parser.input = [createRegularToken(A), createRegularToken(B)];
+      expect(parser.topRule()).to.equal("subruleAlt");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 2: flag OFF, [A] → helper OPTION skipped, CONSUME(B) fails on A
+      //          → alt 0 fails (progress > 0 not guaranteed here since OPTION
+      //            was skipped and CONSUME(B) is the first CONSUME attempted)
+      //          → alt 1 takes A → "plainAlt"
+      parser.optionFlag = false;
+      parser.input = [createRegularToken(A)];
+      expect(parser.topRule()).to.equal("plainAlt");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 3: flag ON again, [A, B] → alt 0 should still work
+      parser.optionFlag = true;
+      parser.input = [createRegularToken(A), createRegularToken(B)];
+      expect(parser.topRule()).to.equal("subruleAlt");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 4: flag OFF, [B] → helper OPTION skipped, CONSUME(B) → "subruleAlt"
+      //          (OPTION gate closed but B is consumed directly — different LA(1))
+      parser.optionFlag = false;
+      parser.input = [createRegularToken(B)];
+      expect(parser.topRule()).to.equal("subruleAlt");
+      expect(parser.errors).to.be.empty;
+    });
+
+    it("gated OPTION closed on first run, open on later run — alt must still be tried", () => {
+      // The critical scenario:
+      // - Alt 0: OPTION({ GATE: flag, DEF: CONSUME(A) }), CONSUME(B)
+      // - Alt 1: CONSUME(A)
+      //
+      // Parse 1: flag=false, input=[A]
+      //   → Alt 0: OPTION gate closed (skipped), CONSUME(B) fails on A (progress=0)
+      //   → Alt 1: CONSUME(A) succeeds → cached for LA(1)=A: [1]
+      //   → Alt 0 is NOT in candidate list for A (it never consumed A)
+      //
+      // Parse 2: flag=true, input=[A, B]
+      //   → Fast path for LA(1)=A: candidates = [1] (only alt 1)
+      //   → Alt 1: CONSUME(A) → succeeds → returns "alt1"
+      //   → BUT alt 0 has higher priority and would succeed:
+      //     OPTION gate open → consumes A, CONSUME(B) → "alt0"
+      //
+      // Without tracking gated-prefix OPTIONs, the fast path gives the
+      // WRONG result: it returns "alt1" instead of "alt0".
+
+      class GatedPrefixParser extends EmbeddedActionsParser {
+        public flag = false;
+
+        constructor() {
+          super(ALL_TOKENS, {});
+          this.performSelfAnalysis();
+        }
+
+        public topRule = this.RULE("topRule", () => {
+          return this.OR([
+            {
+              ALT: () => {
+                this.OPTION({
+                  GATE: () => this.flag,
+                  DEF: () => this.CONSUME1(A),
+                });
+                this.CONSUME1(B);
+                return "alt0";
+              },
+            },
+            {
+              ALT: () => {
+                this.CONSUME2(A);
+                return "alt1";
+              },
+            },
+          ]);
+        });
+      }
+
+      const parser = new GatedPrefixParser();
+
+      // Parse 1: flag OFF, input [A] → alt 0 fails (progress=0), alt 1 wins
+      // Fast map for LA(1)=A: [1] — alt 0 is missing.
+      parser.flag = false;
+      parser.input = [createRegularToken(A)];
+      expect(parser.topRule()).to.equal("alt1");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 2: flag ON, input [A, B] → alt 0 should win (higher priority,
+      // OPTION gate now open → consumes A, then CONSUME(B))
+      parser.flag = true;
+      parser.input = [createRegularToken(A), createRegularToken(B)];
+      expect(parser.topRule()).to.equal("alt0");
+      expect(parser.errors).to.be.empty;
+    });
+
+    it("BUG: nested OR must not corrupt outer OR gated-prefix tracking", () => {
+      // Outer OR alt 0 calls SUBRULE(innerRule). innerRule has its own OR
+      // with a gated OPTION. The inner OR sets _orAltHasGatedPrefix = true
+      // for its own alt. When control returns to the outer OR, it must NOT
+      // see the inner OR's flag — outer alt 0 has no gated prefix of its own.
+      //
+      // Without save/restore of _orAltStartLexPos/_orAltHasGatedPrefix
+      // around orInternal, the outer OR incorrectly marks alt 0 as having
+      // a gated prefix, preventing it from being cached.
+
+      class NestedOrParser extends EmbeddedActionsParser {
+        public innerFlag = false;
+
+        constructor() {
+          super(ALL_TOKENS, {});
+          this.performSelfAnalysis();
+        }
+
+        // Inner rule has a gated OPTION at the start of its first alt.
+        public innerRule = this.RULE("innerRule", () => {
+          return this.OR([
+            {
+              ALT: () => {
+                this.OPTION({
+                  GATE: () => this.innerFlag,
+                  DEF: () => this.CONSUME1(A),
+                });
+                this.CONSUME1(B);
+                return "innerAlt0";
+              },
+            },
+            {
+              ALT: () => {
+                this.CONSUME2(A);
+                return "innerAlt1";
+              },
+            },
+          ]);
+        });
+
+        // Outer OR: alt 0 calls SUBRULE(innerRule), alt 1 consumes C.
+        // Alt 0 has NO gated prefix — the gated OPTION is inside innerRule.
+        public topRule = this.RULE("topRule", () => {
+          return this.OR([
+            {
+              ALT: () => {
+                const inner = this.SUBRULE(this.innerRule);
+                return "outer0:" + inner;
+              },
+            },
+            {
+              ALT: () => {
+                this.CONSUME3(C);
+                return "outer1";
+              },
+            },
+          ]);
+        });
+      }
+
+      const parser = new NestedOrParser();
+
+      // Parse 1: innerFlag OFF, input [A] → inner alt 1 wins → "outer0:innerAlt1"
+      parser.innerFlag = false;
+      parser.input = [createRegularToken(A)];
+      expect(parser.topRule()).to.equal("outer0:innerAlt1");
+      expect(parser.errors).to.be.empty;
+
+      // Parse 2: same input → should use fast path for outer OR.
+      // BUG: if inner OR's gated-prefix flag leaked, outer alt 0 is NOT
+      // cached and the slow loop runs unnecessarily.
+      // Verify by checking outer alt 0 IS in the fast-path candidates.
+      parser.innerFlag = false;
+      parser.input = [createRegularToken(A)];
+      expect(parser.topRule()).to.equal("outer0:innerAlt1");
+      expect(parser.errors).to.be.empty;
+
+      // Behavioral check: parse 2 with same input should succeed via
+      // fast path (outer alt 0 cached). If the inner OR's gated-prefix
+      // flag leaked, outer alt 0 would be in _orGatedPrefixAlts instead
+      // of _orFastMaps, forcing unnecessary slow-loop speculation.
+      //
+      // Verify: the outer OR's mapKey should NOT have alt 0 in
+      // _orGatedPrefixAlts. The inner OR's mapKey will (correctly) have
+      // its own alt 0 there — so we must check the right mapKey.
+      //
+      // The simplest behavioral proof: a third parse with different inner
+      // gate state but same outer input still picks outer alt 0 without
+      // hitting the slow loop. We can't directly observe fast vs slow, but
+      // we can verify outer alt 0 is in _orFastMaps (token-cached).
+      const tokenAIdx = (A as any).tokenTypeIdx;
+      const fastMaps = (parser as any)._orFastMaps;
+      const gatedPrefixAlts = (parser as any)._orGatedPrefixAlts;
+
+      // Find outer OR's mapKey: it's the one with a candidate list for
+      // token A that includes alt index 0, AND has alt index 1 (outer has
+      // 2 alts; inner also has 2 alts but different token patterns).
+      let outerMapKey: string | undefined;
+      for (const key of Object.keys(fastMaps)) {
+        const candidates = fastMaps[key][tokenAIdx];
+        if (candidates !== undefined && candidates.includes(0)) {
+          outerMapKey = key;
+        }
+      }
+      expect(outerMapKey, "outer OR alt 0 should be in token-based fast map").to
+        .not.be.undefined;
+      // Outer OR's mapKey should NOT be in _orGatedPrefixAlts.
+      expect(
+        gatedPrefixAlts[outerMapKey!],
+        "outer OR should not have gated-prefix alts",
+      ).to.be.undefined;
+    });
+
+    it("BUG: _orGatedPrefixAlts must remain sorted across multiple calls", () => {
+      // If alt 2 is discovered as gated-prefix on call 1, and alt 0 on
+      // call 2, the list becomes [2, 0] — unsorted. The fast-path merge
+      // iteration uses sorted-order pointers and would skip alt 0.
+      //
+      // Construct: three alts with no LL(k) ambiguity at the non-gated level.
+      // Alts 0 and 2 have gated OPTIONs, alt 1 is a plain fallback.
+      // Call 1: gate0 OFF, gate2 ON → alt 2 discovered as gated-prefix first.
+      // Call 2: gate0 ON, gate2 OFF → alt 0 discovered as gated-prefix second.
+
+      class MultiGatedParser extends EmbeddedActionsParser {
+        public gate0 = false;
+        public gate2 = false;
+
+        constructor() {
+          // skipValidations: the speculative engine handles LL(1) ambiguity
+          // at runtime via multi-candidate fast-dispatch — no need for the
+          // old lookahead ambiguity check.
+          super(ALL_TOKENS, { skipValidations: true });
+          this.performSelfAnalysis();
+        }
+
+        public topRule = this.RULE("topRule", () => {
+          return this.OR([
+            {
+              // Alt 0: gated OPTION(A) then B
+              ALT: () => {
+                this.OPTION({
+                  GATE: () => this.gate0,
+                  DEF: () => this.CONSUME1(A),
+                });
+                this.CONSUME1(B);
+                return "alt0";
+              },
+            },
+            {
+              // Alt 1: plain A (no gate)
+              ALT: () => {
+                this.CONSUME2(A);
+                return "alt1";
+              },
+            },
+            {
+              // Alt 2: gated OPTION(B) then C
+              ALT: () => {
+                this.OPTION2({
+                  GATE: () => this.gate2,
+                  DEF: () => this.CONSUME3(B),
+                });
+                this.CONSUME1(C);
+                return "alt2";
+              },
+            },
+          ]);
+        });
+      }
+
+      const parser = new MultiGatedParser();
+
+      // Call 1: gate0 OFF, gate2 ON, input [C]
+      // Alt 0: OPTION skipped (gate0 OFF), CONSUME(B) fails on C → progress=0, gated prefix
+      // Alt 1: CONSUME(A) fails on C → progress=0
+      // Alt 2: OPTION gate2 ON → CONSUME(B) fails on C → OPTION fails,
+      //         CONSUME(C) succeeds → "alt2"
+      // → alt 2 gated prefix discovered (and alt 0 too)
+      parser.gate0 = false;
+      parser.gate2 = true;
+      parser.input = [createRegularToken(C)];
+      expect(parser.topRule()).to.equal("alt2");
+      expect(parser.errors).to.be.empty;
+
+      // Call 2: gate0 ON, gate2 OFF, input [B]
+      // Alt 0: OPTION gate0 ON → CONSUME(A) fails on B → OPTION fails,
+      //         CONSUME(B) succeeds → "alt0"
+      // → alt 0 gated prefix discovered
+      parser.gate0 = true;
+      parser.gate2 = false;
+      parser.input = [createRegularToken(B)];
+      expect(parser.topRule()).to.equal("alt0");
+      expect(parser.errors).to.be.empty;
+
+      // Verify _orGatedPrefixAlts is sorted [0, 2], not [2, 0].
+      const gatedPrefixAlts = (parser as any)._orGatedPrefixAlts;
+      const keys = Object.keys(gatedPrefixAlts);
+      for (const key of keys) {
+        const gpa = gatedPrefixAlts[key];
+        if (gpa.length > 1) {
+          for (let j = 1; j < gpa.length; j++) {
+            expect(gpa[j]).to.be.greaterThan(
+              gpa[j - 1],
+              `_orGatedPrefixAlts must be sorted, got: [${gpa}]`,
+            );
+          }
+        }
+      }
+
+      // Call 3: gate0 ON, gate2 ON, input [A, B]
+      // Both gated-prefix alts should be tried. Alt 0 (OPTION takes A,
+      // CONSUME(B)) should win since it's first in declaration order.
+      parser.gate0 = true;
+      parser.gate2 = true;
+      parser.input = [createRegularToken(A), createRegularToken(B)];
+      expect(parser.topRule()).to.equal("alt0");
+      expect(parser.errors).to.be.empty;
+    });
+  });
 });

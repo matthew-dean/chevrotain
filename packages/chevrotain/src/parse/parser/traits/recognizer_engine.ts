@@ -60,6 +60,47 @@ import { ParserMethodInternal } from "../types.js";
 export const SPEC_FAIL = Symbol("SPEC_FAIL");
 
 /**
+ * Records alt index `altIdx` as a fast-path candidate for the given
+ * `(mapKey, tokenTypeIdx)`. Also includes any preceding gated alts whose
+ * gates may have been closed when the slow loop ran — they could match this
+ * token when their gates open on a future call. The candidate list is kept
+ * sorted by alt index (declaration order = priority).
+ */
+function addOrCandidate(
+  orFastMaps: Record<number, number[][]>,
+  mapKey: number,
+  tokenTypeIdx: number,
+  altIdx: number,
+  alts: IOrAlt<any>[],
+): void {
+  let fm = orFastMaps[mapKey];
+  if (fm === undefined) {
+    fm = [];
+    orFastMaps[mapKey] = fm;
+  }
+  let list = fm[tokenTypeIdx];
+  if (list === undefined) {
+    list = [];
+    fm[tokenTypeIdx] = list;
+  }
+  // Include preceding gated alts: their gates were closed when the slow
+  // loop ran, but they could match this token when gates open later.
+  for (let g = 0; g < altIdx; g++) {
+    if (alts[g].GATE !== undefined && !list.includes(g)) {
+      list.push(g);
+    }
+  }
+  if (!list.includes(altIdx)) {
+    list.push(altIdx);
+  }
+  // Keep sorted by declaration order so the fast path tries candidates
+  // in priority order.
+  if (list.length > 1) {
+    list.sort((a, b) => a - b);
+  }
+}
+
+/**
  * Thrown by `consumeInternal` when `_earlyExitLookahead` is true and a token
  * successfully matches. This aborts the action immediately after the first
  * successful CONSUME, preventing embedded-action side effects from executing
@@ -109,12 +150,32 @@ export class RecognizerEngine {
   currRuleShortName: number;
   /**
    * Lazy LL(1) fast-dispatch maps, keyed by `currRuleShortName | occurrence`.
-   * Each entry is a number[] mapping tokenTypeIdx → altIndex.
+   * Each entry is a number[][] mapping tokenTypeIdx → altIndex[].
    * Stored as a plain object (not array) to avoid V8's sparse-array
    * dictionary-mode penalty — currRuleShortName multiples of 256 would leave
    * large gaps in a numeric array.
    */
-  _orFastMaps: Record<number, number[]>;
+  _orFastMaps: Record<number, number[][]>;
+  /**
+   * Per-OR set of alt indices whose first-token set is gate-dependent
+   * (they have a gated OPTION/MANY/AT_LEAST_ONE before their first CONSUME).
+   * Keyed by the same mapKey as _orFastMaps. These alts must always be
+   * speculated on the fast path — they cannot be cached by LA(1) alone.
+   */
+  _orGatedPrefixAlts: Record<number, number[]>;
+  /**
+   * Set during an OR alt's speculative execution. Records the lexer position
+   * at the start of the alt so that gated productions (OPTION, MANY, etc.)
+   * can detect whether they are executing before the first CONSUME.
+   */
+  _orAltStartLexPos: number;
+  /**
+   * Set to true when a gated production (OPTION/MANY/AT_LEAST_ONE with GATE)
+   * is encountered before the first CONSUME in an OR alt. When true, the alt
+   * must not be added to the fast-dispatch candidate list because its
+   * first-token set depends on gate state.
+   */
+  _orAltHasGatedPrefix: boolean;
 
   initRecognizerEngine(
     tokenVocabulary: TokenVocabulary,
@@ -132,6 +193,9 @@ export class RecognizerEngine {
     this._isInTrueBacktrack = false;
     this._earlyExitLookahead = false;
     this._orFastMaps = Object.create(null);
+    this._orGatedPrefixAlts = Object.create(null);
+    this._orAltStartLexPos = 0;
+    this._orAltHasGatedPrefix = false;
 
     this.definedRulesNames = [];
     this.tokensMap = {};
@@ -409,6 +473,13 @@ export class RecognizerEngine {
     // GATE as a filter: if it fails skip immediately; if it passes fall through
     // to the speculative save/restore path (gate is a necessary but not sufficient
     // condition — the body may still not match the current tokens).
+    // Track gated prefix: if this gated production fires before the first
+    // CONSUME in an OR alt, the alt's first-token set is gate-dependent.
+    if (gate !== undefined && this.IS_SPECULATING) {
+      if (this.exportLexerState() === this._orAltStartLexPos) {
+        this._orAltHasGatedPrefix = true;
+      }
+    }
     if (gate !== undefined && !gate.call(this)) {
       return undefined;
     }
@@ -472,6 +543,12 @@ export class RecognizerEngine {
       gate = undefined;
     }
 
+    // Track gated prefix for OR fast-path cache.
+    if (gate !== undefined && this.IS_SPECULATING) {
+      if (this.exportLexerState() === this._orAltStartLexPos) {
+        this._orAltHasGatedPrefix = true;
+      }
+    }
     if (gate !== undefined && !gate.call(this)) {
       throw this.raiseEarlyExitException(
         prodOccurrence,
@@ -678,6 +755,12 @@ export class RecognizerEngine {
     // only the lexer position requires rollback on SPEC_FAIL.
     // RULE_STACK_IDX is always self-correcting via ruleFinallyStateUpdate (finally).
     while (notStuck) {
+      // Track gated prefix for OR fast-path cache (first iteration only).
+      if (gate !== undefined && this.IS_SPECULATING && !ranAtLeastOnce) {
+        if (this.exportLexerState() === this._orAltStartLexPos) {
+          this._orAltHasGatedPrefix = true;
+        }
+      }
       if (gate !== undefined && !gate.call(this)) break;
       const iterLexPos = this.exportLexerState();
       this.IS_SPECULATING = true;
@@ -904,65 +987,83 @@ export class RecognizerEngine {
       ? undefined
       : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
     const wasSpeculating = this.IS_SPECULATING;
+    // Save outer OR's gated-prefix tracking state so nested ORs (via
+    // SUBRULEs) don't corrupt it.
+    const savedAltStartLexPos = this._orAltStartLexPos;
+    const savedAltHasGatedPrefix = this._orAltHasGatedPrefix;
 
     // -----------------------------------------------------------------------
-    // Fast-dispatch path — O(1) LL(1) shortcut, populated lazily.
+    // Fast-dispatch path — LL(1) candidate filter, populated lazily.
     //
-    // The `_fastMap` sparse array on the alts object maps
-    // `tokenTypeIdx → altIndex` for alts whose first token has been
-    // observed in a previous successful speculative trial (see population
-    // below). Only alts without GATE conditions are eligible, since
-    // GATEd alts are context-sensitive and unsafe to dispatch by token alone.
+    // `_orFastMaps[mapKey][tokenTypeIdx]` holds an array of alt indices
+    // whose bodies have previously been observed to match when LA(1) had
+    // this token type. This narrows the full alt list to only those that
+    // are *possible* for the current token.
     //
-    // When a mapping exists for LA(1), we call the alt directly:
-    //   - no IS_SPECULATING flip
-    //   - no save / restore
-    //   - no try / catch
-    // This removes the per-OR try/catch overhead that prevents V8 TurboFan
-    // from inlining the alt body, restoring near-LL(k) throughput for
-    // unambiguous LL(1) grammars (e.g. JSON, CSS).
+    // Gates further restrict the candidate list: each candidate's GATE
+    // (if any) is checked, and the first candidate whose gate passes is
+    // tried committed (no speculation overhead). For gate-free, unambiguous
+    // LL(1) grammars (e.g. JSON, CSS) the candidate list is always length 1
+    // and there are no gates to check — this is the fastest path.
     //
-    // If the grammar is correct and deterministic the fast alt never fails.
-    // A failure propagates as a normal exception to the caller (which may be
-    // a MANY catch that already holds a savepoint — so state is still safe).
+    // If no candidate succeeds (rare: LL(1)-ambiguous grammar, or all gates
+    // closed), we fall through to the full speculative loop below.
     // -----------------------------------------------------------------------
     const la1TypeIdx = this.LA_FAST(1).tokenTypeIdx;
     const mapKey = this.currRuleShortName | occurrence;
     const fastMap = this._orFastMaps[mapKey];
-    if (fastMap !== undefined) {
-      const fastAltIdx = fastMap[la1TypeIdx];
-      // -1 sentinel means LA(1) is known-ambiguous — skip fast path
-      if (fastAltIdx !== undefined && fastAltIdx !== -1) {
-        // Guard with try/catch: for unambiguous grammars (JSON, CSS) the fast
-        // alt always succeeds and the catch never fires. For grammars that are
-        // ambiguous at LL(1), a failure invalidates this cache entry so the
-        // next call falls through to the full speculative loop.
+    const gatedPrefixAlts = this._orGatedPrefixAlts[mapKey];
+    if (fastMap !== undefined || gatedPrefixAlts !== undefined) {
+      const candidates =
+        fastMap !== undefined ? fastMap[la1TypeIdx] : undefined;
+      // Merge token-based candidates with gated-prefix alts (which must
+      // always be speculated regardless of LA(1)). Iterate in declaration
+      // order to respect priority.
+      // For gate-free grammars: gatedPrefixAlts is undefined, candidates
+      // is typically length 1 — zero overhead from the merge.
+      const maxAlt = alts.length;
+      let cIdx = 0; // index into candidates
+      let gIdx = 0; // index into gatedPrefixAlts
+      for (let altIdx = 0; altIdx < maxAlt; altIdx++) {
+        // Is this altIdx in either list?
+        const inCandidates =
+          candidates !== undefined &&
+          cIdx < candidates.length &&
+          candidates[cIdx] === altIdx;
+        const inGated =
+          gatedPrefixAlts !== undefined &&
+          gIdx < gatedPrefixAlts.length &&
+          gatedPrefixAlts[gIdx] === altIdx;
+        if (inCandidates) cIdx++;
+        if (inGated) gIdx++;
+        if (!inCandidates && !inGated) continue;
+
+        const alt = alts[altIdx];
+        // Gates restrict: if this alt has an OR-level gate and it fails, skip.
+        if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
+
+        // Try this candidate. On failure, restore and continue.
         const fastLexPos = this.exportLexerState();
         if (wasSpeculating) {
-          // IS_SPECULATING is already true: Stage 3 skips CST and error building,
-          // so only the lexer position needs save/restore on failure.
           try {
-            return alts[fastAltIdx].ALT.call(this) as T;
+            return alt.ALT.call(this) as T;
           } catch (_e) {
             this.importLexerState(fastLexPos);
-            fastMap[la1TypeIdx] = -1;
-            // fall through to full speculative loop
           }
         } else {
-          // IS_SPECULATING is false: alt runs committed — save CST and errors.
           const fastErrors = this._errors.length;
           const fastCstSave = this.saveCstTop();
           try {
-            return alts[fastAltIdx].ALT.call(this) as T;
+            return alt.ALT.call(this) as T;
           } catch (_e) {
             this.restoreCstTop(fastCstSave);
             this.importLexerState(fastLexPos);
             this._errors.length = fastErrors;
-            fastMap[la1TypeIdx] = -1;
-            // fall through to full speculative loop
           }
         }
       }
+      // All candidates failed or were gated out — fall through to full
+      // speculative loop (there may be alts not yet observed for this LA(1)).
     }
 
     let bestProgress = -1;
@@ -980,30 +1081,58 @@ export class RecognizerEngine {
       const alt = alts[i];
       if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
       this.IS_SPECULATING = true;
+      // Track whether a gated production fires before the first CONSUME.
+      // If so, this alt's first-token set is gate-dependent and must not
+      // be cached — it must always be speculated.
+      this._orAltStartLexPos = startLexPos;
+      this._orAltHasGatedPrefix = false;
       try {
         const result = alt.ALT.call(this) as T;
         this.IS_SPECULATING = wasSpeculating;
-        // Populate the fast-dispatch map for this alt so future calls with
-        // the same LA(1) token type skip speculation entirely.
-        // Only safe for GATE-free alts (pure token-driven dispatch).
-        if (alt.GATE === undefined) {
-          let fm = this._orFastMaps[mapKey];
-          if (fm === undefined) {
-            fm = [];
-            this._orFastMaps[mapKey] = fm;
+        if (this._orAltHasGatedPrefix) {
+          // Record that this alt has a gated prefix — it must always be
+          // speculated on the fast path, never cached by LA(1) alone.
+          let gpa = this._orGatedPrefixAlts[mapKey];
+          if (gpa === undefined) {
+            gpa = [];
+            this._orGatedPrefixAlts[mapKey] = gpa;
           }
-          // If another alt already claimed this LA(1), mark as ambiguous.
-          if (fm[la1TypeIdx] !== undefined && fm[la1TypeIdx] !== i) {
-            fm[la1TypeIdx] = -1;
-          } else {
-            fm[la1TypeIdx] = i;
+          if (!gpa.includes(i)) {
+            gpa.push(i);
+            if (gpa.length > 1) gpa.sort((a, b) => a - b);
           }
+        } else {
+          addOrCandidate(this._orFastMaps, mapKey, la1TypeIdx, i, alts);
         }
+        this._orAltStartLexPos = savedAltStartLexPos;
+        this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
         return result;
       } catch (e) {
         this.IS_SPECULATING = wasSpeculating;
         if (e === SPEC_FAIL || isRecognitionException(e)) {
           const progress = this.exportLexerState() - startLexPos;
+          // Alt consumed tokens → it can match this LA(1). Record it as
+          // a fast-path candidate even though it failed overall — it may
+          // succeed on a future call with different subsequent tokens or
+          // different internal gating state.
+          // But NOT if the alt has a gated prefix — its first-token set is
+          // gate-dependent and could change between calls.
+          if (this._orAltHasGatedPrefix) {
+            let gpa = this._orGatedPrefixAlts[mapKey];
+            if (gpa === undefined) {
+              gpa = [];
+              this._orGatedPrefixAlts[mapKey] = gpa;
+            }
+            if (!gpa.includes(i)) {
+              gpa.push(i);
+              if (gpa.length > 1) gpa.sort((a, b) => a - b);
+            }
+          } else if (progress > 0) {
+            addOrCandidate(this._orFastMaps, mapKey, la1TypeIdx, i, alts);
+          }
+          if (progress > 0) {
+            this.importLexerState(startLexPos);
+          }
           if (progress > bestProgress) {
             bestProgress = progress;
             bestAltIdx = i;
@@ -1013,16 +1142,16 @@ export class RecognizerEngine {
             // safely commit to either — raise a proper NoViableAlt instead.
             uniqueBest = false;
           }
-          // Only restore lexer position if this alt actually consumed tokens.
-          if (progress > 0) {
-            this.importLexerState(startLexPos);
-          }
           // continue to next alternative
         } else {
           throw e;
         }
       }
     }
+
+    // Restore outer OR's gated-prefix tracking state.
+    this._orAltStartLexPos = savedAltStartLexPos;
+    this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
 
     // All alts failed.
     if (bestProgress > 0 && !this._isInTrueBacktrack) {
