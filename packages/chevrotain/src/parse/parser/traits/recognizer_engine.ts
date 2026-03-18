@@ -38,12 +38,7 @@ import {
   NextTerminalAfterManySepWalker,
   NextTerminalAfterManyWalker,
 } from "../../grammar/interpreter.js";
-import {
-  DEFAULT_RULE_CONFIG,
-  END_OF_FILE,
-  IParserSavepoint,
-  TokenMatcher,
-} from "../parser.js";
+import { DEFAULT_RULE_CONFIG, END_OF_FILE, TokenMatcher } from "../parser.js";
 import { IN_RULE_RECOVERY_EXCEPTION } from "./recoverable.js";
 import { EOF } from "../../../scan/tokens_public.js";
 import { MixedInParser } from "./parser_traits.js";
@@ -656,13 +651,13 @@ export class RecognizerEngine {
   }
 
   /**
-   * Zero-or-more loop. Uses a speculative first-token probe (makeSpecLookahead)
-   * before each iteration, then executes the body committed without a surrounding
-   * try/catch. This lets V8 TurboFan inline the action body, matching the
-   * throughput of the baseline LL(k) engine's lookahead-function approach.
+   * Zero-or-more loop. Each iteration runs the body with IS_SPECULATING=true
+   * inside a try/catch. On SPEC_FAIL the state is rolled back and the loop
+   * exits cleanly. RecognitionExceptions from committed inner paths (e.g. OR's
+   * committed re-run) propagate out as errors.
    *
-   * Stuck guard: if the body consumed no tokens despite a positive probe, stop
-   * to prevent infinite loops on epsilon-like bodies.
+   * Stuck guard: if the body consumed no tokens despite completing without
+   * throwing, stop to prevent infinite loops on epsilon-like bodies.
    */
   manyInternalLogic<OUT>(
     this: MixedInParser,
@@ -679,21 +674,43 @@ export class RecognizerEngine {
       gate = undefined;
     }
 
-    // Build a first-token predicate once. makeSpecLookahead runs the action
-    // with IS_SPECULATING=true and _earlyExitLookahead=true, aborting after
-    // the first successful CONSUME — so this is an O(1) LL(1) check.
-    const lookaheadFunc = this.makeSpecLookahead(action);
+    const wasSpeculating = this.IS_SPECULATING;
     let notStuck = true;
     let ranAtLeastOnce = false;
-    while (lookaheadFunc()) {
+    // lookaheadFunc built lazily on first exit (for recovery pass below)
+    let lookaheadFunc: (() => boolean) | undefined;
+
+    while (notStuck) {
       if (gate !== undefined && !gate.call(this)) break;
       const iterPos = this.currIdx;
-      // Run committed — no IS_SPECULATING flip, no surrounding try/catch.
-      // Failures propagate: SPEC_FAIL reaches the outer speculative context;
-      // RecognitionException reaches invokeRuleCatch at the rule boundary.
-      action.call(this);
+      const iterErrors = this._errors.length;
+      const iterRuleStack = this.RULE_STACK_IDX;
+      const cstSave = this.saveCstTop();
+      this.IS_SPECULATING = true;
+      try {
+        action.call(this);
+        this.IS_SPECULATING = wasSpeculating;
+      } catch (e) {
+        this.IS_SPECULATING = wasSpeculating;
+        if (e === SPEC_FAIL) {
+          this.restoreCstTop(cstSave);
+          this.currIdx = iterPos;
+          this._errors.length = iterErrors;
+          this.RULE_STACK_IDX = iterRuleStack;
+          break;
+        }
+        if (isRecognitionException(e as Error)) {
+          this.restoreCstTop(cstSave);
+          throw e;
+        }
+        throw e;
+      }
       // Stuck guard: body consumed no tokens → stop to prevent infinite loops.
       if (this.currIdx <= iterPos) {
+        this.restoreCstTop(cstSave);
+        this.currIdx = iterPos;
+        this._errors.length = iterErrors;
+        this.RULE_STACK_IDX = iterRuleStack;
         notStuck = false;
         break;
       }
@@ -702,6 +719,7 @@ export class RecognizerEngine {
 
     // Only attempt in-repetition recovery if ≥1 iterations ran successfully.
     if (ranAtLeastOnce) {
+      lookaheadFunc ??= this.makeSpecLookahead(action);
       // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
       this.attemptInRepetitionRecovery(
         this.manyInternal,
@@ -1189,31 +1207,6 @@ export class RecognizerEngine {
     } else {
       throw eFromConsumption;
     }
-  }
-
-  /**
-   * Captures the minimal parser state needed to restore after a failed
-   * BACKTRACK() trial: three integers, no array copies. Rule stack and CST
-   * stack are self-healing via the finally blocks in each rule wrapper, so
-   * only the lexer position and errors length need explicit restoration.
-   */
-  saveRecogState(this: MixedInParser): IParserSavepoint {
-    return {
-      pos: this.currIdx,
-      errorsLength: this.errors.length,
-      ruleStackDepth: this.RULE_STACK_IDX,
-    };
-  }
-
-  /**
-   * Restores parser state from a savepoint captured by saveRecogState().
-   * Three integer assignments — no allocation, no array iteration.
-   * Uses _errors directly (not the getter) to avoid truncating a temporary copy.
-   */
-  reloadRecogState(this: MixedInParser, saved: IParserSavepoint): void {
-    this.currIdx = saved.pos;
-    this._errors.length = saved.errorsLength;
-    this.RULE_STACK_IDX = saved.ruleStackDepth;
   }
 
   ruleInvocationStateUpdate(
