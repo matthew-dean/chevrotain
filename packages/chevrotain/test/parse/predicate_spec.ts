@@ -618,11 +618,10 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       expect(parser.errors).to.be.empty;
 
       // Verify both alts are in the fast-path candidate list for token A
-      const tokenAIdx = (A as any).tokenTypeIdx;
-      const fastMaps = (parser as any)._orFastMaps;
-      const mapKeys = Object.keys(fastMaps);
+      const fastCandidates = (parser as any)._orFastCandidates ?? {};
+      const mapKeys = Object.keys(fastCandidates);
       expect(mapKeys.length).to.be.greaterThan(0);
-      const candidates = fastMaps[mapKeys[0]][tokenAIdx];
+      const candidates = fastCandidates[mapKeys[0]];
       expect(candidates).to.be.an("array");
       expect(candidates).to.include(
         0,
@@ -930,28 +929,28 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       // The simplest behavioral proof: a third parse with different inner
       // gate state but same outer input still picks outer alt 0 without
       // hitting the slow loop. We can't directly observe fast vs slow, but
-      // we can verify outer alt 0 is in _orFastMaps (token-cached).
-      const tokenAIdx = (A as any).tokenTypeIdx;
-      const fastMaps = (parser as any)._orFastMaps;
-      const gatedPrefixAlts = (parser as any)._orGatedPrefixAlts;
+      // we can verify outer alt 0 is in _orFastCandidates (token-cached).
+      const fastCandidates = (parser as any)._orFastCandidates ?? {};
+      const gatedPrefixAlts = (parser as any)._orGatedPrefixAlts ?? {};
 
-      // Find outer OR's mapKey: it's the one with a candidate list for
-      // token A that includes alt index 0, AND has alt index 1 (outer has
-      // 2 alts; inner also has 2 alts but different token patterns).
+      // Find outer OR's mapKey: the outer OR has 2 alts; we only observed
+      // alt 0 (SUBRULE) when parsing [A], so candidates = [0]. The inner OR
+      // has gated-prefix alts (alt 0 has gated OPTION). So the outer OR is
+      // the one with candidates including 0 and no gated-prefix alts.
       let outerMapKey: string | undefined;
-      for (const key of Object.keys(fastMaps)) {
-        const candidates = fastMaps[key][tokenAIdx];
-        if (candidates !== undefined && candidates.includes(0)) {
+      for (const key of Object.keys(fastCandidates)) {
+        const candidates = fastCandidates[key];
+        if (
+          candidates !== undefined &&
+          candidates.includes(0) &&
+          gatedPrefixAlts[key] === undefined
+        ) {
           outerMapKey = key;
+          break;
         }
       }
       expect(outerMapKey, "outer OR alt 0 should be in token-based fast map").to
         .not.be.undefined;
-      // Outer OR's mapKey should NOT be in _orGatedPrefixAlts.
-      expect(
-        gatedPrefixAlts[outerMapKey!],
-        "outer OR should not have gated-prefix alts",
-      ).to.be.undefined;
     });
 
     it("BUG: _orGatedPrefixAlts must remain sorted across multiple calls", () => {

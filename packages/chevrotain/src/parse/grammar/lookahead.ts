@@ -1,3 +1,4 @@
+import { first } from "./first.js";
 import { possiblePathsFrom } from "./interpreter.js";
 import { RestWalker } from "./rest.js";
 import { Predicate, TokenMatcher } from "../parser/parser.js";
@@ -654,6 +655,32 @@ export function getLookaheadPathsForOr(
   );
   ruleGrammar.accept(visitor);
   return lookAheadSequenceFromAlternatives(visitor.result, k);
+}
+
+/**
+ * Returns the first-token info for each alternative of an OR production.
+ * Used by the fast-path to record and filter by exact vs category match.
+ */
+export function getOrFirstTokenInfo(
+  rule: Rule,
+  occurrence: number,
+): { tokenType: TokenType | undefined; isCategory: boolean }[] {
+  const visitor = new InsideDefinitionFinderVisitor(
+    occurrence,
+    PROD_TYPE.ALTERNATION,
+  );
+  rule.accept(visitor);
+  const alts = visitor.result as AlternativeGAST[];
+  return alts.map((alt) => {
+    const firstToks = first(alt);
+    const tokenType = firstToks[0];
+    if (tokenType === undefined) {
+      return { tokenType: undefined, isCategory: false };
+    }
+    const isCategory =
+      tokenType.MATCH_SET != null && tokenType.MATCH_SET.length > 0;
+    return { tokenType, isCategory };
+  });
 }
 
 export function getLookaheadPathsForOptionalProd(
