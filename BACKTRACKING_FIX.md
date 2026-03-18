@@ -302,6 +302,35 @@ whether `{` follows the value (indicating a nested rule, not a declaration).
 This is NOT an engine issue — both @jesscss/parser and our Chevrotain fork
 handle backtracking correctly; the grammar just doesn't disambiguate.
 
+## Known Limitation: Error Recovery in OR (11 tests)
+
+11 Chevrotain error recovery tests fail because the bestProgress removal
+means OR no longer re-runs a failed alt committed. Error recovery
+(single-token insertion, single-token deletion, resync) requires a
+committed execution path where CONSUME throws MismatchedTokenException
+(not SPEC_FAIL) so recovery logic can kick in.
+
+@jesscss/parser solves this by committing the LAST alt (no speculation
+on the final fallback). Chevrotain's recovery model is more complex —
+per-rule resync, in-rule recovery — and the last-alt-committed approach
+caused additional failures when combined with fast-dispatch and
+gated-prefix tracking.
+
+**Fix (future work):** Reconcile last-alt-committed with the fast-dispatch
+optimization layer. When `recoveryEnabled === true` AND not speculating,
+the last OR alt should run committed so recovery triggers naturally.
+When `recoveryEnabled === false` (the common case for EmbeddedActionsParser
+and the Jess css-parser), all alts remain speculative.
+
+The 11 failing tests are:
+
+- 6 SQL DDL error recovery tests (token insertion, deletion, resync)
+- 4 CST recovery tests (re-sync recovery, re-sync recovery nested)
+- 1 infinite loop detection test
+
+All involve `recoveryEnabled: true` parsers. No `EmbeddedActionsParser`
+tests are affected.
+
 ## What Final Success Looks Like
 
 After all 4 steps:
