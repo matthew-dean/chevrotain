@@ -165,16 +165,6 @@ export class Parser {
         toFastProperties(this);
       });
 
-      // Grammar recording, resolving, validation, and follow-set computation
-      // are only needed when error recovery is enabled — recovery uses
-      // GAST-derived follow sets for resync. The speculative engine handles
-      // OR/OPTION/MANY via backtracking at runtime, not pre-computed lookahead.
-      // CST visitor construction uses definedRulesNames (populated by RULE()),
-      // not gastProductionsCache, so it works without recording.
-      if (!this.recoveryEnabled) {
-        return;
-      }
-
       this.TRACE_INIT("Grammar Recording", () => {
         try {
           this.enableRecording();
@@ -219,22 +209,15 @@ export class Parser {
           this.definitionErrors =
             this.definitionErrors.concat(validationErrors);
 
-          // Lookahead ambiguity validation is only meaningful when error
-          // recovery is enabled (LL(k) follow-set based). The speculative
-          // engine handles LL(1) ambiguity at runtime via multi-candidate
-          // fast-dispatch, so these checks produce false positives for
-          // grammars that are correct under speculation.
-          if (this.recoveryEnabled) {
-            const lookaheadValidationErrors = validateLookahead({
-              lookaheadStrategy: this.lookaheadStrategy,
-              rules: Object.values(this.gastProductionsCache),
-              tokenTypes: Object.values(this.tokensMap),
-              grammarName: className,
-            });
-            this.definitionErrors = this.definitionErrors.concat(
-              lookaheadValidationErrors,
-            );
-          }
+          const lookaheadValidationErrors = validateLookahead({
+            lookaheadStrategy: this.lookaheadStrategy,
+            rules: Object.values(this.gastProductionsCache),
+            tokenTypes: Object.values(this.tokensMap),
+            grammarName: className,
+          });
+          this.definitionErrors = this.definitionErrors.concat(
+            lookaheadValidationErrors,
+          );
         }
       });
 
@@ -265,6 +248,77 @@ export class Parser {
         );
       }
     });
+  }
+
+  /**
+   * Lazily populates gastProductionsCache when GAST-dependent APIs
+   * (getSerializedGastProductions, getGAstProductions) are called without
+   * recoveryEnabled. Preserves backward compatibility — these APIs work
+   * regardless of recoveryEnabled.
+   */
+  ensureGastProductionsCachePopulated(this: MixedInParser): void {
+    if (Object.keys(this.gastProductionsCache).length > 0) {
+      return;
+    }
+    try {
+      this.enableRecording();
+      this.definedRulesNames.forEach((currRuleName: string) => {
+        const wrappedRule = (this as any)[currRuleName] as ParserMethodInternal<
+          unknown[],
+          unknown
+        >;
+        const originalGrammarAction = wrappedRule["originalGrammarAction"];
+        const recordedRuleGast = this.topLevelRuleRecord(
+          currRuleName,
+          originalGrammarAction,
+        );
+        this.gastProductionsCache[currRuleName] = recordedRuleGast;
+      });
+    } finally {
+      this.disableRecording();
+    }
+    const resolverErrors = resolveGrammar({
+      rules: Object.values(this.gastProductionsCache),
+    });
+    this.definitionErrors = this.definitionErrors.concat(resolverErrors);
+    if (resolverErrors.length === 0 && this.skipValidations === false) {
+      const validationErrors = validateGrammar({
+        rules: Object.values(this.gastProductionsCache),
+        tokenTypes: Object.values(this.tokensMap),
+        errMsgProvider: defaultGrammarValidatorErrorProvider,
+        grammarName: this.className,
+      });
+      this.definitionErrors = this.definitionErrors.concat(validationErrors);
+      const lookaheadValidationErrors = validateLookahead({
+        lookaheadStrategy: this.lookaheadStrategy,
+        rules: Object.values(this.gastProductionsCache),
+        tokenTypes: Object.values(this.tokensMap),
+        grammarName: this.className,
+      });
+      this.definitionErrors = this.definitionErrors.concat(
+        lookaheadValidationErrors,
+      );
+    }
+    if (
+      !Parser.DEFER_DEFINITION_ERRORS_HANDLING &&
+      this.definitionErrors.length !== 0
+    ) {
+      const defErrorsMsgs = this.definitionErrors.map(
+        (defError) => defError.message,
+      );
+      throw new Error(
+        `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
+          "\n-------------------------------\n",
+        )}`,
+      );
+    }
+    if (this.definitionErrors.length === 0 && this.recoveryEnabled) {
+      const allFollows = computeAllProdsFollows(
+        Object.values(this.gastProductionsCache),
+      );
+      this.resyncFollows = allFollows;
+    }
+    this.selfAnalysisDone = true;
   }
 
   definitionErrors: IParserDefinitionError[] = [];

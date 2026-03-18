@@ -2,6 +2,7 @@ import {
   IParserConfig,
   IParserErrorMessageProvider,
   IRecognitionException,
+  TokenType,
 } from "@chevrotain/types";
 import {
   EarlyExitException,

@@ -972,10 +972,12 @@ export class RecognizerApi {
 
   // GAST export APIs
   public getGAstProductions(this: MixedInParser): Record<string, Rule> {
+    this.ensureGastProductionsCachePopulated();
     return this.gastProductionsCache;
   }
 
   public getSerializedGastProductions(this: MixedInParser): ISerializedGast[] {
+    this.ensureGastProductionsCachePopulated();
     return serializeGrammar(Object.values(this.gastProductionsCache));
   }
 }

@@ -70,7 +70,7 @@ exactly. The `Lexer` is improved but its interface is unchanged.
   - ✅ All DSL methods in `recognizer_api.ts` check `this.RECORDING_PHASE` and route to `*InternalRecord` methods
   - ✅ `enableRecording()` simplified to `this.RECORDING_PHASE = true` (no instance method assignment loop)
   - ✅ `disableRecording()` simplified to `this.RECORDING_PHASE = false` (no `delete` loop — eliminates ~80 hidden-class transitions)
-- ⬜ Stage 6 — Make `performSelfAnalysis()` opt-in (skip recording pass by default)
+- ⬜ Stage 6 — Flatten mixin architecture
 - ⬜ Stage 7 — Flatten mixin architecture
 
 ---
@@ -148,24 +148,24 @@ exactly. The `Lexer` is improved but its interface is unchanged.
   sentinel values so V8 sees one hidden class per object type from birth.
 - **Bitset token matching** replaces `categoryMatchesMap` and `categoryMatches`
   with a `Uint32Array` MATCH_SET, computed once in `augmentTokenTypes()`.
-- **Optional recording phase** means `performSelfAnalysis()` is a no-op by
-  default. The recording mechanism is preserved for GAST tooling.
+- **performSelfAnalysis** always runs recording and validation; GAST APIs
+  lazily populate cache when empty (no fail if performSelfAnalysis was skipped).
 
 ---
 
 ## What Is Preserved
 
-| Item                                                                    | Status                                                |
-| ----------------------------------------------------------------------- | ----------------------------------------------------- |
-| Full public API (`CstParser`, `EmbeddedActionsParser`, all DSL methods) | Unchanged                                             |
-| `OR1`–`OR9`, `CONSUME1`–`CONSUME9`, all numbered variants               | Kept as aliases                                       |
-| `Lexer` class interface                                                 | Unchanged                                             |
-| `createToken`, `tokenMatcher`, `EOF`, error classes                     | Unchanged                                             |
-| `MismatchedTokenException` etc.                                         | Kept — still thrown for real (non-speculative) errors |
-| `performSelfAnalysis()`                                                 | Kept — now a no-op unless GAST is requested           |
-| `ILookaheadStrategy` / `LLkLookaheadStrategy`                           | Kept as deprecated no-ops                             |
-| Grammar recording mechanism                                             | Kept — made opt-in                                    |
-| `serializeGrammar`, `generateCstDts`, `createSyntaxDiagramsCode`        | Kept — require opt-in recording pass                  |
+| Item                                                                    | Status                                                                               |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Full public API (`CstParser`, `EmbeddedActionsParser`, all DSL methods) | Unchanged                                                                            |
+| `OR1`–`OR9`, `CONSUME1`–`CONSUME9`, all numbered variants               | Kept as aliases                                                                      |
+| `Lexer` class interface                                                 | Unchanged                                                                            |
+| `createToken`, `tokenMatcher`, `EOF`, error classes                     | Unchanged                                                                            |
+| `MismatchedTokenException` etc.                                         | Kept — still thrown for real (non-speculative) errors                                |
+| `performSelfAnalysis()`                                                 | Kept — always runs recording and validation                                          |
+| `ILookaheadStrategy` / `LLkLookaheadStrategy`                           | Kept as deprecated no-ops                                                            |
+| Grammar recording mechanism                                             | Kept — runs in performSelfAnalysis; lazy fallback for GAST APIs                      |
+| `serializeGrammar`, `generateCstDts`, `createSyntaxDiagramsCode`        | Kept — use cache; lazy populate via `ensureGastProductionsCachePopulated` when empty |
 
 ## Candidate Exports for Removal
 
@@ -388,20 +388,11 @@ reloadRecogState(saved: ParserSavepoint): void {
 No array copies, no slice. The savepoint object itself is three integers — V8
 will often stack-allocate or scalar-replace this entirely in a hot loop.
 
-**Fix `delete e.partialCstResult` in `recognizer_engine.ts`:**
+**Fix `delete e.partialCstResult` in `recognizer_engine.ts`:** ✅
 
-`cstPostRule()` calls `delete e.partialCstResult` after consuming the partial
-result from an in-flight exception. `delete` causes a hidden-class transition on
-the exception object. Replace with assignment to `undefined`:
-
-```ts
-// Before:
-delete e.partialCstResult;
-// After:
-e.partialCstResult = undefined;
-```
-
-Cold path, but eliminates the transition.
+`subruleInternalError()` (and equivalent paths) now use `e.partialCstResult =
+undefined` instead of `delete`, avoiding hidden-class transitions on the
+exception object.
 
 **Fix `findReSyncTokenType()` — O(n²) → O(n):**
 
@@ -704,37 +695,42 @@ Implementation:
 
 ---
 
-### Stage 5 — Make recording phase opt-in
+### Stage 5 — performSelfAnalysis optional (not required)
 
-**Goal:** `performSelfAnalysis()` is a no-op by default. GAST tooling works
-when explicitly requested.
+**Goal:** `performSelfAnalysis()` is **optional** instead of required. If called,
+it runs recording and validation. If not called, the first use (set `input` or
+call GAST APIs) runs the work lazily — do not fail.
+
+#### Strategy
+
+1. **`performSelfAnalysis()`** — optional. When called, runs full flow:
+   recording, resolve, validation, follow sets when `recoveryEnabled`.
+
+2. **`input` setter** — when `selfAnalysisDone` is false, call
+   `ensureGastProductionsCachePopulated()` instead of throwing. Lazy init on
+   first parse.
+
+3. **`getSerializedGastProductions()` and `getGAstProductions()`** — call
+   `ensureGastProductionsCachePopulated()` before returning. Works when
+   `performSelfAnalysis` was never invoked.
+
+4. **`ensureGastProductionsCachePopulated()`** — when cache empty: record,
+   resolve, validate, follow sets (when `recoveryEnabled`), set
+   `selfAnalysisDone`. Idempotent when cache already populated.
 
 #### What changes
 
-- `performSelfAnalysis()` default behaviour: register rule names, return
-  immediately. No recording, no lookahead computation.
-- Add config option `{ buildGast: true }` (or call `performSelfAnalysis()`
-  with a flag) to trigger the full recording pass.
-- The recording mechanism in `GastRecorder` (`enableRecording()`,
-  `disableRecording()`, `topLevelRuleRecord()`, sentinel tokens) is preserved
-  exactly — it just no longer runs unconditionally.
-- `RECORDING_PHASE` is `false` by default; `true` only during an explicit
-  recording pass.
-- `serializeGrammar()`, `generateCstDts()`, `createSyntaxDiagramsCode()`,
-  `getLookaheadPaths()`: throw a clear error if called without a prior GAST
-  build, with a message pointing to the opt-in flag.
-- Grammar validation (left-recursion detection, ambiguity warnings) moves
-  inside the opt-in recording pass.
+- Input setter: no longer throws when `performSelfAnalysis` was not called;
+  instead runs `ensureGastProductionsCachePopulated()`.
+- `ensureGastProductionsCachePopulated()`: sets `selfAnalysisDone`, runs
+  `computeAllProdsFollows` when `recoveryEnabled`.
+- Docs: `performSelfAnalysis` is recommended but optional.
 
 #### Exit criteria
 
-- Parser construction with no `performSelfAnalysis()` call does not mutate
-  instance methods (no hidden class transitions after construction).
-- `performSelfAnalysis({ buildGast: true })` produces identical GAST output
-  to the current mandatory recording pass.
-- `serializeGrammar()` works after opt-in, throws with a clear message without.
-- `generateCstDts()` and `createSyntaxDiagramsCode()` work after opt-in.
-- All grammar validation tests pass when opt-in is used.
+- Parser works without calling `performSelfAnalysis` (lazy init on first `input`
+  set or GAST API call).
+- All grammar validation tests pass.
 
 ---
 
@@ -813,7 +809,8 @@ Clean up the call graph for V8's inliner.
 
 ### Running tests
 
-Each stage ends with a green test suite. The standard commands are:
+**Run the full test suite before every commit.** Each stage ends with a green
+test suite. The standard commands are:
 
 ```bash
 # From the repo root — compile + bundle + test the chevrotain package
@@ -901,7 +898,7 @@ Stage 0 (token/IToken shapes)  ← prerequisite for everything
        └─ Stage 2 (speculative OR)
             └─ Stage 3 (numbered variant aliases)
                  ├─ Stage 4 (runtime CST + CST allocation fixes)
-                 │    └─ Stage 5 (opt-in recording)
+                 │    └─ Stage 5 (performSelfAnalysis + lazy GAST fallback)
                  │         └─ Stage 6 (flatten mixins)
                  └─ Stage 7 (benchmarks)  ← can start after Stage 2
 ```

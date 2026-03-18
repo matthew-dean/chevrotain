@@ -112,8 +112,10 @@ declare abstract class BaseParser {
    * ...
    * @see OR
    */
-  protected or(idx: number, altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any;
-  protected or<T>(idx: number, altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
+  protected or<T = unknown>(
+    idx: number,
+    altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>,
+  ): T;
 
   /**
    * Like `MANY` with the numerical suffix as a parameter, e.g:
@@ -397,71 +399,61 @@ declare abstract class BaseParser {
    *
    * @returns The result of invoking the chosen alternative.
    */
-  protected OR<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
-  protected OR(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any;
+  protected OR<T = unknown>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
 
   /**
    * @see OR
    * @hidden
    */
-  protected OR1<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
-  protected OR1(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any;
+  protected OR1<T = unknown>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
 
   /**
    * @see OR
    * @hidden
    */
-  protected OR2<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
-  protected OR2(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any;
+  protected OR2<T = unknown>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
 
   /**
    * @see OR
    * @hidden
    */
-  protected OR3<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
-  protected OR3(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any;
+  protected OR3<T = unknown>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
 
   /**
    * @see OR
    * @hidden
    */
-  protected OR4<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
-  protected OR4(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any;
+  protected OR4<T = unknown>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
 
   /**
    * @see OR
    * @hidden
    */
-  protected OR5<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
-  protected OR5(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any;
+  protected OR5<T = unknown>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
 
   /**
    * @see OR
    * @hidden
    */
-  protected OR6<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
-  protected OR6(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any;
+  protected OR6<T = unknown>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
 
   /**
    * @see OR
    * @hidden
    */
-  protected OR7<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
-  protected OR7(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any;
+  protected OR7<T = unknown>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
 
   /**
    * @see OR
    * @hidden
    */
-  protected OR8<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
-  protected OR8(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any;
+  protected OR8<T = unknown>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
 
   /**
    * @see OR
    * @hidden
    */
-  protected OR9<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
-  protected OR9(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any;
+  protected OR9<T = unknown>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T;
 
   /**
    * Parsing DSL method, that indicates a repetition of zero or more.
@@ -1060,6 +1052,11 @@ export declare class EmbeddedActionsParser extends BaseParser {
     ruleToCall: ParserMethod<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R;
+  protected subrule<R>(
+    idx: number,
+    ruleToCall: (...args: unknown[]) => R,
+    options?: SubruleMethodOpts<unknown[]>,
+  ): R;
 
   /**
    * The Parsing DSL Method is used by one rule to call another.
@@ -1082,6 +1079,10 @@ export declare class EmbeddedActionsParser extends BaseParser {
     ruleToCall: ParserMethod<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R;
+  protected SUBRULE<R>(
+    ruleToCall: (...args: unknown[]) => R,
+    options?: SubruleMethodOpts<unknown[]>,
+  ): R;
 
   /**
    * @see SUBRULE
@@ -1090,6 +1091,10 @@ export declare class EmbeddedActionsParser extends BaseParser {
   protected SUBRULE1<ARGS extends unknown[], R>(
     ruleToCall: ParserMethod<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  protected SUBRULE1<R>(
+    ruleToCall: (...args: unknown[]) => R,
+    options?: SubruleMethodOpts<unknown[]>,
   ): R;
 
   /**
@@ -1100,6 +1105,10 @@ export declare class EmbeddedActionsParser extends BaseParser {
     ruleToCall: ParserMethod<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R;
+  protected SUBRULE2<R>(
+    ruleToCall: (...args: unknown[]) => R,
+    options?: SubruleMethodOpts<unknown[]>,
+  ): R;
 
   /**
    * @see SUBRULE
@@ -1108,6 +1117,10 @@ export declare class EmbeddedActionsParser extends BaseParser {
   protected SUBRULE3<ARGS extends unknown[], R>(
     ruleToCall: ParserMethod<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  protected SUBRULE3<R>(
+    ruleToCall: (...args: unknown[]) => R,
+    options?: SubruleMethodOpts<unknown[]>,
   ): R;
 
   /**
@@ -1118,6 +1131,10 @@ export declare class EmbeddedActionsParser extends BaseParser {
     ruleToCall: ParserMethod<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R;
+  protected SUBRULE4<R>(
+    ruleToCall: (...args: unknown[]) => R,
+    options?: SubruleMethodOpts<unknown[]>,
+  ): R;
 
   /**
    * @see SUBRULE
@@ -1126,6 +1143,10 @@ export declare class EmbeddedActionsParser extends BaseParser {
   protected SUBRULE5<ARGS extends unknown[], R>(
     ruleToCall: ParserMethod<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  protected SUBRULE5<R>(
+    ruleToCall: (...args: unknown[]) => R,
+    options?: SubruleMethodOpts<unknown[]>,
   ): R;
 
   /**
@@ -1136,6 +1157,10 @@ export declare class EmbeddedActionsParser extends BaseParser {
     ruleToCall: ParserMethod<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R;
+  protected SUBRULE6<R>(
+    ruleToCall: (...args: unknown[]) => R,
+    options?: SubruleMethodOpts<unknown[]>,
+  ): R;
 
   /**
    * @see SUBRULE
@@ -1144,6 +1169,10 @@ export declare class EmbeddedActionsParser extends BaseParser {
   protected SUBRULE7<ARGS extends unknown[], R>(
     ruleToCall: ParserMethod<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  protected SUBRULE7<R>(
+    ruleToCall: (...args: unknown[]) => R,
+    options?: SubruleMethodOpts<unknown[]>,
   ): R;
 
   /**
@@ -1154,6 +1183,10 @@ export declare class EmbeddedActionsParser extends BaseParser {
     ruleToCall: ParserMethod<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R;
+  protected SUBRULE8<R>(
+    ruleToCall: (...args: unknown[]) => R,
+    options?: SubruleMethodOpts<unknown[]>,
+  ): R;
 
   /**
    * @see SUBRULE
@@ -1162,6 +1195,10 @@ export declare class EmbeddedActionsParser extends BaseParser {
   protected SUBRULE9<ARGS extends unknown[], R>(
     ruleToCall: ParserMethod<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  protected SUBRULE9<R>(
+    ruleToCall: (...args: unknown[]) => R,
+    options?: SubruleMethodOpts<unknown[]>,
   ): R;
 }
 

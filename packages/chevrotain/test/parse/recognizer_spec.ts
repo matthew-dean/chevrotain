@@ -665,7 +665,7 @@ function defineRecognizerSpecs(
                 },
               },
               {
-                ALT: () => {
+                ALT: (): number | string => {
                   this.CONSUME1(PlusTok);
                   return "bamba";
                 },
@@ -848,25 +848,84 @@ function defineRecognizerSpecs(
     });
 
     describe("The BaseRecognizer", () => {
-      it("Will throw an error if performSelfAnalysis never called", () => {
-        class WrongOrderOfSelfAnalysisParser extends EmbeddedActionsParser {
+      it("Will lazily run grammar analysis when performSelfAnalysis never called", () => {
+        class ParserWithoutPerformSelfAnalysis extends EmbeddedActionsParser {
           constructor() {
             super(ALL_TOKENS);
-
             this.RULE("goodRule", () => {
-              this.CONSUME(IntTok);
-            });
-            this.RULE("badRule", () => {
               this.CONSUME(IntTok);
             });
           }
         }
 
-        expect(() => {
-          new WrongOrderOfSelfAnalysisParser().input = [];
-        }).to.throw(
-          `Missing <performSelfAnalysis> invocation at the end of the Parser's constructor.`,
-        );
+        const parser: any = new ParserWithoutPerformSelfAnalysis();
+        parser.input = [createTokenInstance(IntTok, "1")];
+        expect(parser.goodRule()).to.be.undefined;
+        expect(parser.errors).to.be.empty;
+      });
+
+      it("getGAstProductions works without performSelfAnalysis", () => {
+        class ParserWithoutPerformSelfAnalysis extends EmbeddedActionsParser {
+          constructor() {
+            super(ALL_TOKENS);
+            this.RULE("goodRule", () => {
+              this.CONSUME(IntTok);
+            });
+          }
+        }
+
+        const parser: any = new ParserWithoutPerformSelfAnalysis();
+        const gast = parser.getGAstProductions();
+        expect(gast).to.be.an("object");
+        expect(gast.goodRule).to.exist;
+      });
+
+      it("getSerializedGastProductions works without performSelfAnalysis", () => {
+        class ParserWithoutPerformSelfAnalysis extends EmbeddedActionsParser {
+          constructor() {
+            super(ALL_TOKENS);
+            this.RULE("goodRule", () => {
+              this.CONSUME(IntTok);
+            });
+          }
+        }
+
+        const parser: any = new ParserWithoutPerformSelfAnalysis();
+        const serialized = parser.getSerializedGastProductions();
+        expect(serialized).to.be.an("array");
+        expect(serialized.length).to.be.greaterThan(0);
+      });
+
+      it("can parse OR and MANY without performSelfAnalysis", () => {
+        class ParserWithoutPerformSelfAnalysis extends EmbeddedActionsParser {
+          constructor() {
+            super(ALL_TOKENS);
+            this.RULE("list", () => {
+              const items: string[] = [];
+              this.MANY({
+                DEF: () => {
+                  items.push(
+                    this.OR([
+                      { ALT: () => this.CONSUME1(IntTok).image },
+                      { ALT: () => this.CONSUME1(PlusTok).image },
+                    ]) as string,
+                  );
+                },
+              });
+              return items;
+            });
+          }
+        }
+
+        const parser: any = new ParserWithoutPerformSelfAnalysis();
+        parser.input = [
+          createTokenInstance(IntTok, "1"),
+          createTokenInstance(PlusTok, "+"),
+          createTokenInstance(IntTok, "2"),
+        ];
+        const result = parser.list();
+        expect(result).to.deep.equal(["1", "+", "2"]);
+        expect(parser.errors).to.be.empty;
       });
 
       it("Will throw an error if performSelfAnalysis is called before all the rules have been defined", () => {
