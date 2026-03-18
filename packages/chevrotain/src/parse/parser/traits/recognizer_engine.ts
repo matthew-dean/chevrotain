@@ -1069,34 +1069,9 @@ export class RecognizerEngine {
     const savedAltStartLexPos = this._orAltStartLexPos;
     const savedAltHasGatedPrefix = this._orAltHasGatedPrefix;
 
-    // Save _dslCounter so we can set it to the correct per-alt offset.
-    // With auto-occurrence counting, each alt occupies a unique counter range
-    // recorded during grammar recording. At runtime, before executing alt i,
-    // _dslCounter is set to savedDslCounter + altStarts[i]. After the OR,
-    // _dslCounter is advanced to savedDslCounter + totalDelta.
     const savedDslCounter = this._dslCounter;
     const mapKey = this.currRuleShortName | occurrence;
-    const counterDelta = this._orCounterDeltas[mapKey];
     const altStarts = this._orAltCounterStarts[mapKey];
-
-    // Helper: set _dslCounter to the correct starting offset for alt i.
-    const setAltCounter =
-      altStarts !== undefined
-        ? (altIdx: number) => {
-            this._dslCounter = savedDslCounter + altStarts[altIdx];
-          }
-        : () => {
-            /* no-op: old-style parsers without recording data */
-          };
-    // Helper: advance _dslCounter to deterministic position after OR.
-    const advanceCounter =
-      counterDelta !== undefined
-        ? () => {
-            this._dslCounter = savedDslCounter + counterDelta;
-          }
-        : () => {
-            /* no-op */
-          };
 
     // -----------------------------------------------------------------------
     // Fast-dispatch path — direct tokenTypeIdx→altIdx map, zero allocation.
@@ -1123,11 +1098,15 @@ export class RecognizerEngine {
           const alt = alts[altIdx];
           if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
           const fastLexPos = this.currIdx;
-          setAltCounter(altIdx);
+          if (altStarts !== undefined)
+            this._dslCounter = savedDslCounter + altStarts[altIdx];
           if (wasSpeculating) {
             try {
               const r = alt.ALT.call(this) as T;
-              advanceCounter();
+              {
+                const d = this._orCounterDeltas[mapKey];
+                if (d !== undefined) this._dslCounter = savedDslCounter + d;
+              }
               return r;
             } catch (_e) {
               this.currIdx = fastLexPos;
@@ -1137,7 +1116,10 @@ export class RecognizerEngine {
             const fastCstSave = this.saveCstTop();
             try {
               const r = alt.ALT.call(this) as T;
-              advanceCounter();
+              {
+                const d = this._orCounterDeltas[mapKey];
+                if (d !== undefined) this._dslCounter = savedDslCounter + d;
+              }
               return r;
             } catch (_e) {
               this.restoreCstTop(fastCstSave);
@@ -1162,11 +1144,15 @@ export class RecognizerEngine {
             const galt = alts[g];
             if (galt.GATE !== undefined && galt.GATE.call(this)) {
               const gPos = this.currIdx;
-              setAltCounter(g);
+              if (altStarts !== undefined)
+                this._dslCounter = savedDslCounter + altStarts[g];
               if (wasSpeculating) {
                 try {
                   const r = galt.ALT.call(this) as T;
-                  advanceCounter();
+                  {
+                    const d = this._orCounterDeltas[mapKey];
+                    if (d !== undefined) this._dslCounter = savedDslCounter + d;
+                  }
                   return r;
                 } catch (_e) {
                   this.currIdx = gPos;
@@ -1176,7 +1162,10 @@ export class RecognizerEngine {
                 const gCst = this.saveCstTop();
                 try {
                   const r = galt.ALT.call(this) as T;
-                  advanceCounter();
+                  {
+                    const d = this._orCounterDeltas[mapKey];
+                    if (d !== undefined) this._dslCounter = savedDslCounter + d;
+                  }
                   return r;
                 } catch (_e) {
                   this.restoreCstTop(gCst);
@@ -1192,11 +1181,15 @@ export class RecognizerEngine {
         const alt = alts[realAltIdx];
         if (alt.GATE === undefined || alt.GATE.call(this)) {
           const fastLexPos = this.currIdx;
-          setAltCounter(realAltIdx);
+          if (altStarts !== undefined)
+            this._dslCounter = savedDslCounter + altStarts[realAltIdx];
           if (wasSpeculating) {
             try {
               const r = alt.ALT.call(this) as T;
-              advanceCounter();
+              {
+                const d = this._orCounterDeltas[mapKey];
+                if (d !== undefined) this._dslCounter = savedDslCounter + d;
+              }
               return r;
             } catch (_e) {
               this.currIdx = fastLexPos;
@@ -1206,7 +1199,10 @@ export class RecognizerEngine {
             const fastCstSave = this.saveCstTop();
             try {
               const r = alt.ALT.call(this) as T;
-              advanceCounter();
+              {
+                const d = this._orCounterDeltas[mapKey];
+                if (d !== undefined) this._dslCounter = savedDslCounter + d;
+              }
               return r;
             } catch (_e) {
               this.restoreCstTop(fastCstSave);
@@ -1235,7 +1231,8 @@ export class RecognizerEngine {
       if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
       this.IS_SPECULATING = true;
       // Set _dslCounter to this alt's recorded starting offset.
-      setAltCounter(i);
+      if (altStarts !== undefined)
+        this._dslCounter = savedDslCounter + altStarts[i];
       // Track whether a gated production fires before the first CONSUME.
       // If so, this alt's first-token set is gate-dependent and must not
       // be cached — it must always be speculated.
@@ -1262,7 +1259,10 @@ export class RecognizerEngine {
         this._orAltStartLexPos = savedAltStartLexPos;
         this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
         // Advance counter to deterministic position after OR.
-        advanceCounter();
+        {
+          const d = this._orCounterDeltas[mapKey];
+          if (d !== undefined) this._dslCounter = savedDslCounter + d;
+        }
         return result;
       } catch (e) {
         this.IS_SPECULATING = wasSpeculating;
@@ -1318,12 +1318,16 @@ export class RecognizerEngine {
         // can fire and produce meaningful diagnostics.
         const prevSpec = this.IS_SPECULATING;
         this.IS_SPECULATING = false;
-        setAltCounter(bestAltIdx);
+        if (altStarts !== undefined)
+          this._dslCounter = savedDslCounter + altStarts[bestAltIdx];
         try {
           return alts[bestAltIdx].ALT.call(this) as T;
         } finally {
           this.IS_SPECULATING = prevSpec;
-          advanceCounter();
+          {
+            const d = this._orCounterDeltas[mapKey];
+            if (d !== undefined) this._dslCounter = savedDslCounter + d;
+          }
         }
       } else {
         // Multiple alts tied for best progress — ambiguous partial match.
@@ -1331,7 +1335,10 @@ export class RecognizerEngine {
         // listing all expected token sequences. Temporarily clear IS_SPECULATING
         // so raiseNoAltException builds the real error even if an outer MANY
         // set IS_SPECULATING=true.
-        advanceCounter();
+        {
+          const d = this._orCounterDeltas[mapKey];
+          if (d !== undefined) this._dslCounter = savedDslCounter + d;
+        }
         const prevSpec = this.IS_SPECULATING;
         this.IS_SPECULATING = false;
         try {
@@ -1344,7 +1351,10 @@ export class RecognizerEngine {
 
     // No progress (bestProgress <= 0) or inside a BACKTRACK() trial:
     // signal clean failure to the caller.
-    advanceCounter();
+    {
+      const d = this._orCounterDeltas[mapKey];
+      if (d !== undefined) this._dslCounter = savedDslCounter + d;
+    }
     if (this.IS_SPECULATING) throw SPEC_FAIL;
     this.raiseNoAltException(occurrence, errMsg);
   }
