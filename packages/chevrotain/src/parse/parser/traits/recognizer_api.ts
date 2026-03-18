@@ -37,92 +37,93 @@ export class RecognizerApi {
     return impl.call(this);
   }
 
+  // ──── lowercase consume ────
   consume(
     this: MixedInParser,
-    idx: number,
+    _idx: number,
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    if (this.RECORDING_PHASE) {
-      const autoIdx = this._consumeAutoOccurrence[this.RULE_STACK_IDX]++;
-      return this.consumeInternalRecord(tokType, autoIdx, options);
-    }
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
     return this.consumeInternal(tokType, idx, options);
   }
 
+  // ──── lowercase subrule ────
   subrule<ARGS extends unknown[], R>(
     this: MixedInParser,
-    idx: number,
+    _idx: number,
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    if (this.RECORDING_PHASE) {
-      const autoIdx = this._subruleAutoOccurrence[this.RULE_STACK_IDX]++;
-      return this.subruleInternalRecord(ruleToCall, autoIdx, options) as R;
-    }
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
+  // ──── lowercase option ────
   option<OUT>(
     this: MixedInParser,
-    idx: number,
+    _idx: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    if (this.RECORDING_PHASE) {
-      const autoIdx = this._optionAutoOccurrence[this.RULE_STACK_IDX]++;
-      return this.optionInternalRecord(actionORMethodDef, autoIdx) as OUT;
-    }
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
     return this.optionInternal(actionORMethodDef, idx);
   }
 
+  // ──── lowercase or ────
   or(
     this: MixedInParser,
-    idx: number,
+    _idx: number,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>,
   ): any {
-    if (this.RECORDING_PHASE) {
-      const autoIdx = this._orAutoOccurrence[this.RULE_STACK_IDX]++;
-      return this.orInternalRecord(altsOrOpts, autoIdx);
-    }
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, idx);
     return this.orInternal(altsOrOpts, idx);
   }
 
+  // ──── lowercase many ────
   many(
     this: MixedInParser,
-    idx: number,
+    _idx: number,
     actionORMethodDef: GrammarAction<any> | DSLMethodOpts<any>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const autoIdx = this._manyAutoOccurrence[this.RULE_STACK_IDX]++;
-      this.manyInternalRecord(autoIdx, actionORMethodDef);
+      this.manyInternalRecord(idx, actionORMethodDef);
       return;
     }
     return this.manyInternal(idx, actionORMethodDef);
   }
 
+  // ──── lowercase atLeastOne ────
   atLeastOne(
     this: MixedInParser,
-    idx: number,
+    _idx: number,
     actionORMethodDef: GrammarAction<any> | DSLMethodOptsWithErr<any>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const autoIdx = this._atLeastOneAutoOccurrence[this.RULE_STACK_IDX]++;
-      this.atLeastOneInternalRecord(autoIdx, actionORMethodDef);
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
       return;
     }
     return this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
+  // ──── CONSUME family ────
   CONSUME(
     this: MixedInParser,
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    if (this.RECORDING_PHASE) {
-      const idx = this._consumeAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.consumeInternalRecord(tokType, idx, options);
-    }
-    return this.consumeInternal(tokType, 0, options);
+    return this.consumeInternal(tokType, idx, options);
   }
 
   CONSUME1(
@@ -130,11 +131,10 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    if (this.RECORDING_PHASE) {
-      const idx = this._consumeAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.consumeInternalRecord(tokType, idx, options);
-    }
-    return this.consumeInternal(tokType, 1, options);
+    return this.consumeInternal(tokType, idx, options);
   }
 
   CONSUME2(
@@ -142,11 +142,10 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    if (this.RECORDING_PHASE) {
-      const idx = this._consumeAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.consumeInternalRecord(tokType, idx, options);
-    }
-    return this.consumeInternal(tokType, 2, options);
+    return this.consumeInternal(tokType, idx, options);
   }
 
   CONSUME3(
@@ -154,11 +153,10 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    if (this.RECORDING_PHASE) {
-      const idx = this._consumeAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.consumeInternalRecord(tokType, idx, options);
-    }
-    return this.consumeInternal(tokType, 3, options);
+    return this.consumeInternal(tokType, idx, options);
   }
 
   CONSUME4(
@@ -166,11 +164,10 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    if (this.RECORDING_PHASE) {
-      const idx = this._consumeAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.consumeInternalRecord(tokType, idx, options);
-    }
-    return this.consumeInternal(tokType, 4, options);
+    return this.consumeInternal(tokType, idx, options);
   }
 
   CONSUME5(
@@ -178,11 +175,10 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    if (this.RECORDING_PHASE) {
-      const idx = this._consumeAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.consumeInternalRecord(tokType, idx, options);
-    }
-    return this.consumeInternal(tokType, 5, options);
+    return this.consumeInternal(tokType, idx, options);
   }
 
   CONSUME6(
@@ -190,11 +186,10 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    if (this.RECORDING_PHASE) {
-      const idx = this._consumeAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.consumeInternalRecord(tokType, idx, options);
-    }
-    return this.consumeInternal(tokType, 6, options);
+    return this.consumeInternal(tokType, idx, options);
   }
 
   CONSUME7(
@@ -202,11 +197,10 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    if (this.RECORDING_PHASE) {
-      const idx = this._consumeAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.consumeInternalRecord(tokType, idx, options);
-    }
-    return this.consumeInternal(tokType, 7, options);
+    return this.consumeInternal(tokType, idx, options);
   }
 
   CONSUME8(
@@ -214,11 +208,10 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    if (this.RECORDING_PHASE) {
-      const idx = this._consumeAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.consumeInternalRecord(tokType, idx, options);
-    }
-    return this.consumeInternal(tokType, 8, options);
+    return this.consumeInternal(tokType, idx, options);
   }
 
   CONSUME9(
@@ -226,23 +219,22 @@ export class RecognizerApi {
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    if (this.RECORDING_PHASE) {
-      const idx = this._consumeAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.consumeInternalRecord(tokType, idx, options);
-    }
-    return this.consumeInternal(tokType, 9, options);
+    return this.consumeInternal(tokType, idx, options);
   }
 
+  // ──── SUBRULE family ────
   SUBRULE<ARGS extends unknown[], R>(
     this: MixedInParser,
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    if (this.RECORDING_PHASE) {
-      const idx = this._subruleAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    }
-    return this.subruleInternal(ruleToCall, 0, options);
+    return this.subruleInternal(ruleToCall, idx, options);
   }
 
   SUBRULE1<ARGS extends unknown[], R>(
@@ -250,11 +242,10 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    if (this.RECORDING_PHASE) {
-      const idx = this._subruleAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    }
-    return this.subruleInternal(ruleToCall, 1, options);
+    return this.subruleInternal(ruleToCall, idx, options);
   }
 
   SUBRULE2<ARGS extends unknown[], R>(
@@ -262,11 +253,10 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    if (this.RECORDING_PHASE) {
-      const idx = this._subruleAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    }
-    return this.subruleInternal(ruleToCall, 2, options);
+    return this.subruleInternal(ruleToCall, idx, options);
   }
 
   SUBRULE3<ARGS extends unknown[], R>(
@@ -274,11 +264,10 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    if (this.RECORDING_PHASE) {
-      const idx = this._subruleAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    }
-    return this.subruleInternal(ruleToCall, 3, options);
+    return this.subruleInternal(ruleToCall, idx, options);
   }
 
   SUBRULE4<ARGS extends unknown[], R>(
@@ -286,11 +275,10 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    if (this.RECORDING_PHASE) {
-      const idx = this._subruleAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    }
-    return this.subruleInternal(ruleToCall, 4, options);
+    return this.subruleInternal(ruleToCall, idx, options);
   }
 
   SUBRULE5<ARGS extends unknown[], R>(
@@ -298,11 +286,10 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    if (this.RECORDING_PHASE) {
-      const idx = this._subruleAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    }
-    return this.subruleInternal(ruleToCall, 5, options);
+    return this.subruleInternal(ruleToCall, idx, options);
   }
 
   SUBRULE6<ARGS extends unknown[], R>(
@@ -310,11 +297,10 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    if (this.RECORDING_PHASE) {
-      const idx = this._subruleAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    }
-    return this.subruleInternal(ruleToCall, 6, options);
+    return this.subruleInternal(ruleToCall, idx, options);
   }
 
   SUBRULE7<ARGS extends unknown[], R>(
@@ -322,11 +308,10 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    if (this.RECORDING_PHASE) {
-      const idx = this._subruleAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    }
-    return this.subruleInternal(ruleToCall, 7, options);
+    return this.subruleInternal(ruleToCall, idx, options);
   }
 
   SUBRULE8<ARGS extends unknown[], R>(
@@ -334,11 +319,10 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    if (this.RECORDING_PHASE) {
-      const idx = this._subruleAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    }
-    return this.subruleInternal(ruleToCall, 8, options);
+    return this.subruleInternal(ruleToCall, idx, options);
   }
 
   SUBRULE9<ARGS extends unknown[], R>(
@@ -346,681 +330,666 @@ export class RecognizerApi {
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    if (this.RECORDING_PHASE) {
-      const idx = this._subruleAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    }
-    return this.subruleInternal(ruleToCall, 9, options);
+    return this.subruleInternal(ruleToCall, idx, options);
   }
 
+  // ──── OPTION family ────
   OPTION<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    if (this.RECORDING_PHASE) {
-      const idx = this._optionAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    }
-    return this.optionInternal(actionORMethodDef, 0);
+    return this.optionInternal(actionORMethodDef, idx);
   }
 
   OPTION1<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    if (this.RECORDING_PHASE) {
-      const idx = this._optionAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    }
-    return this.optionInternal(actionORMethodDef, 1);
+    return this.optionInternal(actionORMethodDef, idx);
   }
 
   OPTION2<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    if (this.RECORDING_PHASE) {
-      const idx = this._optionAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    }
-    return this.optionInternal(actionORMethodDef, 2);
+    return this.optionInternal(actionORMethodDef, idx);
   }
 
   OPTION3<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    if (this.RECORDING_PHASE) {
-      const idx = this._optionAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    }
-    return this.optionInternal(actionORMethodDef, 3);
+    return this.optionInternal(actionORMethodDef, idx);
   }
 
   OPTION4<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    if (this.RECORDING_PHASE) {
-      const idx = this._optionAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    }
-    return this.optionInternal(actionORMethodDef, 4);
+    return this.optionInternal(actionORMethodDef, idx);
   }
 
   OPTION5<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    if (this.RECORDING_PHASE) {
-      const idx = this._optionAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    }
-    return this.optionInternal(actionORMethodDef, 5);
+    return this.optionInternal(actionORMethodDef, idx);
   }
 
   OPTION6<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    if (this.RECORDING_PHASE) {
-      const idx = this._optionAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    }
-    return this.optionInternal(actionORMethodDef, 6);
+    return this.optionInternal(actionORMethodDef, idx);
   }
 
   OPTION7<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    if (this.RECORDING_PHASE) {
-      const idx = this._optionAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    }
-    return this.optionInternal(actionORMethodDef, 7);
+    return this.optionInternal(actionORMethodDef, idx);
   }
 
   OPTION8<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    if (this.RECORDING_PHASE) {
-      const idx = this._optionAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    }
-    return this.optionInternal(actionORMethodDef, 8);
+    return this.optionInternal(actionORMethodDef, idx);
   }
 
   OPTION9<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    if (this.RECORDING_PHASE) {
-      const idx = this._optionAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    }
-    return this.optionInternal(actionORMethodDef, 9);
+    return this.optionInternal(actionORMethodDef, idx);
   }
 
+  // ──── OR family ────
   OR<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    if (this.RECORDING_PHASE) {
-      const idx = this._orAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.orInternalRecord(altsOrOpts, idx) as T;
-    }
-    return this.orInternal(altsOrOpts, 0);
+    return this.orInternal(altsOrOpts, idx);
   }
 
   OR1<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    if (this.RECORDING_PHASE) {
-      const idx = this._orAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.orInternalRecord(altsOrOpts, idx) as T;
-    }
-    return this.orInternal(altsOrOpts, 1);
+    return this.orInternal(altsOrOpts, idx);
   }
 
   OR2<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    if (this.RECORDING_PHASE) {
-      const idx = this._orAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.orInternalRecord(altsOrOpts, idx) as T;
-    }
-    return this.orInternal(altsOrOpts, 2);
+    return this.orInternal(altsOrOpts, idx);
   }
 
   OR3<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    if (this.RECORDING_PHASE) {
-      const idx = this._orAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.orInternalRecord(altsOrOpts, idx) as T;
-    }
-    return this.orInternal(altsOrOpts, 3);
+    return this.orInternal(altsOrOpts, idx);
   }
 
   OR4<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    if (this.RECORDING_PHASE) {
-      const idx = this._orAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.orInternalRecord(altsOrOpts, idx) as T;
-    }
-    return this.orInternal(altsOrOpts, 4);
+    return this.orInternal(altsOrOpts, idx);
   }
 
   OR5<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    if (this.RECORDING_PHASE) {
-      const idx = this._orAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.orInternalRecord(altsOrOpts, idx) as T;
-    }
-    return this.orInternal(altsOrOpts, 5);
+    return this.orInternal(altsOrOpts, idx);
   }
 
   OR6<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    if (this.RECORDING_PHASE) {
-      const idx = this._orAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.orInternalRecord(altsOrOpts, idx) as T;
-    }
-    return this.orInternal(altsOrOpts, 6);
+    return this.orInternal(altsOrOpts, idx);
   }
 
   OR7<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    if (this.RECORDING_PHASE) {
-      const idx = this._orAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.orInternalRecord(altsOrOpts, idx) as T;
-    }
-    return this.orInternal(altsOrOpts, 7);
+    return this.orInternal(altsOrOpts, idx);
   }
 
   OR8<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    if (this.RECORDING_PHASE) {
-      const idx = this._orAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.orInternalRecord(altsOrOpts, idx) as T;
-    }
-    return this.orInternal(altsOrOpts, 8);
+    return this.orInternal(altsOrOpts, idx);
   }
 
   OR9<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    if (this.RECORDING_PHASE) {
-      const idx = this._orAutoOccurrence[this.RULE_STACK_IDX]++;
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
       return this.orInternalRecord(altsOrOpts, idx) as T;
-    }
-    return this.orInternal(altsOrOpts, 9);
+    return this.orInternal(altsOrOpts, idx);
   }
 
+  // ──── MANY family ────
   MANY<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manyAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manyInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.manyInternal(0, actionORMethodDef);
+    this.manyInternal(idx, actionORMethodDef);
   }
 
   MANY1<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manyAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manyInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.manyInternal(1, actionORMethodDef);
+    this.manyInternal(idx, actionORMethodDef);
   }
 
   MANY2<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manyAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manyInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.manyInternal(2, actionORMethodDef);
+    this.manyInternal(idx, actionORMethodDef);
   }
 
   MANY3<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manyAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manyInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.manyInternal(3, actionORMethodDef);
+    this.manyInternal(idx, actionORMethodDef);
   }
 
   MANY4<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manyAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manyInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.manyInternal(4, actionORMethodDef);
+    this.manyInternal(idx, actionORMethodDef);
   }
 
   MANY5<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manyAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manyInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.manyInternal(5, actionORMethodDef);
+    this.manyInternal(idx, actionORMethodDef);
   }
 
   MANY6<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manyAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manyInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.manyInternal(6, actionORMethodDef);
+    this.manyInternal(idx, actionORMethodDef);
   }
 
   MANY7<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manyAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manyInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.manyInternal(7, actionORMethodDef);
+    this.manyInternal(idx, actionORMethodDef);
   }
 
   MANY8<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manyAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manyInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.manyInternal(8, actionORMethodDef);
+    this.manyInternal(idx, actionORMethodDef);
   }
 
   MANY9<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manyAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manyInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.manyInternal(9, actionORMethodDef);
+    this.manyInternal(idx, actionORMethodDef);
   }
 
+  // ──── MANY_SEP family ────
   MANY_SEP<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manySepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manySepFirstInternalRecord(idx, options);
       return;
     }
-    this.manySepFirstInternal(0, options);
+    this.manySepFirstInternal(idx, options);
   }
 
   MANY_SEP1<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manySepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manySepFirstInternalRecord(idx, options);
       return;
     }
-    this.manySepFirstInternal(1, options);
+    this.manySepFirstInternal(idx, options);
   }
 
   MANY_SEP2<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manySepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manySepFirstInternalRecord(idx, options);
       return;
     }
-    this.manySepFirstInternal(2, options);
+    this.manySepFirstInternal(idx, options);
   }
 
   MANY_SEP3<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manySepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manySepFirstInternalRecord(idx, options);
       return;
     }
-    this.manySepFirstInternal(3, options);
+    this.manySepFirstInternal(idx, options);
   }
 
   MANY_SEP4<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manySepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manySepFirstInternalRecord(idx, options);
       return;
     }
-    this.manySepFirstInternal(4, options);
+    this.manySepFirstInternal(idx, options);
   }
 
   MANY_SEP5<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manySepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manySepFirstInternalRecord(idx, options);
       return;
     }
-    this.manySepFirstInternal(5, options);
+    this.manySepFirstInternal(idx, options);
   }
 
   MANY_SEP6<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manySepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manySepFirstInternalRecord(idx, options);
       return;
     }
-    this.manySepFirstInternal(6, options);
+    this.manySepFirstInternal(idx, options);
   }
 
   MANY_SEP7<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manySepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manySepFirstInternalRecord(idx, options);
       return;
     }
-    this.manySepFirstInternal(7, options);
+    this.manySepFirstInternal(idx, options);
   }
 
   MANY_SEP8<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manySepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manySepFirstInternalRecord(idx, options);
       return;
     }
-    this.manySepFirstInternal(8, options);
+    this.manySepFirstInternal(idx, options);
   }
 
   MANY_SEP9<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._manySepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.manySepFirstInternalRecord(idx, options);
       return;
     }
-    this.manySepFirstInternal(9, options);
+    this.manySepFirstInternal(idx, options);
   }
 
+  // ──── AT_LEAST_ONE family ────
   AT_LEAST_ONE<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.atLeastOneInternal(0, actionORMethodDef);
+    this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
   AT_LEAST_ONE1<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.atLeastOneInternal(1, actionORMethodDef);
+    this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
   AT_LEAST_ONE2<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.atLeastOneInternal(2, actionORMethodDef);
+    this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
   AT_LEAST_ONE3<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.atLeastOneInternal(3, actionORMethodDef);
+    this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
   AT_LEAST_ONE4<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.atLeastOneInternal(4, actionORMethodDef);
+    this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
   AT_LEAST_ONE5<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.atLeastOneInternal(5, actionORMethodDef);
+    this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
   AT_LEAST_ONE6<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.atLeastOneInternal(6, actionORMethodDef);
+    this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
   AT_LEAST_ONE7<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.atLeastOneInternal(7, actionORMethodDef);
+    this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
   AT_LEAST_ONE8<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.atLeastOneInternal(8, actionORMethodDef);
+    this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
   AT_LEAST_ONE9<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneInternalRecord(idx, actionORMethodDef);
       return;
     }
-    this.atLeastOneInternal(9, actionORMethodDef);
+    this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
+  // ──── AT_LEAST_ONE_SEP family ────
   AT_LEAST_ONE_SEP<OUT>(
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneSepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneSepFirstInternalRecord(idx, options);
       return;
     }
-    this.atLeastOneSepFirstInternal(0, options);
+    this.atLeastOneSepFirstInternal(idx, options);
   }
 
   AT_LEAST_ONE_SEP1<OUT>(
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneSepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneSepFirstInternalRecord(idx, options);
       return;
     }
-    this.atLeastOneSepFirstInternal(1, options);
+    this.atLeastOneSepFirstInternal(idx, options);
   }
 
   AT_LEAST_ONE_SEP2<OUT>(
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneSepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneSepFirstInternalRecord(idx, options);
       return;
     }
-    this.atLeastOneSepFirstInternal(2, options);
+    this.atLeastOneSepFirstInternal(idx, options);
   }
 
   AT_LEAST_ONE_SEP3<OUT>(
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneSepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneSepFirstInternalRecord(idx, options);
       return;
     }
-    this.atLeastOneSepFirstInternal(3, options);
+    this.atLeastOneSepFirstInternal(idx, options);
   }
 
   AT_LEAST_ONE_SEP4<OUT>(
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneSepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneSepFirstInternalRecord(idx, options);
       return;
     }
-    this.atLeastOneSepFirstInternal(4, options);
+    this.atLeastOneSepFirstInternal(idx, options);
   }
 
   AT_LEAST_ONE_SEP5<OUT>(
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneSepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneSepFirstInternalRecord(idx, options);
       return;
     }
-    this.atLeastOneSepFirstInternal(5, options);
+    this.atLeastOneSepFirstInternal(idx, options);
   }
 
   AT_LEAST_ONE_SEP6<OUT>(
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneSepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneSepFirstInternalRecord(idx, options);
       return;
     }
-    this.atLeastOneSepFirstInternal(6, options);
+    this.atLeastOneSepFirstInternal(idx, options);
   }
 
   AT_LEAST_ONE_SEP7<OUT>(
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneSepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneSepFirstInternalRecord(idx, options);
       return;
     }
-    this.atLeastOneSepFirstInternal(7, options);
+    this.atLeastOneSepFirstInternal(idx, options);
   }
 
   AT_LEAST_ONE_SEP8<OUT>(
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneSepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneSepFirstInternalRecord(idx, options);
       return;
     }
-    this.atLeastOneSepFirstInternal(8, options);
+    this.atLeastOneSepFirstInternal(idx, options);
   }
 
   AT_LEAST_ONE_SEP9<OUT>(
     this: MixedInParser,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
+    const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) {
-      const idx = this._atLeastOneSepAutoOccurrence[this.RULE_STACK_IDX]++;
       this.atLeastOneSepFirstInternalRecord(idx, options);
       return;
     }
-    this.atLeastOneSepFirstInternal(9, options);
+    this.atLeastOneSepFirstInternal(idx, options);
   }
 
   RULE<T>(

@@ -124,10 +124,20 @@ export class GastRecorder {
       newTopLevelRule.name = name;
       this.recordingProdStack.push(newTopLevelRule);
       // Set up rule state so auto-occurrence counters work during recording.
+      // We manage RULE_STACK_IDX directly instead of calling
+      // ruleInvocationStateUpdate (which has CST side effects).
+      const depth = ++this.RULE_STACK_IDX;
       const shortName = this.fullRuleNameToShort[name] ?? 0;
-      this.ruleInvocationStateUpdate(shortName, name, 0);
+      this.RULE_STACK[depth] = shortName;
+      this.currRuleShortName = shortName;
+      this._dslCounterStack[depth] = this._dslCounter;
+      this._dslCounter = 0;
       def.call(this);
-      this.ruleFinallyStateUpdate();
+      this._dslCounter = this._dslCounterStack[depth];
+      this.RULE_STACK_IDX--;
+      if (this.RULE_STACK_IDX >= 0) {
+        this.currRuleShortName = this.RULE_STACK[this.RULE_STACK_IDX];
+      }
       this.recordingProdStack.pop();
       return newTopLevelRule;
     } catch (originalError) {

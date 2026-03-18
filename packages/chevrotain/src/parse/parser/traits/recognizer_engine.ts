@@ -157,20 +157,14 @@ export class RecognizerEngine {
    * mapKeys for _orFastMaps without requiring numbered variants (OR1, OR2).
    * A single integer is cheaper than array-indexed counters.
    */
-  _orCounter: number;
-  _orCounterStack: number[];
   /**
-   * Auto-occurrence counters per DSL method type, indexed by RULE_STACK_IDX.
-   * Used ONLY during RECORDING_PHASE (performSelfAnalysis). Not on hot path.
+   * Single auto-occurrence counter for ALL DSL methods. Every DSL call
+   * (CONSUME, SUBRULE, OR, OPTION, MANY, etc.) increments this counter,
+   * giving unique occurrence IDs per call site within a rule. Saved/restored
+   * on rule entry/exit. One property access per DSL call — minimal overhead.
    */
-  _orAutoOccurrence: number[];
-  _consumeAutoOccurrence: number[];
-  _subruleAutoOccurrence: number[];
-  _optionAutoOccurrence: number[];
-  _manyAutoOccurrence: number[];
-  _atLeastOneAutoOccurrence: number[];
-  _manySepAutoOccurrence: number[];
-  _atLeastOneSepAutoOccurrence: number[];
+  _dslCounter: number;
+  _dslCounterStack: number[];
   definedRulesNames: string[];
   tokensMap: { [fqn: string]: TokenType };
   gastProductionsCache: Record<string, Rule>;
@@ -240,16 +234,8 @@ export class RecognizerEngine {
     this.RULE_STACK_IDX = -1;
     this.RULE_OCCURRENCE_STACK = [];
     this.RULE_OCCURRENCE_STACK_IDX = -1;
-    this._orCounter = 0;
-    this._orCounterStack = [];
-    this._orAutoOccurrence = [];
-    this._consumeAutoOccurrence = [];
-    this._subruleAutoOccurrence = [];
-    this._optionAutoOccurrence = [];
-    this._manyAutoOccurrence = [];
-    this._atLeastOneAutoOccurrence = [];
-    this._manySepAutoOccurrence = [];
-    this._atLeastOneSepAutoOccurrence = [];
+    this._dslCounter = 0;
+    this._dslCounterStack = [];
     this.gastProductionsCache = {};
 
     if (Object.hasOwn(config, "serializedGrammar")) {
@@ -1052,7 +1038,7 @@ export class RecognizerEngine {
     // -----------------------------------------------------------------------
     const la1 = this.LA_FAST(1);
     const la1TypeIdx = la1.tokenTypeIdx;
-    const mapKey = this.currRuleShortName | this._orCounter++;
+    const mapKey = this.currRuleShortName | occurrence;
     const fastMap = this._orFastMaps[mapKey];
     const gatedPrefixAlts = this._orGatedPrefixAlts[mapKey];
     if (fastMap !== undefined || gatedPrefixAlts !== undefined) {
@@ -1268,8 +1254,8 @@ export class RecognizerEngine {
   }
 
   ruleFinallyStateUpdate(this: MixedInParser): void {
-    // Restore the runtime OR counter from the parent rule scope.
-    this._orCounter = this._orCounterStack[this.RULE_STACK_IDX];
+    // Restore the single DSL counter from the parent rule scope.
+    this._dslCounter = this._dslCounterStack[this.RULE_STACK_IDX];
     this.RULE_STACK_IDX--;
     this.RULE_OCCURRENCE_STACK_IDX--;
 
@@ -1439,18 +1425,9 @@ export class RecognizerEngine {
     const depth = ++this.RULE_STACK_IDX;
     this.RULE_STACK[depth] = shortName;
     this.currRuleShortName = shortName;
-    // Save and reset the runtime OR counter for this rule scope.
-    this._orCounterStack[depth] = this._orCounter;
-    this._orCounter = 0;
-    // Reset recording-phase auto-occurrence counters (only used during performSelfAnalysis).
-    this._orAutoOccurrence[depth] = 0;
-    this._consumeAutoOccurrence[depth] = 0;
-    this._subruleAutoOccurrence[depth] = 0;
-    this._optionAutoOccurrence[depth] = 0;
-    this._manyAutoOccurrence[depth] = 0;
-    this._atLeastOneAutoOccurrence[depth] = 0;
-    this._manySepAutoOccurrence[depth] = 0;
-    this._atLeastOneSepAutoOccurrence[depth] = 0;
+    // Save and reset the single DSL auto-occurrence counter.
+    this._dslCounterStack[depth] = this._dslCounter;
+    this._dslCounter = 0;
     // NOOP when cst is disabled
     this.cstInvocationStateUpdate(fullName);
   }
