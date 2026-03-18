@@ -59,12 +59,17 @@ import { ParserMethodInternal } from "../types.js";
  */
 export const SPEC_FAIL = Symbol("SPEC_FAIL");
 
+// Entries >= GATED_OFFSET encode "altIdx + GATED_OFFSET" meaning the alt is
+// correct but preceding gated alts must be checked first. Decoding is just
+// `entry - GATED_OFFSET`. For gate-free grammars all entries are 0-255 so
+// the check `>= GATED_OFFSET` is a single integer comparison — zero cost.
+const GATED_OFFSET = 256;
+
 /**
- * Records that `altIdx` matched when LA(1) had `tokenTypeIdx` for the OR
- * site identified by `mapKey`. Populates the direct tokenTypeIdx→altIdx
- * fast-dispatch map. If two different alts match the same tokenTypeIdx,
- * or if a preceding alt has a GATE, marks the entry as ambiguous (-1)
- * so the fast path falls through to the full speculative loop.
+ * Records that `altIdx` matched when LA(1) had `tokenTypeIdx`. When a
+ * preceding alt has a GATE, stores `altIdx + GATED_OFFSET` so the fast
+ * path knows to check gates adaptively. True ambiguity (two non-gated
+ * alts) is marked as -1.
  */
 function addOrFastMapEntry(
   orFastMaps: Record<number, Record<number, number>>,
@@ -78,19 +83,35 @@ function addOrFastMapEntry(
     map = Object.create(null);
     orFastMaps[mapKey] = map;
   }
-  // If any preceding alt has a GATE, gate priority must be resolved by
-  // the slow path. For gate-free grammars (JSON, CSS) this never triggers.
+  // Check if any preceding alt has a GATE.
+  let hasGatedPredecessor = false;
   for (let g = 0; g < altIdx; g++) {
     if (alts[g].GATE !== undefined) {
-      map[tokenTypeIdx] = -1;
-      return;
+      hasGatedPredecessor = true;
+      break;
     }
   }
+  const encodedAlt = hasGatedPredecessor ? altIdx + GATED_OFFSET : altIdx;
   const existing = map[tokenTypeIdx];
   if (existing === undefined) {
-    map[tokenTypeIdx] = altIdx;
-  } else if (existing !== altIdx && existing >= 0) {
-    map[tokenTypeIdx] = -1; // ambiguous
+    map[tokenTypeIdx] = encodedAlt;
+  } else if (existing >= 0) {
+    const existingAlt =
+      existing >= GATED_OFFSET ? existing - GATED_OFFSET : existing;
+    if (existingAlt !== altIdx) {
+      const existingGated = alts[existingAlt].GATE !== undefined;
+      const newGated = alts[altIdx].GATE !== undefined;
+      if (existingGated && !newGated) {
+        map[tokenTypeIdx] = encodedAlt;
+      } else if (!existingGated && newGated) {
+        // keep existing non-gated, but mark gated if new has predecessor
+        if (hasGatedPredecessor && existing < GATED_OFFSET) {
+          map[tokenTypeIdx] = existing + GATED_OFFSET;
+        }
+      } else if (!existingGated && !newGated) {
+        map[tokenTypeIdx] = -1; // true ambiguity
+      }
+    }
   }
 }
 
@@ -1038,10 +1059,41 @@ export class RecognizerEngine {
       const fastAltIdx =
         fastMap !== undefined ? fastMap[la1TypeIdx] : undefined;
 
-      // Direct dispatch: single unambiguous candidate for this tokenTypeIdx.
-      // Gate-conflicted entries are marked -1 by addOrFastMapEntry and skip this.
+      // Direct dispatch: single candidate for this tokenTypeIdx.
       if (fastAltIdx !== undefined && fastAltIdx >= 0) {
-        const alt = alts[fastAltIdx];
+        // Decode: entries >= GATED_OFFSET have preceding gated alts.
+        // Gate-free grammars (JSON, CSS) always have entries < 256 — zero cost.
+        let realAltIdx = fastAltIdx;
+        if (fastAltIdx >= GATED_OFFSET) {
+          realAltIdx = fastAltIdx - GATED_OFFSET;
+          // Check preceding gated alts (higher priority) adaptively.
+          for (let g = 0; g < realAltIdx; g++) {
+            const galt = alts[g];
+            if (galt.GATE !== undefined && galt.GATE.call(this)) {
+              const gPos = this.currIdx;
+              if (wasSpeculating) {
+                try {
+                  return galt.ALT.call(this) as T;
+                } catch (_e) {
+                  this.currIdx = gPos;
+                }
+              } else {
+                const gErr = this._errors.length;
+                const gCst = this.saveCstTop();
+                try {
+                  return galt.ALT.call(this) as T;
+                } catch (_e) {
+                  this.restoreCstTop(gCst);
+                  this.currIdx = gPos;
+                  this._errors.length = gErr;
+                }
+              }
+            }
+          }
+        }
+
+        // Dispatch to the mapped fallback alt.
+        const alt = alts[realAltIdx];
         if (alt.GATE === undefined || alt.GATE.call(this)) {
           const fastLexPos = this.currIdx;
           if (wasSpeculating) {
