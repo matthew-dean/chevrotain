@@ -112,6 +112,14 @@ export class RecognizerEngine {
   // Cached value of the current rule's short name to avoid repeated RULE_STACK[length-1] lookups.
   // Updated on rule entry/exit and state reload.
   currRuleShortName: number;
+  /**
+   * Lazy LL(1) fast-dispatch maps, keyed by `currRuleShortName | occurrence`.
+   * Each entry is a number[] mapping tokenTypeIdx → altIndex.
+   * Stored as a plain object (not array) to avoid V8's sparse-array
+   * dictionary-mode penalty — currRuleShortName multiples of 256 would leave
+   * large gaps in a numeric array.
+   */
+  _orFastMaps: Record<number, number[]>;
 
   initRecognizerEngine(
     tokenVocabulary: TokenVocabulary,
@@ -128,6 +136,7 @@ export class RecognizerEngine {
     this.IS_SPECULATING = false;
     this._isInTrueBacktrack = false;
     this._earlyExitLookahead = false;
+    this._orFastMaps = Object.create(null);
 
     this.definedRulesNames = [];
     this.tokensMap = {};
@@ -409,25 +418,28 @@ export class RecognizerEngine {
       return undefined;
     }
 
-    const saved = this.saveRecogState();
+    const startPos = this.currIdx;
+    const startErrors = this._errors.length;
+    const startRuleStack = this.RULE_STACK_IDX;
     const cstSave = this.saveCstTop();
     try {
       const result = action.call(this);
       // Stuck guard: if body didn't advance pos, or recovery added
       // errors (meaning the optional content wasn't really present), undo.
-      if (
-        this.currIdx === saved.pos ||
-        this._errors.length > saved.errorsLength
-      ) {
+      if (this.currIdx === startPos || this._errors.length > startErrors) {
         this.restoreCstTop(cstSave);
-        this.reloadRecogState(saved);
+        this.currIdx = startPos;
+        this._errors.length = startErrors;
+        this.RULE_STACK_IDX = startRuleStack;
         return undefined;
       }
       return result;
     } catch (e) {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
         this.restoreCstTop(cstSave);
-        this.reloadRecogState(saved);
+        this.currIdx = startPos;
+        this._errors.length = startErrors;
+        this.RULE_STACK_IDX = startRuleStack;
         return undefined;
       }
       throw e;
@@ -486,21 +498,27 @@ export class RecognizerEngine {
     }
 
     // First iteration: mandatory — run committed.
-    const firstSaved = this.saveRecogState();
-    const firstCstSave = this.saveCstTop();
-    try {
-      action.call(this);
-    } catch (e) {
-      if (e === SPEC_FAIL || isRecognitionException(e)) {
-        this.restoreCstTop(firstCstSave);
-        this.reloadRecogState(firstSaved);
-        throw this.raiseEarlyExitException(
-          prodOccurrence,
-          PROD_TYPE.REPETITION_MANDATORY,
-          (actionORMethodDef as DSLMethodOptsWithErr<OUT>).ERR_MSG,
-        );
+    {
+      const firstPos = this.currIdx;
+      const firstErrors = this._errors.length;
+      const firstRuleStack = this.RULE_STACK_IDX;
+      const firstCstSave = this.saveCstTop();
+      try {
+        action.call(this);
+      } catch (e) {
+        if (e === SPEC_FAIL || isRecognitionException(e)) {
+          this.restoreCstTop(firstCstSave);
+          this.currIdx = firstPos;
+          this._errors.length = firstErrors;
+          this.RULE_STACK_IDX = firstRuleStack;
+          throw this.raiseEarlyExitException(
+            prodOccurrence,
+            PROD_TYPE.REPETITION_MANDATORY,
+            (actionORMethodDef as DSLMethodOptsWithErr<OUT>).ERR_MSG,
+          );
+        }
+        throw e;
       }
-      throw e;
     }
 
     // Subsequent iterations: probe with a quick speculative lookahead (exits
@@ -511,7 +529,9 @@ export class RecognizerEngine {
     const lookaheadFunc = this.makeSpecLookahead(action);
     while (lookaheadFunc()) {
       if (gate !== undefined && !gate.call(this)) break;
-      const saved = this.saveRecogState();
+      const iterPos = this.currIdx;
+      const iterErrors = this._errors.length;
+      const iterRuleStack = this.RULE_STACK_IDX;
       const cstSave = this.saveCstTop();
       try {
         // Run committed — any recovery happens inside the subrule's invokeRuleCatch.
@@ -522,15 +542,19 @@ export class RecognizerEngine {
         // the tokens can be consumed by whatever follows AT_LEAST_ONE.
         if (e === SPEC_FAIL || isRecognitionException(e)) {
           this.restoreCstTop(cstSave);
-          this.reloadRecogState(saved);
+          this.currIdx = iterPos;
+          this._errors.length = iterErrors;
+          this.RULE_STACK_IDX = iterRuleStack;
           break;
         }
         throw e;
       }
       // Stuck guard: body consumed no tokens → restore and stop.
-      if (this.currIdx <= saved.pos) {
+      if (this.currIdx <= iterPos) {
         this.restoreCstTop(cstSave);
-        this.reloadRecogState(saved);
+        this.currIdx = iterPos;
+        this._errors.length = iterErrors;
+        this.RULE_STACK_IDX = iterRuleStack;
         break;
       }
     }
@@ -572,21 +596,27 @@ export class RecognizerEngine {
     const separator = options.SEP;
 
     // First iteration: mandatory — no IS_SPECULATING, let it throw/recover normally.
-    const firstSaved = this.saveRecogState();
-    const firstCstSave = this.saveCstTop();
-    try {
-      (action as GrammarAction<OUT>).call(this);
-    } catch (e) {
-      if (e === SPEC_FAIL || isRecognitionException(e)) {
-        this.restoreCstTop(firstCstSave);
-        this.reloadRecogState(firstSaved);
-        throw this.raiseEarlyExitException(
-          prodOccurrence,
-          PROD_TYPE.REPETITION_MANDATORY_WITH_SEPARATOR,
-          options.ERR_MSG,
-        );
+    {
+      const firstPos = this.currIdx;
+      const firstErrors = this._errors.length;
+      const firstRuleStack = this.RULE_STACK_IDX;
+      const firstCstSave = this.saveCstTop();
+      try {
+        (action as GrammarAction<OUT>).call(this);
+      } catch (e) {
+        if (e === SPEC_FAIL || isRecognitionException(e)) {
+          this.restoreCstTop(firstCstSave);
+          this.currIdx = firstPos;
+          this._errors.length = firstErrors;
+          this.RULE_STACK_IDX = firstRuleStack;
+          throw this.raiseEarlyExitException(
+            prodOccurrence,
+            PROD_TYPE.REPETITION_MANDATORY_WITH_SEPARATOR,
+            options.ERR_MSG,
+          );
+        }
+        throw e;
       }
-      throw e;
     }
 
     // The separator token acts as a reliable lookahead for subsequent iterations.
@@ -626,16 +656,13 @@ export class RecognizerEngine {
   }
 
   /**
-   * Zero-or-more loop. Does NOT set IS_SPECULATING — the outer speculating
-   * state propagates, so CONSUME already throws SPEC_FAIL cheaply when
-   * we are inside an outer OR or AT_LEAST_ONE speculative attempt.
+   * Zero-or-more loop. Uses a speculative first-token probe (makeSpecLookahead)
+   * before each iteration, then executes the body committed without a surrounding
+   * try/catch. This lets V8 TurboFan inline the action body, matching the
+   * throughput of the baseline LL(k) engine's lookahead-function approach.
    *
-   * Each iteration is wrapped in try/catch: SPEC_FAIL exits the loop cleanly;
-   * recognition exceptions (from OR's committed best-match path) are re-thrown
-   * so invokeRuleCatch can handle them at the rule boundary.
-   *
-   * Stuck guard: if the body consumed no tokens, restore state and break to
-   * prevent infinite loops on epsilon bodies or recovery virtual tokens.
+   * Stuck guard: if the body consumed no tokens despite a positive probe, stop
+   * to prevent infinite loops on epsilon-like bodies.
    */
   manyInternalLogic<OUT>(
     this: MixedInParser,
@@ -652,54 +679,34 @@ export class RecognizerEngine {
       gate = undefined;
     }
 
-    const wasSpeculating = this.IS_SPECULATING;
+    // Build a first-token predicate once. makeSpecLookahead runs the action
+    // with IS_SPECULATING=true and _earlyExitLookahead=true, aborting after
+    // the first successful CONSUME — so this is an O(1) LL(1) check.
+    const lookaheadFunc = this.makeSpecLookahead(action);
     let notStuck = true;
     let ranAtLeastOnce = false;
-    while (notStuck) {
+    while (lookaheadFunc()) {
       if (gate !== undefined && !gate.call(this)) break;
-      const saved = this.saveRecogState();
-      const cstSave = this.saveCstTop();
-      this.IS_SPECULATING = true;
-      try {
-        action.call(this);
-        this.IS_SPECULATING = wasSpeculating;
-      } catch (e) {
-        this.IS_SPECULATING = wasSpeculating;
-        if (e === SPEC_FAIL) {
-          this.restoreCstTop(cstSave);
-          this.reloadRecogState(saved);
-          break;
-        }
-        if (isRecognitionException(e)) {
-          // IS_SPECULATING=true means direct CONSUMEs throw SPEC_FAIL, not
-          // recognition exceptions. A recognition exception here must come from
-          // OR's committed best-match path (which temporarily sets
-          // IS_SPECULATING=false). Re-throw so invokeRuleCatch can handle it.
-          this.restoreCstTop(cstSave);
-          throw e;
-        }
-        throw e;
-      }
-      // Stuck guard: body consumed no tokens → restore and stop.
-      if (this.currIdx <= saved.pos) {
-        this.restoreCstTop(cstSave);
-        this.reloadRecogState(saved);
-        notStuck = false; // Genuine stuck: prevent infinite loops + skip recovery
+      const iterPos = this.currIdx;
+      // Run committed — no IS_SPECULATING flip, no surrounding try/catch.
+      // Failures propagate: SPEC_FAIL reaches the outer speculative context;
+      // RecognitionException reaches invokeRuleCatch at the rule boundary.
+      action.call(this);
+      // Stuck guard: body consumed no tokens → stop to prevent infinite loops.
+      if (this.currIdx <= iterPos) {
+        notStuck = false;
         break;
       }
       ranAtLeastOnce = true;
     }
 
     // Only attempt in-repetition recovery if ≥1 iterations ran successfully.
-    // If zero iterations ran (first attempt SPEC_FAIL), recovery would cause an
-    // infinite loop: tryInRepetitionRecovery → manyInternal → 0 iterations →
-    // attemptInRepetitionRecovery → tryInRepetitionRecovery → ...
     if (ranAtLeastOnce) {
       // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
       this.attemptInRepetitionRecovery(
         this.manyInternal,
         [prodOccurrence, actionORMethodDef],
-        this.makeSpecLookahead(action),
+        lookaheadFunc,
         MANY_IDX,
         prodOccurrence,
         NextTerminalAfterManyWalker,
@@ -734,22 +741,28 @@ export class RecognizerEngine {
     const separator = options.SEP;
 
     // Optional first iteration — try without IS_SPECULATING.
-    const firstSaved = this.saveRecogState();
+    const firstPos = this.currIdx;
+    const firstErrors = this._errors.length;
+    const firstRuleStack = this.RULE_STACK_IDX;
     const firstCstSave = this.saveCstTop();
     try {
       action.call(this);
     } catch (e) {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
         this.restoreCstTop(firstCstSave);
-        this.reloadRecogState(firstSaved);
+        this.currIdx = firstPos;
+        this._errors.length = firstErrors;
+        this.RULE_STACK_IDX = firstRuleStack;
         return; // zero iterations — MANY_SEP is optional
       }
       throw e;
     }
     // Stuck guard: first element consumed no tokens → treat as zero iterations.
-    if (this.currIdx <= firstSaved.pos) {
+    if (this.currIdx <= firstPos) {
       this.restoreCstTop(firstCstSave);
-      this.reloadRecogState(firstSaved);
+      this.currIdx = firstPos;
+      this._errors.length = firstErrors;
+      this.RULE_STACK_IDX = firstRuleStack;
       return;
     }
 
@@ -790,7 +803,9 @@ export class RecognizerEngine {
     action: GrammarAction<any>,
   ): () => boolean {
     return () => {
-      const saved = this.saveRecogState();
+      const savedPos = this.currIdx;
+      const savedErrors = this._errors.length;
+      const savedRuleStack = this.RULE_STACK_IDX;
       const cstSave = this.saveCstTop();
       const prev = this.IS_SPECULATING;
       this.IS_SPECULATING = true;
@@ -808,7 +823,9 @@ export class RecognizerEngine {
         this._earlyExitLookahead = false;
         this.IS_SPECULATING = prev;
         this.restoreCstTop(cstSave);
-        this.reloadRecogState(saved);
+        this.currIdx = savedPos;
+        this._errors.length = savedErrors;
+        this.RULE_STACK_IDX = savedRuleStack;
       }
     };
   }
@@ -889,24 +906,74 @@ export class RecognizerEngine {
       : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
     const wasSpeculating = this.IS_SPECULATING;
 
+    // -----------------------------------------------------------------------
+    // Fast-dispatch path — O(1) LL(1) shortcut, populated lazily.
+    //
+    // The `_fastMap` sparse array on the alts object maps
+    // `tokenTypeIdx → altIndex` for alts whose first token has been
+    // observed in a previous successful speculative trial (see population
+    // below). Only alts without GATE conditions are eligible, since
+    // GATEd alts are context-sensitive and unsafe to dispatch by token alone.
+    //
+    // When a mapping exists for LA(1), we call the alt directly:
+    //   - no IS_SPECULATING flip
+    //   - no save / restore
+    //   - no try / catch
+    // This removes the per-OR try/catch overhead that prevents V8 TurboFan
+    // from inlining the alt body, restoring near-LL(k) throughput for
+    // unambiguous LL(1) grammars (e.g. JSON, CSS).
+    //
+    // If the grammar is correct and deterministic the fast alt never fails.
+    // A failure propagates as a normal exception to the caller (which may be
+    // a MANY catch that already holds a savepoint — so state is still safe).
+    // -----------------------------------------------------------------------
+    const la1TypeIdx = this.LA_FAST(1).tokenTypeIdx;
+    const mapKey = this.currRuleShortName | occurrence;
+    const fastMap = this._orFastMaps[mapKey];
+    if (fastMap !== undefined) {
+      const fastAltIdx = fastMap[la1TypeIdx];
+      if (fastAltIdx !== undefined) {
+        return alts[fastAltIdx].ALT.call(this) as T;
+      }
+    }
+
     let bestProgress = -1;
     let bestAltIdx = -1;
     let uniqueBest = false;
 
+    // Capture entry state as plain integers — no object allocation.
+    // CST snapshot is taken once before the loop; it's a no-op when CST
+    // is disabled (EmbeddedActionsParser / outputCst:false).
+    // For alts that fail with progress === 0, state was never mutated,
+    // so we skip restore entirely.
+    const startPos = this.currIdx;
+    const startErrors = this._errors.length;
+    const startRuleStack = this.RULE_STACK_IDX;
+    const cstSave = this.saveCstTop();
+
     for (let i = 0; i < alts.length; i++) {
       const alt = alts[i];
       if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
-      const saved = this.saveRecogState();
-      const cstSave = this.saveCstTop();
       this.IS_SPECULATING = true;
       try {
         const result = alt.ALT.call(this) as T;
         this.IS_SPECULATING = wasSpeculating;
+        // Populate the fast-dispatch map for this alt so future calls with
+        // the same LA(1) token type skip speculation entirely.
+        // Only safe for GATE-free alts (pure token-driven dispatch).
+        if (alt.GATE === undefined) {
+          let fm = this._orFastMaps[mapKey];
+          if (fm === undefined) {
+            fm = [];
+            this._orFastMaps[mapKey] = fm;
+          }
+          fm[la1TypeIdx] = i;
+        }
         return result;
       } catch (e) {
         this.IS_SPECULATING = wasSpeculating;
         if (e === SPEC_FAIL || isRecognitionException(e)) {
-          const progress = this.currIdx - saved.pos;
+          const progress = this.currIdx - startPos;
           if (progress > bestProgress) {
             bestProgress = progress;
             bestAltIdx = i;
@@ -916,8 +983,13 @@ export class RecognizerEngine {
             // safely commit to either — raise a proper NoViableAlt instead.
             uniqueBest = false;
           }
-          this.restoreCstTop(cstSave);
-          this.reloadRecogState(saved);
+          // Only restore if this alt actually consumed tokens.
+          if (progress > 0) {
+            this.restoreCstTop(cstSave);
+            this.currIdx = startPos;
+            this._errors.length = startErrors;
+            this.RULE_STACK_IDX = startRuleStack;
+          }
           // continue to next alternative
         } else {
           throw e;
@@ -1024,16 +1096,28 @@ export class RecognizerEngine {
     idx: number,
     options: ConsumeMethodOpts | undefined,
   ): IToken {
+    const nextToken = this.LA_FAST(1);
+    const label =
+      options !== undefined && options.LABEL !== undefined
+        ? options.LABEL
+        : tokType.name;
+
+    if (this.tokenMatcher(nextToken, tokType) === true) {
+      this.consumeToken();
+      // FIRST_TOKEN_MATCH: abort speculative lookahead after the first
+      // successful CONSUME — throw directly without recovery path.
+      if (this._earlyExitLookahead) throw FIRST_TOKEN_MATCH;
+      this.cstPostTerminal(label, nextToken);
+      return nextToken;
+    }
+
+    // Mismatch: speculative fast path — skip try/catch and recovery entirely.
+    if (this.IS_SPECULATING) throw SPEC_FAIL;
+
+    // Non-speculative: in-rule single-token recovery.
     let consumedToken!: IToken;
     try {
-      const nextToken = this.LA_FAST(1);
-      if (this.tokenMatcher(nextToken, tokType) === true) {
-        this.consumeToken();
-        if (this._earlyExitLookahead) throw FIRST_TOKEN_MATCH;
-        consumedToken = nextToken;
-      } else {
-        this.consumeInternalError(tokType, nextToken, options);
-      }
+      this.consumeInternalError(tokType, nextToken, options);
     } catch (eFromConsumption) {
       consumedToken = this.consumeInternalRecovery(
         tokType,
@@ -1041,13 +1125,7 @@ export class RecognizerEngine {
         eFromConsumption,
       );
     }
-
-    this.cstPostTerminal(
-      options !== undefined && options.LABEL !== undefined
-        ? options.LABEL
-        : tokType.name,
-      consumedToken,
-    );
+    this.cstPostTerminal(label, consumedToken);
     return consumedToken;
   }
 

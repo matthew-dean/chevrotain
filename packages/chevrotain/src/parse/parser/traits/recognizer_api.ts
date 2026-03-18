@@ -701,7 +701,9 @@ export class RecognizerApi {
       const prevIsInTrueBacktrack = this._isInTrueBacktrack;
       this.IS_SPECULATING = true;
       this._isInTrueBacktrack = true;
-      const orgState = this.saveRecogState();
+      const savedPos = this.currIdx;
+      const savedErrors = this._errors.length;
+      const savedRuleStack = this.RULE_STACK_IDX;
       try {
         ruleToCall.apply(this, args);
         return true;
@@ -712,7 +714,9 @@ export class RecognizerApi {
           throw e;
         }
       } finally {
-        this.reloadRecogState(orgState);
+        this.currIdx = savedPos;
+        this._errors.length = savedErrors;
+        this.RULE_STACK_IDX = savedRuleStack;
         this.IS_SPECULATING = prevIsSpeculating;
         this._isInTrueBacktrack = prevIsInTrueBacktrack;
       }
