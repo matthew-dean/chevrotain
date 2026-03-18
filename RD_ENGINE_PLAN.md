@@ -35,15 +35,15 @@ exactly. The `Lexer` is improved but its interface is unchanged.
   - ✅ Fast-dispatched alts skip `IS_SPECULATING`, save/restore, and try/catch entirely
   - ✅ `manyInternalLogic` reverted to speculative-body approach with integer locals
   - ✅ CST save/restore via `saveCstTop()`/`restoreCstTop()` (array cloning — to be replaced by watermarks)
-- ⬜ Stage 4b — Watermark-based CST save/restore (replace array cloning)
-  - ⬜ `saveCstTopImpl()` records children array `.length` values instead of `.slice()` cloning
-  - ⬜ `restoreCstTopImpl()` truncates arrays via `.length = savedLen` instead of replacing children object
-  - ⬜ Verify error recovery tests still pass (recovery disabled during speculation via `!this.isBackTracking()` guard)
-  - ⬜ Benchmark CstParser before/after to measure save/restore allocation reduction
-- ⬜ Stage 4c — CST allocation fixes
-  - ⬜ `cstInvocationStateUpdate()` uses fixed-shape `createCstNode()` factory
-  - ⬜ `CstNodeLocation` objects use fixed-shape `createCstLocation()` factory
-  - ⬜ `addTerminalToCst` uses `??= []` push pattern instead of `[token]` single-element array
+- ✅ Stage 4b — Watermark-based CST save/restore (replace array cloning)
+  - ✅ `saveCstTopImpl()` records children array `.length` values instead of `.slice()` cloning
+  - ✅ `restoreCstTopImpl()` truncates arrays via `.length = savedLen` instead of replacing children object
+  - ✅ Verify error recovery tests still pass (recovery disabled during speculation via `!this.isBackTracking()` guard)
+  - ✅ Benchmark CstParser before/after to measure save/restore allocation reduction
+- ✅ Stage 4c — CST allocation fixes
+  - ✅ `cstInvocationStateUpdate()` uses fixed-shape `createCstNode()` factory (pre-declares `location: undefined`)
+  - ✅ `CstNodeLocation` objects use fixed-shape per-mode factories (`createCstLocationOnlyOffset`, `createCstLocationFull`)
+  - ✅ `addTerminalToCst` / `addNoneTerminalToCst` use `??= []` push pattern instead of `[token]` single-element array
 - ⬜ Stage 5 — Recording phase: remove hidden-class pollution from `enableRecording`/`disableRecording`
 
 ---

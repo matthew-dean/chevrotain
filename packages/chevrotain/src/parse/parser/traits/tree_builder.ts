@@ -16,16 +16,65 @@ import {
   IToken,
   nodeLocationTrackingOptions,
 } from "@chevrotain/types";
+
+/**
+ * Fixed-shape CstNode factory. Pre-declaring all fields — including the
+ * optional `recoveredNode` and `location` — ensures every CstNode object
+ * shares a single V8 hidden class from birth, keeping call sites that read
+ * these fields monomorphic.
+ */
+function createCstNode(name: string): CstNode {
+  // Pre-declare `location` as undefined so that setInitialNodeLocation()
+  // assigns to an existing property rather than adding one — no hidden-class
+  // transition after construction. `recoveredNode` is left absent (matches the
+  // public type's optional contract and existing test expectations).
+  return {
+    name,
+    children: Object.create(null),
+    location: undefined,
+  } as unknown as CstNode; // cast: location is readonly in the public type
+}
+
+/**
+ * Fixed-shape CstNodeLocation factories — one per location-tracking mode.
+ * All objects within a mode have identical property sets, giving them the
+ * same V8 hidden class and keeping property-read call sites monomorphic.
+ *
+ * Two distinct shapes are intentional: onlyOffset consumers expect only
+ * {startOffset, endOffset}; full consumers expect all six fields.
+ */
+function createCstLocationOnlyOffset(): CstNodeLocation {
+  return { startOffset: NaN, endOffset: NaN } as CstNodeLocation;
+}
+
+function createCstLocationFull(): CstNodeLocation {
+  return {
+    startOffset: NaN,
+    startLine: NaN,
+    startColumn: NaN,
+    endOffset: NaN,
+    endLine: NaN,
+    endColumn: NaN,
+  };
+}
 import { MixedInParser } from "./parser_traits.js";
 import { DEFAULT_PARSER_CONFIG } from "../parser.js";
 
 /**
- * Snapshot of a CST node's mutable state taken before a speculative parse
- * attempt. Restored via restoreCstTop() if the attempt fails, preventing
- * partial terminal/non-terminal additions from leaking into the parent node.
+ * Watermark snapshot of a CST node's mutable state taken before a
+ * non-speculative parse attempt that may fail (OPTION, AT_LEAST_ONE, OR
+ * committed fast-path). Stores each existing child array's length so that
+ * restoreCstTop() can truncate — no .slice() copies, no new objects.
+ *
+ * Keys added during a failed attempt end up as empty arrays on the children
+ * object; that is semantically equivalent to absent for any CST consumer
+ * that checks .length. Deleting them would cause hidden-class transitions,
+ * so we leave them as [].
  */
 export interface CstTopSave {
-  children: Record<string, any[]>;
+  /** Parallel arrays: child key name → pre-attempt array length. */
+  keys: string[];
+  lens: number[];
   location: Record<string, number> | undefined;
 }
 
@@ -132,60 +181,38 @@ export class TreeBuilder {
     this: MixedInParser,
     cstNode: any,
   ): void {
-    cstNode.location = {
-      startOffset: NaN,
-      endOffset: NaN,
-    };
+    cstNode.location = createCstLocationOnlyOffset();
   }
 
   setInitialNodeLocationOnlyOffsetRegular(
     this: MixedInParser,
     cstNode: any,
   ): void {
-    cstNode.location = {
-      // without error recovery the starting Location of a new CstNode is guaranteed
-      // To be the next Token's startOffset (for valid inputs).
-      // For invalid inputs there won't be any CSTOutput so this potential
-      // inaccuracy does not matter
-      startOffset: this.LA_FAST(1).startOffset,
-      endOffset: NaN,
-    };
+    // Without error recovery the starting Location of a new CstNode is guaranteed
+    // to be the next Token's startOffset (for valid inputs).
+    // For invalid inputs there won't be any CSTOutput so this potential
+    // inaccuracy does not matter.
+    const loc = createCstLocationOnlyOffset();
+    loc.startOffset = this.LA_FAST(1).startOffset;
+    cstNode.location = loc;
   }
 
   setInitialNodeLocationFullRecovery(this: MixedInParser, cstNode: any): void {
-    cstNode.location = {
-      startOffset: NaN,
-      startLine: NaN,
-      startColumn: NaN,
-      endOffset: NaN,
-      endLine: NaN,
-      endColumn: NaN,
-    };
+    cstNode.location = createCstLocationFull();
   }
 
-  /**
-     *  @see setInitialNodeLocationOnlyOffsetRegular for explanation why this work
-
-     * @param cstNode
-     */
+  /** @see setInitialNodeLocationOnlyOffsetRegular for explanation why this works */
   setInitialNodeLocationFullRegular(this: MixedInParser, cstNode: any): void {
     const nextToken = this.LA_FAST(1);
-    cstNode.location = {
-      startOffset: nextToken.startOffset,
-      startLine: nextToken.startLine,
-      startColumn: nextToken.startColumn,
-      endOffset: NaN,
-      endLine: NaN,
-      endColumn: NaN,
-    };
+    const loc = createCstLocationFull();
+    loc.startOffset = nextToken.startOffset;
+    loc.startLine = nextToken.startLine;
+    loc.startColumn = nextToken.startColumn;
+    cstNode.location = loc;
   }
 
   cstInvocationStateUpdate(this: MixedInParser, fullRuleName: string): void {
-    const cstNode: CstNode = {
-      name: fullRuleName,
-      children: Object.create(null),
-    };
-
+    const cstNode = createCstNode(fullRuleName);
     this.setInitialNodeLocation(cstNode);
     this.CST_STACK.push(cstNode);
   }
@@ -257,25 +284,28 @@ export class TreeBuilder {
   }
 
   /**
-   * Real implementation of saveCstTop. Snapshots the current top CST node's
-   * children (deep-copied per array) and location before a speculative parse
-   * attempt. The copy is O(k) in distinct child types already in the node —
-   * typically 0-3 at an OR/OPTION/MANY decision point.
+   * Real implementation of saveCstTop. Records the length of each child array
+   * already on the top CST node — O(k) reads, zero allocations beyond the
+   * small watermark object itself. No .slice() copies.
+   *
+   * Stage 3 guards skip all CST mutations while IS_SPECULATING=true, so
+   * the top node is always unchanged during speculation — nothing to save.
    */
   saveCstTopImpl(this: MixedInParser): CstTopSave | null {
-    // Stage 3 guards in consumeInternal/cstPostTerminal/cstFinallyStateUpdate
-    // already skip all CST mutations when IS_SPECULATING=true, so the top node
-    // is always unchanged during speculation — nothing to save.
     if (this.IS_SPECULATING) return null;
     const top = this.CST_STACK[this.CST_STACK.length - 1];
     if (top === undefined) return null;
-    const savedChildren: Record<string, any[]> = Object.create(null);
     const src = top.children;
-    for (const key of Object.keys(src)) {
-      savedChildren[key] = src[key].slice();
+    const srcKeys = Object.keys(src);
+    const keys: string[] = new Array(srcKeys.length);
+    const lens: number[] = new Array(srcKeys.length);
+    for (let i = 0; i < srcKeys.length; i++) {
+      keys[i] = srcKeys[i];
+      lens[i] = src[srcKeys[i]].length;
     }
     return {
-      children: savedChildren,
+      keys,
+      lens,
       location:
         top.location !== undefined
           ? ({ ...top.location } as Record<string, number>)
@@ -284,17 +314,20 @@ export class TreeBuilder {
   }
 
   /**
-   * Real implementation of restoreCstTop. Restores the top CST node from a
-   * snapshot, undoing all terminal and non-terminal additions made during the
-   * failed speculative attempt.
+   * Real implementation of restoreCstTop. Truncates each child array back to
+   * its pre-attempt length via .length = savedLen — no object replacement,
+   * no hidden-class transitions. Keys added by the failed attempt remain as
+   * empty arrays (semantically identical to absent for .length-checking consumers).
    */
   restoreCstTopImpl(this: MixedInParser, save: CstTopSave | null): void {
     if (save === null) return;
     const top = this.CST_STACK[this.CST_STACK.length - 1];
     if (top === undefined) return;
-    // CstNode.children is declared readonly in the type, but we own the object
-    // and must roll it back — the snapshot copy IS the authoritative state.
-    (top as any).children = save.children;
+    const { keys, lens } = save;
+    const ch = top.children;
+    for (let i = 0; i < keys.length; i++) {
+      ch[keys[i]].length = lens[i];
+    }
     if (save.location !== undefined) {
       (top as any).location = save.location;
     }
