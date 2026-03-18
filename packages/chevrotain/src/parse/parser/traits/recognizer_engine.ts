@@ -941,8 +941,16 @@ export class RecognizerEngine {
       } else {
         // Multiple alts tied for best progress — ambiguous partial match.
         // Raise a NoViableAlt so the caller gets a proper error message
-        // listing all expected token sequences.
-        this.raiseNoAltException(occurrence, errMsg);
+        // listing all expected token sequences. Temporarily clear IS_SPECULATING
+        // so raiseNoAltException builds the real error even if an outer MANY
+        // set IS_SPECULATING=true.
+        const prevSpec = this.IS_SPECULATING;
+        this.IS_SPECULATING = false;
+        try {
+          this.raiseNoAltException(occurrence, errMsg);
+        } finally {
+          this.IS_SPECULATING = prevSpec;
+        }
       }
     }
 

@@ -4,6 +4,15 @@ Replace Chevrotain's LL(k) lookahead-based parser engine with a speculative
 backtracking engine derived from `@jesscss/parser`. The public API is preserved
 exactly. The `Lexer` is improved but its interface is unchanged.
 
+## Stage Checklist
+
+- ✅ Stage 0 — Token/IToken hidden-class shapes, JSDoc, MATCH_SET bitset
+- ✅ Stage 1 — `SPEC_FAIL` symbol, `IS_SPECULATING` boolean, `IParserSavepoint` (3-int savepoint)
+- ✅ Stage 2 — Replace LL(k) precomputed lookahead with speculative backtracking engine
+- ✅ Stage 3 — Skip GAST traversal in `raiseNoAltException`/`raiseEarlyExitException` when `IS_SPECULATING=true`
+- ⬜ Stage 4 — Benchmark (CSS / JSON / ES5); measure speedup vs LL(k) baseline
+- ⬜ Stage 5 — Recording phase: remove hidden-class pollution from `enableRecording`/`disableRecording`
+
 ---
 
 ## Background

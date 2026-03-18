@@ -15,6 +15,7 @@ import {
 } from "../../grammar/lookahead.js";
 import { MixedInParser } from "./parser_traits.js";
 import { DEFAULT_PARSER_CONFIG } from "../parser.js";
+import { SPEC_FAIL } from "./recognizer_engine.js";
 
 /**
  * Trait responsible for runtime parsing errors.
@@ -66,6 +67,9 @@ export class ErrorHandler {
     prodType: PROD_TYPE,
     userDefinedErrMsg: string | undefined,
   ): never {
+    // During speculative execution the result is discarded anyway — skip the
+    // expensive GAST traversal and exception allocation.
+    if (this.IS_SPECULATING) throw SPEC_FAIL;
     const ruleName = this.getCurrRuleFullName();
     const ruleGrammar = this.getGAstProductions()[ruleName];
     const lookAheadPathsPerAlternative = getLookaheadPathsForOptionalProd(
@@ -96,6 +100,9 @@ export class ErrorHandler {
     occurrence: number,
     errMsgTypes: string | undefined,
   ): never {
+    // During speculative execution the result is discarded anyway — skip the
+    // expensive GAST traversal and exception allocation.
+    if (this.IS_SPECULATING) throw SPEC_FAIL;
     const ruleName = this.getCurrRuleFullName();
     const ruleGrammar = this.getGAstProductions()[ruleName];
     // TODO: getLookaheadPathsForOr can be slow for large enough maxLookahead and certain grammars, consider caching ?
