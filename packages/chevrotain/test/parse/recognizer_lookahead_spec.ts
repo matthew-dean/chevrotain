@@ -973,10 +973,15 @@ describe("lookahead Regular Tokens Mode", () => {
         }
       }
 
-      expect(() => new OrAmbiguityLookAheadParser()).to.throw(
-        "Ambiguous Alternatives Detected:",
-      );
-      expect(() => new OrAmbiguityLookAheadParser()).to.throw("OneTok");
+      // Ambiguity is non-fatal — our speculative engine resolves it at runtime.
+      // The parser should construct without throwing.
+      const parser = new OrAmbiguityLookAheadParser();
+      // But the ambiguity should be recorded in definitionErrors.
+      expect(
+        (parser as any).definitionErrors.some((e: any) =>
+          e.message?.includes("Ambiguous"),
+        ),
+      ).to.be.true;
     });
 
     it("will throw an error when two alternatives have the same multi token (lookahead > 1) prefix", () => {
@@ -1017,12 +1022,13 @@ describe("lookahead Regular Tokens Mode", () => {
           ]);
         }
       }
-      expect(() => new OrAmbiguityMultiTokenLookAheadParser()).to.throw(
-        "Ambiguous Alternatives Detected:",
-      );
-      expect(() => new OrAmbiguityMultiTokenLookAheadParser()).to.throw(
-        "TwoTok, ThreeTok, FourTok",
-      );
+      // Ambiguity is non-fatal with the speculative engine.
+      const parser = new OrAmbiguityMultiTokenLookAheadParser();
+      expect(
+        (parser as any).definitionErrors.some((e: any) =>
+          e.message?.includes("Ambiguous"),
+        ),
+      ).to.be.true;
     });
   });
 

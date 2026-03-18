@@ -1199,14 +1199,18 @@ describe("The empty alternative detection full flow", () => {
         ]);
       });
     }
-    expect(() => new AltAmbiguityParserImplicitOccurence()).to.throw(
-      "Ambiguous Alternatives Detected",
-    );
-    expect(() => new AltAmbiguityParserImplicitOccurence()).to.throw("1");
-    expect(() => new AltAmbiguityParserImplicitOccurence()).to.throw("2");
-    expect(() => new AltAmbiguityParserImplicitOccurence()).to.throw(
-      "<PlusTok, StarTok> may appears as a prefix path",
-    );
+    const parser = new AltAmbiguityParserImplicitOccurence();
+    expect(
+      (parser as any).definitionErrors.some(
+        (e: any) =>
+          e.message?.includes("Ambiguous Alternatives Detected") &&
+          e.message?.includes("1") &&
+          e.message?.includes("2") &&
+          e.message?.includes(
+            "<PlusTok, StarTok> may appears as a prefix path",
+          ),
+      ),
+    ).to.be.true;
   });
 
   it("will detect alternative ambiguity with identical empty lookaheads", () => {
@@ -1232,16 +1236,12 @@ describe("The empty alternative detection full flow", () => {
         ]);
       });
     }
+    // Empty non-last alts are a real grammar bug (dead code) — should throw.
     expect(() => new EmptyAltsAmbiguityParser()).to.throw(
-      "Ambiguous Alternatives Detected",
-    );
-    expect(() => new EmptyAltsAmbiguityParser()).to.throw("1");
-    expect(() => new EmptyAltsAmbiguityParser()).to.throw("2");
-    expect(() => new EmptyAltsAmbiguityParser()).to.throw(
-      "These alternatives are all empty (match no tokens), making them indistinguishable",
+      "Ambiguous empty alternative",
     );
     expect(() => new EmptyAltsAmbiguityParser()).to.throw(
-      "Only the last alternative may be empty",
+      "Only the last alternative may be an empty alternative",
     );
   });
 
@@ -1276,14 +1276,16 @@ describe("The empty alternative detection full flow", () => {
         },
       );
     }
-    expect(() => new AltAmbiguityParserImplicitOccurrence()).to.throw(
-      "Ambiguous Alternatives Detected",
-    );
-    expect(() => new AltAmbiguityParserImplicitOccurrence()).to.throw("1");
-    expect(() => new AltAmbiguityParserImplicitOccurrence()).to.throw("2");
-    expect(() => new AltAmbiguityParserImplicitOccurrence()).to.throw(
-      "<PlusTok> may appears as a prefix path",
-    );
+    const parser = new AltAmbiguityParserImplicitOccurrence();
+    expect(
+      (parser as any).definitionErrors.some(
+        (e: any) =>
+          e.message?.includes("Ambiguous Alternatives Detected") &&
+          e.message?.includes("1") &&
+          e.message?.includes("2") &&
+          e.message?.includes("<PlusTok> may appears as a prefix path"),
+      ),
+    ).to.be.true;
   });
 
   context("IGNORE_AMBIGUITIES flag", () => {
@@ -1425,15 +1427,19 @@ describe("The prefix ambiguity detection full flow", () => {
     }
     // With auto-counting, OR3 gets auto-assigned idx=0, so the error
     // message references <OR> (no number suffix for idx 0).
-    expect(() => new PrefixAltAmbiguity()).to.throw("<OR>");
-    expect(() => new PrefixAltAmbiguity()).to.throw("Ambiguous alternatives");
-    expect(() => new PrefixAltAmbiguity()).to.throw(
-      "due to common lookahead prefix",
-    );
-    expect(() => new PrefixAltAmbiguity()).to.throw("<B, A>");
-    expect(() => new PrefixAltAmbiguity()).to.throw(
-      "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#COMMON_PREFIX",
-    );
+    const parser = new PrefixAltAmbiguity();
+    expect(
+      (parser as any).definitionErrors.some(
+        (e: any) =>
+          e.message?.includes("<OR>") &&
+          e.message?.includes("Ambiguous alternatives") &&
+          e.message?.includes("due to common lookahead prefix") &&
+          e.message?.includes("<B, A>") &&
+          e.message?.includes(
+            "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#COMMON_PREFIX",
+          ),
+      ),
+    ).to.be.true;
   });
 
   it("will throw an error when an an alts ambiguity is detected", () => {
@@ -1473,18 +1479,18 @@ describe("The prefix ambiguity detection full flow", () => {
         this.CONSUME(TwoTok);
       });
     }
-    expect(() => new AlternativesAmbiguityParser()).to.throw(
-      "Ambiguous Alternatives Detected: <1 ,2>",
-    );
-    expect(() => new AlternativesAmbiguityParser()).to.throw(
-      "in <OR> inside <main> Rule",
-    );
-    expect(() => new AlternativesAmbiguityParser()).to.throw(
-      "Comma, Comma, Comma, Comma",
-    );
-    expect(() => new AlternativesAmbiguityParser()).to.throw(
-      "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#AMBIGUOUS_ALTERNATIVES",
-    );
+    const parser = new AlternativesAmbiguityParser();
+    expect(
+      (parser as any).definitionErrors.some(
+        (e: any) =>
+          e.message?.includes("Ambiguous Alternatives Detected: <1 ,2>") &&
+          e.message?.includes("in <OR> inside <main> Rule") &&
+          e.message?.includes("Comma, Comma, Comma, Comma") &&
+          e.message?.includes(
+            "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#AMBIGUOUS_ALTERNATIVES",
+          ),
+      ),
+    ).to.be.true;
   });
 
   it("will throw an error when an an alts ambiguity is detected - Categories", () => {
@@ -1525,16 +1531,18 @@ describe("The prefix ambiguity detection full flow", () => {
         this.CONSUME(B);
       });
     }
-    expect(() => new AlternativesAmbiguityParser()).to.throw(
-      "Ambiguous Alternatives Detected: <1 ,2>",
-    );
-    expect(() => new AlternativesAmbiguityParser()).to.throw(
-      "in <OR> inside <main> Rule",
-    );
-    expect(() => new AlternativesAmbiguityParser()).to.throw("D, D, D, D");
-    expect(() => new AlternativesAmbiguityParser()).to.throw(
-      "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#AMBIGUOUS_ALTERNATIVES",
-    );
+    const parser = new AlternativesAmbiguityParser();
+    expect(
+      (parser as any).definitionErrors.some(
+        (e: any) =>
+          e.message?.includes("Ambiguous Alternatives Detected: <1 ,2>") &&
+          e.message?.includes("in <OR> inside <main> Rule") &&
+          e.message?.includes("D, D, D, D") &&
+          e.message?.includes(
+            "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#AMBIGUOUS_ALTERNATIVES",
+          ),
+      ),
+    ).to.be.true;
   });
 
   // TODO: detect these ambiguity with categories
@@ -1564,15 +1572,19 @@ describe("The prefix ambiguity detection full flow", () => {
         ]);
       });
     }
-    expect(() => new PrefixAltAmbiguity2()).to.throw("OR");
-    expect(() => new PrefixAltAmbiguity2()).to.throw("Ambiguous alternatives");
-    expect(() => new PrefixAltAmbiguity2()).to.throw(
-      "due to common lookahead prefix",
-    );
-    expect(() => new PrefixAltAmbiguity2()).to.throw("<PlusTok, MinusTok>");
-    expect(() => new PrefixAltAmbiguity2()).to.throw(
-      "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#COMMON_PREFIX",
-    );
+    const parser = new PrefixAltAmbiguity2();
+    expect(
+      (parser as any).definitionErrors.some(
+        (e: any) =>
+          e.message?.includes("OR") &&
+          e.message?.includes("Ambiguous alternatives") &&
+          e.message?.includes("due to common lookahead prefix") &&
+          e.message?.includes("<PlusTok, MinusTok>") &&
+          e.message?.includes(
+            "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#COMMON_PREFIX",
+          ),
+      ),
+    ).to.be.true;
   });
 });
 

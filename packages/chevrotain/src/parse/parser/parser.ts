@@ -238,14 +238,24 @@ export class Parser {
         !Parser.DEFER_DEFINITION_ERRORS_HANDLING &&
         this.definitionErrors.length !== 0
       ) {
-        defErrorsMsgs = this.definitionErrors.map(
-          (defError) => defError.message,
+        // Ambiguity errors are non-fatal — the speculative engine handles
+        // them at runtime by trying alternatives in declaration order.
+        // Ambiguity errors are non-fatal — our speculative engine resolves
+        // them at runtime by trying alternatives in declaration order.
+        // Other errors (empty non-last alts, infinite loops) are real bugs.
+        const fatalErrors = this.definitionErrors.filter(
+          (e) =>
+            e.type !== ParserDefinitionErrorType.AMBIGUOUS_ALTS &&
+            e.type !== ParserDefinitionErrorType.AMBIGUOUS_PREFIX_ALTS,
         );
-        throw new Error(
-          `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
-            "\n-------------------------------\n",
-          )}`,
-        );
+        if (fatalErrors.length !== 0) {
+          defErrorsMsgs = fatalErrors.map((defError) => defError.message);
+          throw new Error(
+            `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
+              "\n-------------------------------\n",
+            )}`,
+          );
+        }
       }
     });
   }
@@ -306,14 +316,19 @@ export class Parser {
       !Parser.DEFER_DEFINITION_ERRORS_HANDLING &&
       this.definitionErrors.length !== 0
     ) {
-      const defErrorsMsgs = this.definitionErrors.map(
-        (defError) => defError.message,
+      const fatalErrors = this.definitionErrors.filter(
+        (e) =>
+          e.type !== ParserDefinitionErrorType.AMBIGUOUS_ALTS &&
+          e.type !== ParserDefinitionErrorType.AMBIGUOUS_PREFIX_ALTS,
       );
-      throw new Error(
-        `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
-          "\n-------------------------------\n",
-        )}`,
-      );
+      if (fatalErrors.length !== 0) {
+        const defErrorsMsgs = fatalErrors.map((defError) => defError.message);
+        throw new Error(
+          `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
+            "\n-------------------------------\n",
+          )}`,
+        );
+      }
     }
     if (this.definitionErrors.length === 0 && this.recoveryEnabled) {
       const allFollows = computeAllProdsFollows(

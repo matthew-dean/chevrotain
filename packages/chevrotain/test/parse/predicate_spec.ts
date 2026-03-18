@@ -1238,4 +1238,60 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       expect(result).to.deep.equal(["a", "b"]);
     });
   });
+
+  describe("Ambiguous alternatives should not crash performSelfAnalysis", () => {
+    it("ambiguous LL(1) alternatives parse correctly (speculative engine resolves them)", () => {
+      // Two alternatives start with the same token (Ident). This is an
+      // LL(1) ambiguity. Our speculative engine handles it at runtime by
+      // trying alternatives in declaration order. performSelfAnalysis
+      // should NOT throw — ambiguity is a non-fatal condition.
+      const Ident = createToken({ name: "Ident" });
+      const LParen = createToken({ name: "LParen" });
+      const allTokens = [Ident, LParen];
+      augmentTokenTypes(allTokens);
+
+      // Construction must not throw despite the ambiguity
+      expect(() => {
+        class AmbiguousParser extends EmbeddedActionsParser {
+          constructor() {
+            super(allTokens, {});
+            this.performSelfAnalysis();
+          }
+
+          public testRule = this.RULE("testRule", () => {
+            return this.OR([
+              {
+                ALT: () => {
+                  const id = this.CONSUME(Ident);
+                  this.CONSUME(LParen);
+                  return "call:" + id.image;
+                },
+              },
+              {
+                ALT: () => {
+                  const id = this.CONSUME(Ident);
+                  return "ref:" + id.image;
+                },
+              },
+            ]);
+          });
+        }
+
+        const parser = new AmbiguousParser();
+
+        // Parsing should work correctly — alt 0 wins (tried first)
+        parser.input = [
+          createRegularToken(Ident, "foo"),
+          createRegularToken(LParen, "("),
+        ];
+        expect(parser.testRule()).to.equal("call:foo");
+        expect(parser.errors).to.be.empty;
+
+        // When only Ident is present, alt 0 fails (no LParen), alt 1 wins
+        parser.input = [createRegularToken(Ident, "bar")];
+        expect(parser.testRule()).to.equal("ref:bar");
+        expect(parser.errors).to.be.empty;
+      }).to.not.throw();
+    });
+  });
 });
