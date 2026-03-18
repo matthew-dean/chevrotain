@@ -1294,4 +1294,161 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       }).to.not.throw();
     });
   });
+
+  describe("Deep backtracking: MANY unwinds failed iterations (CSS nesting pattern)", () => {
+    // This replicates the CSS nesting ambiguity:
+    //   .parent { a:hover { color: red; } }
+    // Inside the block, `a:hover` could be a declaration (`a: hover`) or
+    // a nested rule selector (`a:hover`). The `declaration` alt partially
+    // matches then the outer rule fails at `{`. MANY must catch the error
+    // and unwind so the outer OR can try `qualifiedRule` instead.
+
+    const Ident = createToken({ name: "Ident" });
+    const Colon = createToken({ name: "Colon" });
+    const Semi = createToken({ name: "Semi" });
+    const LCurly = createToken({ name: "LCurly" });
+    const RCurly = createToken({ name: "RCurly" });
+    const allTokens = [Ident, Colon, Semi, LCurly, RCurly];
+    augmentTokenTypes(allTokens);
+
+    class CssNestingParser extends EmbeddedActionsParser {
+      constructor() {
+        super(allTokens, {});
+        this.performSelfAnalysis();
+      }
+
+      // stylesheet: qualifiedRule*
+      public stylesheet = this.RULE("stylesheet", () => {
+        const rules: string[] = [];
+        this.MANY(() => {
+          rules.push(this.SUBRULE(this.qualifiedRule));
+        });
+        return rules;
+      });
+
+      // qualifiedRule: selector '{' declarationList '}'
+      public qualifiedRule = this.RULE("qualifiedRule", () => {
+        this.SUBRULE(this.selector);
+        this.CONSUME(LCurly);
+        this.SUBRULE(this.declarationList);
+        this.CONSUME(RCurly);
+        return "rule";
+      });
+
+      // selector: (Ident | Ident ':' Ident)+
+      public selector = this.RULE("selector", () => {
+        let result = "";
+        this.AT_LEAST_ONE(() => {
+          result += this.CONSUME(Ident).image;
+          this.OPTION(() => {
+            this.CONSUME(Colon);
+            result += ":" + this.CONSUME(Ident).image;
+          });
+        });
+        return result;
+      });
+
+      // declarationList: (declaration | qualifiedRule)*
+      // This is the ambiguous production — `a:hover` could match either.
+      public declarationList = this.RULE("declarationList", () => {
+        const items: string[] = [];
+        this.MANY(() => {
+          items.push(
+            this.OR([
+              { ALT: () => this.SUBRULE(this.declaration) },
+              { ALT: () => this.SUBRULE(this.qualifiedRule) },
+              {
+                ALT: () => {
+                  this.CONSUME(Semi);
+                  return "";
+                },
+              },
+            ]),
+          );
+        });
+        return items;
+      });
+
+      // declaration: Ident ':' Ident
+      // Note: NO trailing ';' — the semicolon is handled by the
+      // declarationList as a separate alt. This means `a:hover` parses
+      // SUCCESSFULLY as a declaration. The failure only surfaces when the
+      // OUTER qualifiedRule hits CONSUME(RCurly) and finds `{`.
+      // Deep backtracking must unwind the entire outer MANY iteration.
+      public declaration = this.RULE("declaration", () => {
+        const prop = this.CONSUME(Ident).image;
+        this.CONSUME(Colon);
+        const val = this.CONSUME(Ident).image;
+        return prop + ":" + val;
+      });
+    }
+
+    it("MANY unwinds when declaration fails at '{' and qualifiedRule succeeds", () => {
+      const parser = new CssNestingParser();
+
+      // Input: parent { a:hover { color:blue; } }
+      // Expected: outer qualifiedRule parses the whole thing.
+      // Inside the block: `a:hover` fails as declaration (no `;`),
+      // so OR backtracks and tries qualifiedRule which succeeds.
+      parser.input = [
+        createRegularToken(Ident, "parent"),
+        createRegularToken(LCurly),
+        createRegularToken(Ident, "a"),
+        createRegularToken(Colon),
+        createRegularToken(Ident, "hover"),
+        createRegularToken(LCurly),
+        createRegularToken(Ident, "color"),
+        createRegularToken(Colon),
+        createRegularToken(Ident, "blue"),
+        createRegularToken(Semi),
+        createRegularToken(RCurly),
+        createRegularToken(RCurly),
+      ];
+      const result = parser.stylesheet();
+      expect(parser.errors).to.be.empty;
+      expect(result).to.have.length(1);
+    });
+
+    it("declaration still works when followed by ';'", () => {
+      const parser = new CssNestingParser();
+      parser.input = [
+        createRegularToken(Ident, "parent"),
+        createRegularToken(LCurly),
+        createRegularToken(Ident, "color"),
+        createRegularToken(Colon),
+        createRegularToken(Ident, "blue"),
+        createRegularToken(Semi),
+        createRegularToken(RCurly),
+      ];
+      const result = parser.stylesheet();
+      expect(parser.errors).to.be.empty;
+      expect(result).to.have.length(1);
+    });
+
+    it("mixed declarations and nested rules", () => {
+      const parser = new CssNestingParser();
+      // parent { color:blue; a:hover { x:y; } }
+      parser.input = [
+        createRegularToken(Ident, "parent"),
+        createRegularToken(LCurly),
+        createRegularToken(Ident, "color"),
+        createRegularToken(Colon),
+        createRegularToken(Ident, "blue"),
+        createRegularToken(Semi),
+        createRegularToken(Ident, "a"),
+        createRegularToken(Colon),
+        createRegularToken(Ident, "hover"),
+        createRegularToken(LCurly),
+        createRegularToken(Ident, "x"),
+        createRegularToken(Colon),
+        createRegularToken(Ident, "y"),
+        createRegularToken(Semi),
+        createRegularToken(RCurly),
+        createRegularToken(RCurly),
+      ];
+      const result = parser.stylesheet();
+      expect(parser.errors).to.be.empty;
+      expect(result).to.have.length(1);
+    });
+  });
 });

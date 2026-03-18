@@ -842,11 +842,13 @@ export class RecognizerEngine {
         this.IS_SPECULATING = wasSpeculating;
       } catch (e) {
         this.IS_SPECULATING = wasSpeculating;
-        if (e === SPEC_FAIL || isRecognitionException(e as Error)) {
-          // Restore full state and exit the loop, exactly like
-          // @jesscss/parser. This enables deep backtracking — a MANY body
-          // that fails partway through (e.g., qualifiedRule consuming a
-          // selector then failing on CONSUME(RCurly)) is unwound cleanly.
+        if (e === SPEC_FAIL) {
+          // Speculative failure: restore full state and exit the loop.
+          // Because MANY always sets IS_SPECULATING=true before calling
+          // the body, all token mismatches throw SPEC_FAIL (not
+          // MismatchedTokenException). SPEC_FAIL propagates through
+          // nested subrule calls back to here. This enables deep
+          // backtracking exactly like @jesscss/parser.
           this.importLexerState(iterLexPos);
           this.restoreCstTop(iterCstSave);
           this._errors.length = iterErrors;
@@ -1045,19 +1047,15 @@ export class RecognizerEngine {
    * Iterates alternatives using zero-cost speculative backtracking.
    * Modelled after @jesscss/parser's OR():
    *
-   * For each non-last alt:
-   * - GATE fails → skip to next alt
-   * - GATE passes / No GATE → speculative attempt (GATE is a filter, not a commit signal)
+   * For each alt in order:
+   * - GATE fails → skip
+   * - Otherwise → speculate: save state, set IS_SPECULATING=true, try ALT
+   * - On success → return immediately (first success wins)
+   * - On SPEC_FAIL → restore state, try next alt
    *
-   * Speculative attempt: set IS_SPECULATING=true so CONSUME throws the cheap
-   * SPEC_FAIL symbol on mismatch instead of allocating a MismatchedTokenException.
-   * On SPEC_FAIL or any recognition exception, restore state + CST and try next.
-   *
-   * After all alts have been tried: if any alt consumed tokens before failing
-   * (bestProgress > 0) and we are not inside an explicit BACKTRACK() trial
-   * (_isInTrueBacktrack=false), re-run the best-matching alt in committed mode
-   * (IS_SPECULATING=false) so that error recovery can fire or real errors surface.
-   * Otherwise raise NoViableAltException (or throw SPEC_FAIL if speculating).
+   * If all alts fail: throw SPEC_FAIL (if speculating) or NoViableAltException.
+   * No bestProgress tracking — the speculative engine handles ambiguity by
+   * declaration order, and deep backtracking unwinds partial matches cleanly.
    */
   orInternal<T>(
     this: MixedInParser,
@@ -1220,35 +1218,27 @@ export class RecognizerEngine {
       // Fast path exhausted — fall through to full speculative loop.
     }
 
-    let bestProgress = -1;
-    let bestAltIdx = -1;
-    let uniqueBest = false;
-
-    // Capture entry lexer state so custom lexers (e.g. scannerless parsers
-    // that override exportLexerState/importLexerState) are handled correctly.
-    // IS_SPECULATING=true skips CST mutations and error building (Stage 3), so
-    // only the lexer position needs save/restore between alts.
-    // RULE_STACK_IDX is self-correcting via ruleFinallyStateUpdate (finally).
+    // -----------------------------------------------------------------------
+    // Slow path: try each alt speculatively. First success wins.
+    // Matches @jesscss/parser's OR: save state, set speculating=true,
+    // try alt, on success return, on SPEC_FAIL restore and try next.
+    // No bestProgress tracking — first success is final.
+    // -----------------------------------------------------------------------
     const startLexPos = this.exportLexerState();
 
     for (let i = 0; i < alts.length; i++) {
       const alt = alts[i];
       if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
       this.IS_SPECULATING = true;
-      // Set _dslCounter to this alt's recorded starting offset.
       if (altStarts !== undefined)
         this._dslCounter = savedDslCounter + altStarts[i];
-      // Track whether a gated production fires before the first CONSUME.
-      // If so, this alt's first-token set is gate-dependent and must not
-      // be cached — it must always be speculated.
       this._orAltStartLexPos = startLexPos;
       this._orAltHasGatedPrefix = false;
       try {
         const result = alt.ALT.call(this) as T;
         this.IS_SPECULATING = wasSpeculating;
+        // Record for fast-dispatch cache.
         if (this._orAltHasGatedPrefix) {
-          // Record that this alt has a gated prefix — it must always be
-          // speculated on the fast path, never cached by LA(1) alone.
           let gpa = this._orGatedPrefixAlts[mapKey];
           if (gpa === undefined) {
             gpa = [];
@@ -1263,7 +1253,6 @@ export class RecognizerEngine {
         }
         this._orAltStartLexPos = savedAltStartLexPos;
         this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
-        // Advance counter to deterministic position after OR.
         {
           const d = this._orCounterDeltas[mapKey];
           if (d !== undefined) this._dslCounter = savedDslCounter + d;
@@ -1272,13 +1261,8 @@ export class RecognizerEngine {
       } catch (e) {
         this.IS_SPECULATING = wasSpeculating;
         if (e === SPEC_FAIL || isRecognitionException(e)) {
+          // Record failed alt with progress for fast-dispatch cache.
           const progress = this.exportLexerState() - startLexPos;
-          // Alt consumed tokens → it can match this LA(1). Record it as
-          // a fast-path candidate even though it failed overall — it may
-          // succeed on a future call with different subsequent tokens or
-          // different internal gating state.
-          // But NOT if the alt has a gated prefix — its first-token set is
-          // gate-dependent and could change between calls.
           if (this._orAltHasGatedPrefix) {
             let gpa = this._orGatedPrefixAlts[mapKey];
             if (gpa === undefined) {
@@ -1292,74 +1276,24 @@ export class RecognizerEngine {
           } else if (progress > 0) {
             addOrFastMapEntry(this._orFastMaps, mapKey, la1TypeIdx, i, alts);
           }
-          if (progress > 0) {
-            this.importLexerState(startLexPos);
-          }
-          if (progress > bestProgress) {
-            bestProgress = progress;
-            bestAltIdx = i;
-            uniqueBest = true;
-          } else if (progress === bestProgress && bestProgress > 0) {
-            // Tie: multiple alts consumed the same amount. Cannot
-            // safely commit to either — raise a proper NoViableAlt instead.
-            uniqueBest = false;
-          }
-          // continue to next alternative
-        } else {
-          throw e;
+          // Restore state for next alt.
+          this.importLexerState(startLexPos);
+          continue;
         }
+        throw e;
       }
     }
 
-    // Restore outer OR's gated-prefix tracking state.
+    // All alts failed. Restore gated-prefix tracking state.
     this._orAltStartLexPos = savedAltStartLexPos;
     this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
-
-    // All alts failed.
-    if (bestProgress > 0 && !this._isInTrueBacktrack) {
-      if (uniqueBest) {
-        // One alt consumed more tokens than any other. Re-run it committed so
-        // that in-rule recovery (single-token insertion/deletion) or re-sync
-        // can fire and produce meaningful diagnostics.
-        const prevSpec = this.IS_SPECULATING;
-        this.IS_SPECULATING = false;
-        if (altStarts !== undefined)
-          this._dslCounter = savedDslCounter + altStarts[bestAltIdx];
-        try {
-          return alts[bestAltIdx].ALT.call(this) as T;
-        } finally {
-          this.IS_SPECULATING = prevSpec;
-          {
-            const d = this._orCounterDeltas[mapKey];
-            if (d !== undefined) this._dslCounter = savedDslCounter + d;
-          }
-        }
-      } else {
-        // Multiple alts tied for best progress — ambiguous partial match.
-        // Raise a NoViableAlt so the caller gets a proper error message
-        // listing all expected token sequences. Temporarily clear IS_SPECULATING
-        // so raiseNoAltException builds the real error even if an outer MANY
-        // set IS_SPECULATING=true.
-        {
-          const d = this._orCounterDeltas[mapKey];
-          if (d !== undefined) this._dslCounter = savedDslCounter + d;
-        }
-        const prevSpec = this.IS_SPECULATING;
-        this.IS_SPECULATING = false;
-        try {
-          this.raiseNoAltException(occurrence, errMsg);
-        } finally {
-          this.IS_SPECULATING = prevSpec;
-        }
-      }
-    }
-
-    // No progress (bestProgress <= 0) or inside a BACKTRACK() trial:
-    // signal clean failure to the caller.
     {
       const d = this._orCounterDeltas[mapKey];
       if (d !== undefined) this._dslCounter = savedDslCounter + d;
     }
+
+    // Signal failure: SPEC_FAIL if speculating (bubbles to outer OR/MANY),
+    // otherwise raise a real NoViableAltException.
     if (this.IS_SPECULATING) throw SPEC_FAIL;
     this.raiseNoAltException(occurrence, errMsg);
   }
