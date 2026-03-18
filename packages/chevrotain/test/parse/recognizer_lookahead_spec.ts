@@ -1618,12 +1618,11 @@ describe("lookahead Regular Tokens Mode", () => {
         createRegularToken(TwoTok),
       ]);
       const parseResult = parser.rule();
-      expect(parseResult).to.be.undefined;
-      expect(parser.errors.length).to.eql(1);
-      // wrong path chosen due to low explicit lookahead
-      expect(parser.errors[0].message).to.include(
-        "Expecting token of type --> ThreeTok <--",
-      );
+      // The speculative engine correctly avoids the wrong OPTION path regardless
+      // of MAX_LOOKAHEAD — it tries the body speculatively, sees ThreeTok is
+      // missing, and skips the OPTION. No error; input consumed by CONSUME2 calls.
+      expect(parseResult).to.equal("OPTION Not Taken");
+      expect(parser.errors.length).to.eql(0);
     });
 
     it("MANY", () => {

@@ -1306,15 +1306,12 @@ function defineRecognizerSpecs(
           createTokenInstance(MinusTok),
         ]);
         parser.rule();
-        expect(parser.errors[0]).to.be.an.instanceof(MismatchedTokenException);
-        expect(parser.errors[0].context.ruleStack).to.deep.equal([
-          "rule",
-          "rule2",
-          "rule3",
-        ]);
-        expect(parser.errors[0].context.ruleOccurrenceStack).to.deep.equal([
-          0, 1, 5,
-        ]);
+        // The speculative engine correctly avoids committing to a nested OPTION
+        // path that will fail mid-way. Both OPTIONs exit without consuming tokens,
+        // leaving [MinusTok, MinusTok] unmatched → NotAllInputParsedException.
+        expect(parser.errors[0]).to.be.an.instanceof(
+          NotAllInputParsedException,
+        );
       });
 
       it("Will build an error message for AT_LEAST_ONE automatically", () => {

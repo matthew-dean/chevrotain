@@ -231,14 +231,10 @@ export class Parser {
           });
         }
 
-        this.TRACE_INIT("ComputeLookaheadFunctions", () => {
-          this.lookaheadStrategy.initialize?.({
-            rules: Object.values(this.gastProductionsCache),
-          });
-          this.preComputeLookaheadFunctions(
-            Object.values(this.gastProductionsCache),
-          );
-        });
+        // Lookahead precomputation removed: OR/OPTION/MANY now use speculative
+        // backtracking at runtime (IS_SPECULATING + SPEC_FAIL) instead of
+        // pre-built lookahead functions. lookaheadStrategy.initialize and
+        // preComputeLookaheadFunctions are no longer called.
       }
 
       if (

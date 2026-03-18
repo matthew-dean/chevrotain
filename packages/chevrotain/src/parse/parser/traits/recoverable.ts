@@ -18,6 +18,7 @@ import {
 import { MismatchedTokenException } from "../../exceptions_public.js";
 import { IN } from "../../constants.js";
 import { MixedInParser } from "./parser_traits.js";
+import { getKeyForAutomaticLookahead } from "../../grammar/keys.js";
 import { DEFAULT_PARSER_CONFIG } from "../parser.js";
 
 export const EOF_FOLLOW_KEY: any = {};
@@ -461,7 +462,11 @@ export function attemptInRepetitionRecovery(
   nextToksWalker: typeof AbstractNextTerminalAfterProductionWalker,
   notStuck?: boolean,
 ): void {
-  const key = this.getKeyForAutomaticLookahead(dslMethodIdx, prodOccurrence);
+  const key = getKeyForAutomaticLookahead(
+    this.currRuleShortName,
+    dslMethodIdx,
+    prodOccurrence,
+  );
   let firstAfterRepInfo = this.firstAfterRepMap[key];
   if (firstAfterRepInfo === undefined) {
     const currRuleName = this.getCurrRuleFullName();

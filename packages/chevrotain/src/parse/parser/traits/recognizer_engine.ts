@@ -24,8 +24,6 @@ import {
   BITS_FOR_OCCURRENCE_IDX,
   MANY_IDX,
   MANY_SEP_IDX,
-  OPTION_IDX,
-  OR_IDX,
 } from "../../grammar/keys.js";
 import {
   isRecognitionException,
@@ -67,16 +65,33 @@ import { ParserMethodInternal } from "../types.js";
 export const SPEC_FAIL = Symbol("SPEC_FAIL");
 
 /**
+ * Thrown by `consumeInternal` when `_earlyExitLookahead` is true and a token
+ * successfully matches. This aborts the action immediately after the first
+ * successful CONSUME, preventing embedded-action side effects from executing
+ * inside `makeSpecLookahead`. The caller catches this and returns `true`.
+ */
+const FIRST_TOKEN_MATCH = Symbol("FIRST_TOKEN_MATCH");
+
+/**
  * This trait is responsible for the runtime parsing engine
  * Used by the official API (recognizer_api.ts)
  */
 export class RecognizerEngine {
   /**
-   * True while inside a BACKTRACK() trial. Replaces the old isBackTrackingStack
-   * array — a boolean flag is cheaper to read/write and sufficient since
-   * speculation is not re-entrant in the new engine.
+   * True while inside a speculative context (BACKTRACK, MANY iteration, OR
+   * speculative attempt). When true, CONSUME throws the zero-cost SPEC_FAIL
+   * symbol instead of allocating a MismatchedTokenException.
    */
   IS_SPECULATING: boolean;
+  /**
+   * True only inside an explicit BACKTRACK() call. Unlike IS_SPECULATING (which
+   * is also set by MANY/AT_LEAST_ONE iterations and OR speculative attempts),
+   * this flag signals that we must NOT commit to any OR alternative even if it
+   * made progress — because we are in a pure trial that must be rolled back.
+   */
+  _isInTrueBacktrack: boolean;
+  /** Set to true inside makeSpecLookahead to abort on the first successful CONSUME. */
+  _earlyExitLookahead: boolean;
   className: string;
   RULE_STACK: number[];
   RULE_OCCURRENCE_STACK: number[];
@@ -111,6 +126,8 @@ export class RecognizerEngine {
     this.subruleIdx = 0;
     this.currRuleShortName = 0;
     this.IS_SPECULATING = false;
+    this._isInTrueBacktrack = false;
+    this._earlyExitLookahead = false;
 
     this.definedRulesNames = [];
     this.tokensMap = {};
@@ -352,38 +369,69 @@ export class RecognizerEngine {
   optionInternal<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
-    occurrence: number,
+    _occurrence: number,
   ): OUT | undefined {
-    const key = this.getKeyForAutomaticLookahead(OPTION_IDX, occurrence);
-    return this.optionInternalLogic(actionORMethodDef, occurrence, key);
+    return this.optionInternalLogic(actionORMethodDef);
   }
 
+  /**
+   * Optionally executes the OPTION body, returning its result or undefined.
+   *
+   * Does NOT set IS_SPECULATING — the outer speculating state (if any, set by
+   * OR) propagates naturally so CONSUME throws the cheapest failure path.
+   *
+   * If a GATE is present: gate-false → skip; gate-true → commit directly
+   * (gate is a reliable lookahead, no speculation needed).
+   *
+   * Without a GATE: save state + CST watermark, run body, restore on failure.
+   * Two additional abort conditions:
+   *   1. Body did not advance the token position (stuck / epsilon body).
+   *   2. Recovery mode added errors — the optional content wasn't really there.
+   */
   optionInternalLogic<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
-    occurrence: number,
-    key: number,
   ): OUT | undefined {
-    let lookAheadFunc = this.getLaFuncFromCache(key);
     let action: GrammarAction<OUT>;
+    let gate: (() => boolean) | undefined;
     if (typeof actionORMethodDef !== "function") {
       action = actionORMethodDef.DEF;
-      const predicate = actionORMethodDef.GATE;
-      // predicate present
-      if (predicate !== undefined) {
-        const orgLookaheadFunction = lookAheadFunc;
-        lookAheadFunc = () => {
-          return predicate.call(this) && orgLookaheadFunction.call(this);
-        };
-      }
+      gate = actionORMethodDef.GATE;
     } else {
       action = actionORMethodDef;
+      gate = undefined;
     }
 
-    if (lookAheadFunc.call(this) === true) {
-      return action.call(this);
+    // GATE as a filter: if it fails skip immediately; if it passes fall through
+    // to the speculative save/restore path (gate is a necessary but not sufficient
+    // condition — the body may still not match the current tokens).
+    if (gate !== undefined && !gate.call(this)) {
+      return undefined;
     }
-    return undefined;
+
+    const saved = this.saveRecogState();
+    const cstSave = this.saveCstTop();
+    try {
+      const result = action.call(this);
+      // Stuck guard: if body didn't advance pos, or recovery added
+      // errors (meaning the optional content wasn't really present), undo.
+      if (
+        this.currIdx === saved.pos ||
+        this._errors.length > saved.errorsLength
+      ) {
+        this.restoreCstTop(cstSave);
+        this.reloadRecogState(saved);
+        return undefined;
+      }
+      return result;
+    } catch (e) {
+      if (e === SPEC_FAIL || isRecognitionException(e)) {
+        this.restoreCstTop(cstSave);
+        this.reloadRecogState(saved);
+        return undefined;
+      }
+      throw e;
+    }
   }
 
   atLeastOneInternal<OUT>(
@@ -391,64 +439,106 @@ export class RecognizerEngine {
     prodOccurrence: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    const laKey = this.getKeyForAutomaticLookahead(
-      AT_LEAST_ONE_IDX,
-      prodOccurrence,
-    );
-    return this.atLeastOneInternalLogic(
-      prodOccurrence,
-      actionORMethodDef,
-      laKey,
-    );
+    return this.atLeastOneInternalLogic(prodOccurrence, actionORMethodDef);
   }
 
+  /**
+   * One-or-more loop. The first iteration is mandatory: a speculative probe
+   * checks whether the action can start at all, and if so the body runs
+   * committed so that nested invokeRuleCatch performs normal error recovery.
+   * Subsequent iterations use the same probe + commit pattern — the lookahead
+   * guard prevents spurious in-repetition-recovery errors that would arise from
+   * speculatively running the full body and exiting via SPEC_FAIL.
+   */
   atLeastOneInternalLogic<OUT>(
     this: MixedInParser,
     prodOccurrence: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
-    key: number,
   ): void {
-    let lookAheadFunc = this.getLaFuncFromCache(key);
-    let action;
+    let action: GrammarAction<OUT>;
+    let gate: (() => boolean) | undefined;
     if (typeof actionORMethodDef !== "function") {
       action = actionORMethodDef.DEF;
-      const predicate = actionORMethodDef.GATE;
-      // predicate present
-      if (predicate !== undefined) {
-        const orgLookaheadFunction = lookAheadFunc;
-        lookAheadFunc = () => {
-          return predicate.call(this) && orgLookaheadFunction.call(this);
-        };
-      }
+      gate = actionORMethodDef.GATE;
     } else {
       action = actionORMethodDef;
+      gate = undefined;
     }
 
-    if ((<Function>lookAheadFunc).call(this) === true) {
-      let notStuck = this.doSingleRepetition(action);
-      while (
-        (<Function>lookAheadFunc).call(this) === true &&
-        notStuck === true
-      ) {
-        notStuck = this.doSingleRepetition(action);
-      }
-    } else {
+    if (gate !== undefined && !gate.call(this)) {
       throw this.raiseEarlyExitException(
         prodOccurrence,
         PROD_TYPE.REPETITION_MANDATORY,
-        (<DSLMethodOptsWithErr<OUT>>actionORMethodDef).ERR_MSG,
+        (actionORMethodDef as DSLMethodOptsWithErr<OUT>).ERR_MSG,
       );
     }
 
-    // note that while it may seem that this can cause an error because by using a recursive call to
-    // AT_LEAST_ONE we change the grammar to AT_LEAST_TWO, AT_LEAST_THREE ... , the possible recursive call
-    // from the tryInRepetitionRecovery(...) will only happen IFF there really are TWO/THREE/.... items.
+    // Speculative lookahead: check whether the action can start before running
+    // it committed. This prevents invokeRuleCatch inside the action from silently
+    // recovering (advancing to the follow token) and making AT_LEAST_ONE think
+    // the first iteration succeeded when no matching tokens were consumed.
+    if (!this.makeSpecLookahead(action)()) {
+      throw this.raiseEarlyExitException(
+        prodOccurrence,
+        PROD_TYPE.REPETITION_MANDATORY,
+        (actionORMethodDef as DSLMethodOptsWithErr<OUT>).ERR_MSG,
+      );
+    }
 
+    // First iteration: mandatory — run committed.
+    const firstSaved = this.saveRecogState();
+    const firstCstSave = this.saveCstTop();
+    try {
+      action.call(this);
+    } catch (e) {
+      if (e === SPEC_FAIL || isRecognitionException(e)) {
+        this.restoreCstTop(firstCstSave);
+        this.reloadRecogState(firstSaved);
+        throw this.raiseEarlyExitException(
+          prodOccurrence,
+          PROD_TYPE.REPETITION_MANDATORY,
+          (actionORMethodDef as DSLMethodOptsWithErr<OUT>).ERR_MSG,
+        );
+      }
+      throw e;
+    }
+
+    // Subsequent iterations: probe with a quick speculative lookahead (exits
+    // after the first successful CONSUME), then execute the body committed so
+    // that nested invokeRuleCatch can perform normal error recovery. This
+    // matches the original LL(k) engine's behaviour where each iteration was
+    // fully committed once the lookahead said "yes".
+    const lookaheadFunc = this.makeSpecLookahead(action);
+    while (lookaheadFunc()) {
+      if (gate !== undefined && !gate.call(this)) break;
+      const saved = this.saveRecogState();
+      const cstSave = this.saveCstTop();
+      try {
+        // Run committed — any recovery happens inside the subrule's invokeRuleCatch.
+        action.call(this);
+      } catch (e) {
+        // The committed body failed (e.g. a CONSUME mismatch with no wrapping
+        // SUBRULE to do resync recovery). Restore state and exit the loop so
+        // the tokens can be consumed by whatever follows AT_LEAST_ONE.
+        if (e === SPEC_FAIL || isRecognitionException(e)) {
+          this.restoreCstTop(cstSave);
+          this.reloadRecogState(saved);
+          break;
+        }
+        throw e;
+      }
+      // Stuck guard: body consumed no tokens → restore and stop.
+      if (this.currIdx <= saved.pos) {
+        this.restoreCstTop(cstSave);
+        this.reloadRecogState(saved);
+        break;
+      }
+    }
     // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
     this.attemptInRepetitionRecovery(
       this.atLeastOneInternal,
       [prodOccurrence, actionORMethodDef],
-      <any>lookAheadFunc,
+      lookaheadFunc,
       AT_LEAST_ONE_IDX,
       prodOccurrence,
       NextTerminalAfterAtLeastOneWalker,
@@ -460,65 +550,71 @@ export class RecognizerEngine {
     prodOccurrence: number,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
-    const laKey = this.getKeyForAutomaticLookahead(
-      AT_LEAST_ONE_SEP_IDX,
-      prodOccurrence,
-    );
-    this.atLeastOneSepFirstInternalLogic(prodOccurrence, options, laKey);
+    this.atLeastOneSepFirstInternalLogic(prodOccurrence, options);
   }
 
+  /**
+   * One-or-more separated list. The first iteration is mandatory (no
+   * IS_SPECULATING set); subsequent iterations are separator-driven
+   * (tokenMatcher check — reliable lookahead, no speculation needed).
+   *
+   * We do NOT set IS_SPECULATING for the first iteration for the same reason as
+   * atLeastOneInternalLogic: nested OR last alts inside the body must retain their
+   * "committed" semantics. The separator provides a deterministic guard for all
+   * subsequent iterations, so those also need no speculation.
+   */
   atLeastOneSepFirstInternalLogic<OUT>(
     this: MixedInParser,
     prodOccurrence: number,
     options: AtLeastOneSepMethodOpts<OUT>,
-    key: number,
   ): void {
     const action = options.DEF;
     const separator = options.SEP;
 
-    const firstIterationLookaheadFunc = this.getLaFuncFromCache(key);
-
-    // 1st iteration
-    if (firstIterationLookaheadFunc.call(this) === true) {
-      (<GrammarAction<OUT>>action).call(this);
-
-      //  TODO: Optimization can move this function construction into "attemptInRepetitionRecovery"
-      //  because it is only needed in error recovery scenarios.
-      const separatorLookAheadFunc = () => {
-        return this.tokenMatcher(this.LA_FAST(1), separator);
-      };
-
-      // 2nd..nth iterations
-      while (this.tokenMatcher(this.LA_FAST(1), separator) === true) {
-        // note that this CONSUME will never enter recovery because
-        // the separatorLookAheadFunc checks that the separator really does exist.
-        this.CONSUME(separator);
-        // No need for checking infinite loop here due to consuming the separator.
-        (<GrammarAction<OUT>>action).call(this);
-      }
-
-      // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
-      this.attemptInRepetitionRecovery(
-        this.repetitionSepSecondInternal,
-        [
+    // First iteration: mandatory — no IS_SPECULATING, let it throw/recover normally.
+    const firstSaved = this.saveRecogState();
+    const firstCstSave = this.saveCstTop();
+    try {
+      (action as GrammarAction<OUT>).call(this);
+    } catch (e) {
+      if (e === SPEC_FAIL || isRecognitionException(e)) {
+        this.restoreCstTop(firstCstSave);
+        this.reloadRecogState(firstSaved);
+        throw this.raiseEarlyExitException(
           prodOccurrence,
-          separator,
-          separatorLookAheadFunc,
-          action,
-          NextTerminalAfterAtLeastOneSepWalker,
-        ],
-        separatorLookAheadFunc,
-        AT_LEAST_ONE_SEP_IDX,
-        prodOccurrence,
-        NextTerminalAfterAtLeastOneSepWalker,
-      );
-    } else {
-      throw this.raiseEarlyExitException(
-        prodOccurrence,
-        PROD_TYPE.REPETITION_MANDATORY_WITH_SEPARATOR,
-        options.ERR_MSG,
-      );
+          PROD_TYPE.REPETITION_MANDATORY_WITH_SEPARATOR,
+          options.ERR_MSG,
+        );
+      }
+      throw e;
     }
+
+    // The separator token acts as a reliable lookahead for subsequent iterations.
+    const separatorLookAheadFunc = () => {
+      return this.tokenMatcher(this.LA_FAST(1), separator);
+    };
+
+    // 2nd..nth iterations
+    while (this.tokenMatcher(this.LA_FAST(1), separator) === true) {
+      this.CONSUME(separator);
+      (action as GrammarAction<OUT>).call(this);
+    }
+
+    // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
+    this.attemptInRepetitionRecovery(
+      this.repetitionSepSecondInternal,
+      [
+        prodOccurrence,
+        separator,
+        separatorLookAheadFunc,
+        action,
+        NextTerminalAfterAtLeastOneSepWalker,
+      ],
+      separatorLookAheadFunc,
+      AT_LEAST_ONE_SEP_IDX,
+      prodOccurrence,
+      NextTerminalAfterAtLeastOneSepWalker,
+    );
   }
 
   manyInternal<OUT>(
@@ -526,52 +622,90 @@ export class RecognizerEngine {
     prodOccurrence: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
-    const laKey = this.getKeyForAutomaticLookahead(MANY_IDX, prodOccurrence);
-    return this.manyInternalLogic(prodOccurrence, actionORMethodDef, laKey);
+    return this.manyInternalLogic(prodOccurrence, actionORMethodDef);
   }
 
+  /**
+   * Zero-or-more loop. Does NOT set IS_SPECULATING — the outer speculating
+   * state propagates, so CONSUME already throws SPEC_FAIL cheaply when
+   * we are inside an outer OR or AT_LEAST_ONE speculative attempt.
+   *
+   * Each iteration is wrapped in try/catch: SPEC_FAIL exits the loop cleanly;
+   * recognition exceptions (from OR's committed best-match path) are re-thrown
+   * so invokeRuleCatch can handle them at the rule boundary.
+   *
+   * Stuck guard: if the body consumed no tokens, restore state and break to
+   * prevent infinite loops on epsilon bodies or recovery virtual tokens.
+   */
   manyInternalLogic<OUT>(
     this: MixedInParser,
     prodOccurrence: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
-    key: number,
   ) {
-    let lookaheadFunction = this.getLaFuncFromCache(key);
-    let action;
+    let action: GrammarAction<OUT>;
+    let gate: (() => boolean) | undefined;
     if (typeof actionORMethodDef !== "function") {
       action = actionORMethodDef.DEF;
-      const predicate = actionORMethodDef.GATE;
-      // predicate present
-      if (predicate !== undefined) {
-        const orgLookaheadFunction = lookaheadFunction;
-        lookaheadFunction = () => {
-          return predicate.call(this) && orgLookaheadFunction.call(this);
-        };
-      }
+      gate = actionORMethodDef.GATE;
     } else {
       action = actionORMethodDef;
+      gate = undefined;
     }
 
+    const wasSpeculating = this.IS_SPECULATING;
     let notStuck = true;
-    while (lookaheadFunction.call(this) === true && notStuck === true) {
-      notStuck = this.doSingleRepetition(action);
+    let ranAtLeastOnce = false;
+    while (notStuck) {
+      if (gate !== undefined && !gate.call(this)) break;
+      const saved = this.saveRecogState();
+      const cstSave = this.saveCstTop();
+      this.IS_SPECULATING = true;
+      try {
+        action.call(this);
+        this.IS_SPECULATING = wasSpeculating;
+      } catch (e) {
+        this.IS_SPECULATING = wasSpeculating;
+        if (e === SPEC_FAIL) {
+          this.restoreCstTop(cstSave);
+          this.reloadRecogState(saved);
+          break;
+        }
+        if (isRecognitionException(e)) {
+          // IS_SPECULATING=true means direct CONSUMEs throw SPEC_FAIL, not
+          // recognition exceptions. A recognition exception here must come from
+          // OR's committed best-match path (which temporarily sets
+          // IS_SPECULATING=false). Re-throw so invokeRuleCatch can handle it.
+          this.restoreCstTop(cstSave);
+          throw e;
+        }
+        throw e;
+      }
+      // Stuck guard: body consumed no tokens → restore and stop.
+      if (this.currIdx <= saved.pos) {
+        this.restoreCstTop(cstSave);
+        this.reloadRecogState(saved);
+        notStuck = false; // Genuine stuck: prevent infinite loops + skip recovery
+        break;
+      }
+      ranAtLeastOnce = true;
     }
 
-    // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
-    this.attemptInRepetitionRecovery(
-      this.manyInternal,
-      [prodOccurrence, actionORMethodDef],
-      <any>lookaheadFunction,
-      MANY_IDX,
-      prodOccurrence,
-      NextTerminalAfterManyWalker,
-      // The notStuck parameter is only relevant when "attemptInRepetitionRecovery"
-      // is invoked from manyInternal, in the MANY_SEP case and AT_LEAST_ONE[_SEP]
-      // An infinite loop cannot occur as:
-      // - Either the lookahead is guaranteed to consume something (Single Token Separator)
-      // - AT_LEAST_ONE by definition is guaranteed to consume something (or error out).
-      notStuck,
-    );
+    // Only attempt in-repetition recovery if ≥1 iterations ran successfully.
+    // If zero iterations ran (first attempt SPEC_FAIL), recovery would cause an
+    // infinite loop: tryInRepetitionRecovery → manyInternal → 0 iterations →
+    // attemptInRepetitionRecovery → tryInRepetitionRecovery → ...
+    if (ranAtLeastOnce) {
+      // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
+      this.attemptInRepetitionRecovery(
+        this.manyInternal,
+        [prodOccurrence, actionORMethodDef],
+        this.makeSpecLookahead(action),
+        MANY_IDX,
+        prodOccurrence,
+        NextTerminalAfterManyWalker,
+        notStuck,
+      );
+    }
   }
 
   manySepFirstInternal<OUT>(
@@ -579,55 +713,104 @@ export class RecognizerEngine {
     prodOccurrence: number,
     options: ManySepMethodOpts<OUT>,
   ): void {
-    const laKey = this.getKeyForAutomaticLookahead(
-      MANY_SEP_IDX,
-      prodOccurrence,
-    );
-    this.manySepFirstInternalLogic(prodOccurrence, options, laKey);
+    this.manySepFirstInternalLogic(prodOccurrence, options);
   }
 
+  /**
+   * Zero-or-more separated list. The first iteration is optional but tried
+   * directly (no IS_SPECULATING set); subsequent iterations are
+   * separator-driven (reliable tokenMatcher guard).
+   *
+   * The first element uses the same try/catch + stuck guard as OPTION — no
+   * IS_SPECULATING, so nested OR last alts retain committed semantics inside
+   * the body. The separator makes subsequent iterations deterministic.
+   */
   manySepFirstInternalLogic<OUT>(
     this: MixedInParser,
     prodOccurrence: number,
     options: ManySepMethodOpts<OUT>,
-    key: number,
   ): void {
     const action = options.DEF;
     const separator = options.SEP;
-    const firstIterationLaFunc = this.getLaFuncFromCache(key);
 
-    // 1st iteration
-    if (firstIterationLaFunc.call(this) === true) {
+    // Optional first iteration — try without IS_SPECULATING.
+    const firstSaved = this.saveRecogState();
+    const firstCstSave = this.saveCstTop();
+    try {
       action.call(this);
-
-      const separatorLookAheadFunc = () => {
-        return this.tokenMatcher(this.LA_FAST(1), separator);
-      };
-      // 2nd..nth iterations
-      while (this.tokenMatcher(this.LA_FAST(1), separator) === true) {
-        // note that this CONSUME will never enter recovery because
-        // the separatorLookAheadFunc checks that the separator really does exist.
-        this.CONSUME(separator);
-        // No need for checking infinite loop here due to consuming the separator.
-        action.call(this);
+    } catch (e) {
+      if (e === SPEC_FAIL || isRecognitionException(e)) {
+        this.restoreCstTop(firstCstSave);
+        this.reloadRecogState(firstSaved);
+        return; // zero iterations — MANY_SEP is optional
       }
-
-      // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
-      this.attemptInRepetitionRecovery(
-        this.repetitionSepSecondInternal,
-        [
-          prodOccurrence,
-          separator,
-          separatorLookAheadFunc,
-          action,
-          NextTerminalAfterManySepWalker,
-        ],
-        separatorLookAheadFunc,
-        MANY_SEP_IDX,
-        prodOccurrence,
-        NextTerminalAfterManySepWalker,
-      );
+      throw e;
     }
+    // Stuck guard: first element consumed no tokens → treat as zero iterations.
+    if (this.currIdx <= firstSaved.pos) {
+      this.restoreCstTop(firstCstSave);
+      this.reloadRecogState(firstSaved);
+      return;
+    }
+
+    const separatorLookAheadFunc = () => {
+      return this.tokenMatcher(this.LA_FAST(1), separator);
+    };
+    // 2nd..nth iterations
+    while (this.tokenMatcher(this.LA_FAST(1), separator) === true) {
+      this.CONSUME(separator);
+      action.call(this);
+    }
+
+    // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
+    this.attemptInRepetitionRecovery(
+      this.repetitionSepSecondInternal,
+      [
+        prodOccurrence,
+        separator,
+        separatorLookAheadFunc,
+        action,
+        NextTerminalAfterManySepWalker,
+      ],
+      separatorLookAheadFunc,
+      MANY_SEP_IDX,
+      prodOccurrence,
+      NextTerminalAfterManySepWalker,
+    );
+  }
+
+  /**
+   * Returns a speculative lookahead predicate for the given action, used
+   * exclusively by attemptInRepetitionRecovery (which is a NOOP when recovery
+   * is disabled). The predicate saves state, runs the action speculatively,
+   * and always restores — returning true iff the action would succeed.
+   */
+  makeSpecLookahead(
+    this: MixedInParser,
+    action: GrammarAction<any>,
+  ): () => boolean {
+    return () => {
+      const saved = this.saveRecogState();
+      const cstSave = this.saveCstTop();
+      const prev = this.IS_SPECULATING;
+      this.IS_SPECULATING = true;
+      // _earlyExitLookahead: abort the action after the first successful CONSUME,
+      // preventing embedded-action side effects (e.g. array pushes) from running.
+      this._earlyExitLookahead = true;
+      try {
+        action.call(this);
+        return true;
+      } catch (e) {
+        if (e === SPEC_FAIL || isRecognitionException(e)) return false;
+        if (e === FIRST_TOKEN_MATCH) return true;
+        throw e;
+      } finally {
+        this._earlyExitLookahead = false;
+        this.IS_SPECULATING = prev;
+        this.restoreCstTop(cstSave);
+        this.reloadRecogState(saved);
+      }
+    };
   }
 
   repetitionSepSecondInternal<OUT>(
@@ -677,24 +860,96 @@ export class RecognizerEngine {
     return afterIteration > beforeIteration;
   }
 
+  /**
+   * Iterates alternatives using zero-cost speculative backtracking.
+   * Modelled after @jesscss/parser's OR():
+   *
+   * For each non-last alt:
+   * - GATE fails → skip to next alt
+   * - GATE passes / No GATE → speculative attempt (GATE is a filter, not a commit signal)
+   *
+   * Speculative attempt: set IS_SPECULATING=true so CONSUME throws the cheap
+   * SPEC_FAIL symbol on mismatch instead of allocating a MismatchedTokenException.
+   * On SPEC_FAIL or any recognition exception, restore state + CST and try next.
+   *
+   * After all alts have been tried: if any alt consumed tokens before failing
+   * (bestProgress > 0) and we are not inside an explicit BACKTRACK() trial
+   * (_isInTrueBacktrack=false), re-run the best-matching alt in committed mode
+   * (IS_SPECULATING=false) so that error recovery can fire or real errors surface.
+   * Otherwise raise NoViableAltException (or throw SPEC_FAIL if speculating).
+   */
   orInternal<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
     occurrence: number,
   ): T {
-    const laKey = this.getKeyForAutomaticLookahead(OR_IDX, occurrence);
     const alts = Array.isArray(altsOrOpts) ? altsOrOpts : altsOrOpts.DEF;
+    const errMsg = Array.isArray(altsOrOpts)
+      ? undefined
+      : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
+    const wasSpeculating = this.IS_SPECULATING;
 
-    const laFunc = this.getLaFuncFromCache(laKey);
-    const altIdxToTake = laFunc.call(this, alts);
-    if (altIdxToTake !== undefined) {
-      const chosenAlternative: any = alts[altIdxToTake];
-      return chosenAlternative.ALT.call(this);
+    let bestProgress = -1;
+    let bestAltIdx = -1;
+    let uniqueBest = false;
+
+    for (let i = 0; i < alts.length; i++) {
+      const alt = alts[i];
+      if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
+      const saved = this.saveRecogState();
+      const cstSave = this.saveCstTop();
+      this.IS_SPECULATING = true;
+      try {
+        const result = alt.ALT.call(this) as T;
+        this.IS_SPECULATING = wasSpeculating;
+        return result;
+      } catch (e) {
+        this.IS_SPECULATING = wasSpeculating;
+        if (e === SPEC_FAIL || isRecognitionException(e)) {
+          const progress = this.currIdx - saved.pos;
+          if (progress > bestProgress) {
+            bestProgress = progress;
+            bestAltIdx = i;
+            uniqueBest = true;
+          } else if (progress === bestProgress && bestProgress > 0) {
+            // Tie: multiple alts consumed the same number of tokens. Cannot
+            // safely commit to either — raise a proper NoViableAlt instead.
+            uniqueBest = false;
+          }
+          this.restoreCstTop(cstSave);
+          this.reloadRecogState(saved);
+          // continue to next alternative
+        } else {
+          throw e;
+        }
+      }
     }
-    this.raiseNoAltException(
-      occurrence,
-      (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG,
-    );
+
+    // All alts failed.
+    if (bestProgress > 0 && !this._isInTrueBacktrack) {
+      if (uniqueBest) {
+        // One alt consumed more tokens than any other. Re-run it committed so
+        // that in-rule recovery (single-token insertion/deletion) or re-sync
+        // can fire and produce meaningful diagnostics.
+        const prevSpec = this.IS_SPECULATING;
+        this.IS_SPECULATING = false;
+        try {
+          return alts[bestAltIdx].ALT.call(this) as T;
+        } finally {
+          this.IS_SPECULATING = prevSpec;
+        }
+      } else {
+        // Multiple alts tied for best progress — ambiguous partial match.
+        // Raise a NoViableAlt so the caller gets a proper error message
+        // listing all expected token sequences.
+        this.raiseNoAltException(occurrence, errMsg);
+      }
+    }
+
+    // No progress (bestProgress <= 0) or inside a BACKTRACK() trial:
+    // signal clean failure to the caller.
+    if (this.IS_SPECULATING) throw SPEC_FAIL;
+    this.raiseNoAltException(occurrence, errMsg);
   }
 
   ruleFinallyStateUpdate(this: MixedInParser): void {
@@ -766,6 +1021,7 @@ export class RecognizerEngine {
       const nextToken = this.LA_FAST(1);
       if (this.tokenMatcher(nextToken, tokType) === true) {
         this.consumeToken();
+        if (this._earlyExitLookahead) throw FIRST_TOKEN_MATCH;
         consumedToken = nextToken;
       } else {
         this.consumeInternalError(tokType, nextToken, options);
@@ -866,10 +1122,11 @@ export class RecognizerEngine {
   /**
    * Restores parser state from a savepoint captured by saveRecogState().
    * Three integer assignments — no allocation, no array iteration.
+   * Uses _errors directly (not the getter) to avoid truncating a temporary copy.
    */
   reloadRecogState(this: MixedInParser, saved: IParserSavepoint): void {
     this.currIdx = saved.pos;
-    this.errors.length = saved.errorsLength;
+    this._errors.length = saved.errorsLength;
     this.RULE_STACK_IDX = saved.ruleStackDepth;
   }
 
@@ -932,7 +1189,7 @@ export class RecognizerEngine {
    *
    * @param ruleName - The name of the root rule being invoked.
    */
-  onBeforeParse(this: MixedInParser, ruleName: string): void {
+  onBeforeParse(this: MixedInParser, _ruleName: string): void {
     // Pad with sentinels for bounds-free forward LA()
     for (let i = 0; i < this.maxLookahead + 1; i++) {
       this.tokVector.push(END_OF_FILE);
@@ -952,7 +1209,7 @@ export class RecognizerEngine {
    *
    * @param ruleName - The name of the root rule that was invoked.
    */
-  onAfterParse(this: MixedInParser, ruleName: string): void {
+  onAfterParse(this: MixedInParser, _ruleName: string): void {
     if (this.isAtEndOfInput() === false) {
       const firstRedundantTok = this.LA(1);
       const errMsg = this.errorMessageProvider.buildNotAllInputParsedMessage({

@@ -20,6 +20,16 @@ import { MixedInParser } from "./parser_traits.js";
 import { DEFAULT_PARSER_CONFIG } from "../parser.js";
 
 /**
+ * Snapshot of a CST node's mutable state taken before a speculative parse
+ * attempt. Restored via restoreCstTop() if the attempt fails, preventing
+ * partial terminal/non-terminal additions from leaking into the parent node.
+ */
+export interface CstTopSave {
+  children: Record<string, any[]>;
+  location: Record<string, number> | undefined;
+}
+
+/**
  * This trait is responsible for the CST building logic.
  */
 export class TreeBuilder {
@@ -42,6 +52,21 @@ export class TreeBuilder {
   setInitialNodeLocation: (cstNode: CstNode) => void;
   nodeLocationTracking: nodeLocationTrackingOptions;
 
+  /**
+   * Saves a snapshot of the current top CST node's mutable state before a
+   * speculative parse attempt. Dynamically dispatched — NOOP when outputCst = false.
+   * @see saveCstTopImpl for the real implementation.
+   */
+  saveCstTop: (this: MixedInParser) => CstTopSave | null;
+
+  /**
+   * Restores the top CST node to a previously saved snapshot, undoing any
+   * terminal/non-terminal additions from a failed speculative attempt.
+   * Dynamically dispatched — NOOP when outputCst = false.
+   * @see restoreCstTopImpl for the real implementation.
+   */
+  restoreCstTop: (this: MixedInParser, save: CstTopSave | null) => void;
+
   initTreeBuilder(this: MixedInParser, config: IParserConfig) {
     this.CST_STACK = [];
 
@@ -58,6 +83,8 @@ export class TreeBuilder {
       this.cstPostTerminal = () => {};
       this.cstPostNonTerminal = () => {};
       this.cstPostRule = () => {};
+      this.saveCstTop = () => null;
+      this.restoreCstTop = () => {};
     } else {
       if (/full/i.test(this.nodeLocationTracking)) {
         if (this.recoveryEnabled) {
@@ -95,6 +122,9 @@ export class TreeBuilder {
           `Invalid <nodeLocationTracking> config option: "${config.nodeLocationTracking}"`,
         );
       }
+      // CST watermark helpers are the same regardless of location-tracking mode.
+      this.saveCstTop = this.saveCstTopImpl;
+      this.restoreCstTop = this.restoreCstTopImpl;
     }
   }
 
@@ -224,6 +254,46 @@ export class TreeBuilder {
     addNoneTerminalToCst(preCstNode, ruleName, ruleCstResult);
     // This is only used when **both** error recovery and CST Output are enabled.
     this.setNodeLocationFromNode(preCstNode.location!, ruleCstResult.location!);
+  }
+
+  /**
+   * Real implementation of saveCstTop. Snapshots the current top CST node's
+   * children (deep-copied per array) and location before a speculative parse
+   * attempt. The copy is O(k) in distinct child types already in the node —
+   * typically 0-3 at an OR/OPTION/MANY decision point.
+   */
+  saveCstTopImpl(this: MixedInParser): CstTopSave | null {
+    const top = this.CST_STACK[this.CST_STACK.length - 1];
+    if (top === undefined) return null;
+    const savedChildren: Record<string, any[]> = Object.create(null);
+    const src = top.children;
+    for (const key of Object.keys(src)) {
+      savedChildren[key] = src[key].slice();
+    }
+    return {
+      children: savedChildren,
+      location:
+        top.location !== undefined
+          ? ({ ...top.location } as Record<string, number>)
+          : undefined,
+    };
+  }
+
+  /**
+   * Real implementation of restoreCstTop. Restores the top CST node from a
+   * snapshot, undoing all terminal and non-terminal additions made during the
+   * failed speculative attempt.
+   */
+  restoreCstTopImpl(this: MixedInParser, save: CstTopSave | null): void {
+    if (save === null) return;
+    const top = this.CST_STACK[this.CST_STACK.length - 1];
+    if (top === undefined) return;
+    // CstNode.children is declared readonly in the type, but we own the object
+    // and must roll it back — the snapshot copy IS the authoritative state.
+    (top as any).children = save.children;
+    if (save.location !== undefined) {
+      (top as any).location = save.location;
+    }
   }
 
   getBaseCstVisitorConstructor<IN = any, OUT = any>(

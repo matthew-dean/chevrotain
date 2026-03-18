@@ -697,7 +697,10 @@ export class RecognizerApi {
     // Backtracking is speculative and should not trigger parse lifecycle hooks.
     const ruleToCall = (grammarRule as any).coreRule ?? grammarRule;
     return function (this: MixedInParser) {
+      const prevIsSpeculating = this.IS_SPECULATING;
+      const prevIsInTrueBacktrack = this._isInTrueBacktrack;
       this.IS_SPECULATING = true;
+      this._isInTrueBacktrack = true;
       const orgState = this.saveRecogState();
       try {
         ruleToCall.apply(this, args);
@@ -710,7 +713,8 @@ export class RecognizerApi {
         }
       } finally {
         this.reloadRecogState(orgState);
-        this.IS_SPECULATING = false;
+        this.IS_SPECULATING = prevIsSpeculating;
+        this._isInTrueBacktrack = prevIsInTrueBacktrack;
       }
     };
   }
