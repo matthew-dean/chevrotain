@@ -1121,4 +1121,121 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       expect(parser.errors).to.be.empty;
     });
   });
+
+  describe("Auto-occurrence: multiple ORs in the same rule without numbered variants", () => {
+    it("two ORs with occurrence=0 should not collide in fast-dispatch maps", () => {
+      const TokenA = createToken({ name: "TokenA" });
+      const TokenB = createToken({ name: "TokenB" });
+      const TokenC = createToken({ name: "TokenC" });
+      const TokenD = createToken({ name: "TokenD" });
+      const allTokens = [TokenA, TokenB, TokenC, TokenD];
+      augmentTokenTypes(allTokens);
+
+      class TwoOrParser extends EmbeddedActionsParser {
+        constructor() {
+          super(allTokens, {});
+          this.performSelfAnalysis();
+        }
+
+        public testRule = this.RULE("testRule", () => {
+          // Two $.OR calls in the same rule — NO numbered variants.
+          // Without auto-occurrence, both get mapKey = currRuleShortName | 0,
+          // causing fast-dispatch cache collision.
+          const first = this.OR([
+            {
+              ALT: () => {
+                this.CONSUME(TokenA);
+                return "A";
+              },
+            },
+            {
+              ALT: () => {
+                this.CONSUME(TokenB);
+                return "B";
+              },
+            },
+          ]);
+          const second = this.OR([
+            {
+              ALT: () => {
+                this.CONSUME(TokenC);
+                return "C";
+              },
+            },
+            {
+              ALT: () => {
+                this.CONSUME(TokenD);
+                return "D";
+              },
+            },
+          ]);
+          return [first, second];
+        });
+      }
+
+      const parser = new TwoOrParser();
+
+      // Parse 1: A C — should succeed
+      parser.input = [createRegularToken(TokenA), createRegularToken(TokenC)];
+      let result = parser.testRule();
+      expect(parser.errors).to.be.empty;
+      expect(result).to.deep.equal(["A", "C"]);
+
+      // Parse 2: B D — should also succeed
+      parser.input = [createRegularToken(TokenB), createRegularToken(TokenD)];
+      result = parser.testRule();
+      expect(parser.errors).to.be.empty;
+      expect(result).to.deep.equal(["B", "D"]);
+
+      // Parse 3: A D — mixed, should succeed
+      parser.input = [createRegularToken(TokenA), createRegularToken(TokenD)];
+      result = parser.testRule();
+      expect(parser.errors).to.be.empty;
+      expect(result).to.deep.equal(["A", "D"]);
+
+      // Parse 4: B C — mixed, should succeed
+      parser.input = [createRegularToken(TokenB), createRegularToken(TokenC)];
+      result = parser.testRule();
+      expect(parser.errors).to.be.empty;
+      expect(result).to.deep.equal(["B", "C"]);
+
+      // Verify fast-dispatch maps have TWO distinct mapKeys (one per OR)
+      const fastMaps = (parser as any)._orFastMaps ?? {};
+      const mapKeys = Object.keys(fastMaps);
+      expect(mapKeys.length).to.equal(
+        2,
+        "two ORs should have two distinct map keys",
+      );
+    });
+
+    it("multiple CONSUMEs without numbered variants work correctly", () => {
+      const TokenA = createToken({ name: "TokenA" });
+      const TokenB = createToken({ name: "TokenB" });
+      const allTokens = [TokenA, TokenB];
+      augmentTokenTypes(allTokens);
+
+      class MultiConsumeParser extends EmbeddedActionsParser {
+        constructor() {
+          super(allTokens, {});
+          this.performSelfAnalysis();
+        }
+
+        public testRule = this.RULE("testRule", () => {
+          // Two $.CONSUME calls without numbered variants
+          const first = this.CONSUME(TokenA);
+          const second = this.CONSUME(TokenB);
+          return [first.image, second.image];
+        });
+      }
+
+      const parser = new MultiConsumeParser();
+      parser.input = [
+        createRegularToken(TokenA, "a"),
+        createRegularToken(TokenB, "b"),
+      ];
+      const result = parser.testRule();
+      expect(parser.errors).to.be.empty;
+      expect(result).to.deep.equal(["a", "b"]);
+    });
+  });
 });

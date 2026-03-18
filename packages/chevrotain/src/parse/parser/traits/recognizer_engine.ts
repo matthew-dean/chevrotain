@@ -63,15 +63,8 @@ export const SPEC_FAIL = Symbol("SPEC_FAIL");
  * Records that `altIdx` matched when LA(1) had `tokenTypeIdx` for the OR
  * site identified by `mapKey`. Populates the direct tokenTypeIdx→altIdx
  * fast-dispatch map. If two different alts match the same tokenTypeIdx,
- * marks the entry as ambiguous (-1) so the fast path falls through to
- * the full speculative loop.
- */
-/**
- * Records that `altIdx` matched when LA(1) had `tokenTypeIdx` for the OR
- * site identified by `mapKey`. Populates the direct tokenTypeIdx→altIdx
- * fast-dispatch map. If two different alts match the same tokenTypeIdx,
- * or if a preceding alt has an OR-level GATE (priority must be resolved
- * by the slow path), marks the entry as ambiguous (-1).
+ * or if a preceding alt has a GATE, marks the entry as ambiguous (-1)
+ * so the fast path falls through to the full speculative loop.
  */
 function addOrFastMapEntry(
   orFastMaps: Record<number, Record<number, number>>,
@@ -86,8 +79,7 @@ function addOrFastMapEntry(
     orFastMaps[mapKey] = map;
   }
   // If any preceding alt has a GATE, gate priority must be resolved by
-  // the slow path — mark as ambiguous. For gate-free grammars (JSON, CSS)
-  // this loop body never executes.
+  // the slow path. For gate-free grammars (JSON, CSS) this never triggers.
   for (let g = 0; g < altIdx; g++) {
     if (alts[g].GATE !== undefined) {
       map[tokenTypeIdx] = -1;
@@ -138,6 +130,26 @@ export class RecognizerEngine {
   // avoids method-call overhead on every rule entry/exit.
   RULE_STACK_IDX: number;
   RULE_OCCURRENCE_STACK_IDX: number;
+  /**
+   * Runtime OR call counter — auto-increments per OR call within a rule.
+   * Saved/restored on rule entry/exit via _orCounterStack. Gives unique
+   * mapKeys for _orFastMaps without requiring numbered variants (OR1, OR2).
+   * A single integer is cheaper than array-indexed counters.
+   */
+  _orCounter: number;
+  _orCounterStack: number[];
+  /**
+   * Auto-occurrence counters per DSL method type, indexed by RULE_STACK_IDX.
+   * Used ONLY during RECORDING_PHASE (performSelfAnalysis). Not on hot path.
+   */
+  _orAutoOccurrence: number[];
+  _consumeAutoOccurrence: number[];
+  _subruleAutoOccurrence: number[];
+  _optionAutoOccurrence: number[];
+  _manyAutoOccurrence: number[];
+  _atLeastOneAutoOccurrence: number[];
+  _manySepAutoOccurrence: number[];
+  _atLeastOneSepAutoOccurrence: number[];
   definedRulesNames: string[];
   tokensMap: { [fqn: string]: TokenType };
   gastProductionsCache: Record<string, Rule>;
@@ -207,6 +219,16 @@ export class RecognizerEngine {
     this.RULE_STACK_IDX = -1;
     this.RULE_OCCURRENCE_STACK = [];
     this.RULE_OCCURRENCE_STACK_IDX = -1;
+    this._orCounter = 0;
+    this._orCounterStack = [];
+    this._orAutoOccurrence = [];
+    this._consumeAutoOccurrence = [];
+    this._subruleAutoOccurrence = [];
+    this._optionAutoOccurrence = [];
+    this._manyAutoOccurrence = [];
+    this._atLeastOneAutoOccurrence = [];
+    this._manySepAutoOccurrence = [];
+    this._atLeastOneSepAutoOccurrence = [];
     this.gastProductionsCache = {};
 
     if (Object.hasOwn(config, "serializedGrammar")) {
@@ -1009,7 +1031,7 @@ export class RecognizerEngine {
     // -----------------------------------------------------------------------
     const la1 = this.LA_FAST(1);
     const la1TypeIdx = la1.tokenTypeIdx;
-    const mapKey = this.currRuleShortName | occurrence;
+    const mapKey = this.currRuleShortName | this._orCounter++;
     const fastMap = this._orFastMaps[mapKey];
     const gatedPrefixAlts = this._orGatedPrefixAlts[mapKey];
     if (fastMap !== undefined || gatedPrefixAlts !== undefined) {
@@ -1017,12 +1039,8 @@ export class RecognizerEngine {
         fastMap !== undefined ? fastMap[la1TypeIdx] : undefined;
 
       // Direct dispatch: single unambiguous candidate for this tokenTypeIdx.
-      if (
-        fastAltIdx !== undefined &&
-        fastAltIdx >= 0 &&
-        (gatedPrefixAlts === undefined ||
-          !gatedPrefixAlts.some((g) => g < fastAltIdx))
-      ) {
+      // Gate-conflicted entries are marked -1 by addOrFastMapEntry and skip this.
+      if (fastAltIdx !== undefined && fastAltIdx >= 0) {
         const alt = alts[fastAltIdx];
         if (alt.GATE === undefined || alt.GATE.call(this)) {
           const fastLexPos = this.currIdx;
@@ -1046,8 +1064,7 @@ export class RecognizerEngine {
         }
       }
 
-      // Gated-prefix alts must always be tried when present — they cannot
-      // be cached by LA(1) alone. Try each speculatively.
+      // Gated-prefix alts must always be tried when present.
       if (gatedPrefixAlts !== undefined) {
         for (let gIdx = 0; gIdx < gatedPrefixAlts.length; gIdx++) {
           const altIdx = gatedPrefixAlts[gIdx];
@@ -1199,6 +1216,8 @@ export class RecognizerEngine {
   }
 
   ruleFinallyStateUpdate(this: MixedInParser): void {
+    // Restore the runtime OR counter from the parent rule scope.
+    this._orCounter = this._orCounterStack[this.RULE_STACK_IDX];
     this.RULE_STACK_IDX--;
     this.RULE_OCCURRENCE_STACK_IDX--;
 
@@ -1365,8 +1384,21 @@ export class RecognizerEngine {
   ): void {
     this.RULE_OCCURRENCE_STACK[++this.RULE_OCCURRENCE_STACK_IDX] =
       idxInCallingRule;
-    this.RULE_STACK[++this.RULE_STACK_IDX] = shortName;
+    const depth = ++this.RULE_STACK_IDX;
+    this.RULE_STACK[depth] = shortName;
     this.currRuleShortName = shortName;
+    // Save and reset the runtime OR counter for this rule scope.
+    this._orCounterStack[depth] = this._orCounter;
+    this._orCounter = 0;
+    // Reset recording-phase auto-occurrence counters (only used during performSelfAnalysis).
+    this._orAutoOccurrence[depth] = 0;
+    this._consumeAutoOccurrence[depth] = 0;
+    this._subruleAutoOccurrence[depth] = 0;
+    this._optionAutoOccurrence[depth] = 0;
+    this._manyAutoOccurrence[depth] = 0;
+    this._atLeastOneAutoOccurrence[depth] = 0;
+    this._manySepAutoOccurrence[depth] = 0;
+    this._atLeastOneSepAutoOccurrence[depth] = 0;
     // NOOP when cst is disabled
     this.cstInvocationStateUpdate(fullName);
   }

@@ -118,12 +118,16 @@ export class GastRecorder {
     return END_OF_FILE;
   }
 
-  topLevelRuleRecord(name: string, def: Function): Rule {
+  topLevelRuleRecord(this: MixedInParser, name: string, def: Function): Rule {
     try {
       const newTopLevelRule = new Rule({ definition: [], name: name });
       newTopLevelRule.name = name;
       this.recordingProdStack.push(newTopLevelRule);
+      // Set up rule state so auto-occurrence counters work during recording.
+      const shortName = this.fullRuleNameToShort[name] ?? 0;
+      this.ruleInvocationStateUpdate(shortName, name, 0);
       def.call(this);
+      this.ruleFinallyStateUpdate();
       this.recordingProdStack.pop();
       return newTopLevelRule;
     } catch (originalError) {
