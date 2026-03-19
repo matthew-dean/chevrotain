@@ -1321,9 +1321,23 @@ export class Parser {
       return undefined;
     }
 
-    // TODO: Committed OPTION requires knowing the REST tokens (what follows
-    // the OPTION) to distinguish "enter body" from "skip". For now, OPTION
-    // remains speculative. MANY is the bigger win (hot loops).
+    // Committed OPTION: precomputed discriminating lookahead available.
+    // The set was built by getLookaheadPathsForOptionalProd during
+    // performSelfAnalysis — it discriminates body tokens from REST tokens.
+    if (occurrence !== undefined && !this.IS_SPECULATING) {
+      const laKey = getKeyForAutomaticLookahead(
+        this.currRuleShortName,
+        OPTION_IDX,
+        occurrence,
+      );
+      const laSet = this._prodLookahead[laKey];
+      if (laSet !== undefined) {
+        if (laSet[this.LA_FAST(1).tokenTypeIdx] !== true) {
+          return undefined; // LA(1) not in body's first-token set → skip
+        }
+        return action.call(this); // Committed — no try/catch
+      }
+    }
 
     // Speculative OPTION: save state, try body, restore on failure.
     const startLexPos = this.exportLexerState();
