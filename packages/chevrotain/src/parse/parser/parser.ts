@@ -123,6 +123,10 @@ import {
   validateRuleIsOverridden,
 } from "../grammar/checks.js";
 
+// Hoist Array.isArray to a module-level variable so the JIT sees a
+// stable reference rather than a property lookup on the Array global.
+const { isArray } = Array;
+
 export const END_OF_FILE = createTokenInstance(
   EOF,
   "",
@@ -685,7 +689,7 @@ export class Parser {
               prodType: PROD_TYPE.OPTION,
             });
           }
-          if ("definition" in prod && Array.isArray(prod.definition)) {
+          if ("definition" in prod && isArray(prod.definition)) {
             findProductions(prod.definition);
           }
         }
@@ -777,9 +781,18 @@ export class Parser {
             !node.hasPredicates && !this.dynamicTokensEnabled
               ? buildOrChoiceMap(paths)
               : null;
+          const needsCounter = orNeedsCounterManagement(
+            node,
+            rule,
+            this.recoveryEnabled,
+          );
           if (choiceToAlt !== null) {
             // LL(1) inline dispatch: single map lookup, no function call.
-            if (altStarts !== undefined && counterDelta !== undefined) {
+            if (
+              needsCounter &&
+              altStarts !== undefined &&
+              counterDelta !== undefined
+            ) {
               this._orLookahead[mapKey] = function orDispatchLL1(
                 this: Parser,
                 alts: IOrAlt<any>[],
@@ -817,7 +830,11 @@ export class Parser {
               tmatcher,
               this.dynamicTokensEnabled,
             );
-            if (altStarts !== undefined && counterDelta !== undefined) {
+            if (
+              needsCounter &&
+              altStarts !== undefined &&
+              counterDelta !== undefined
+            ) {
               this._orLookahead[mapKey] = function orDispatch(
                 this: Parser,
                 alts: IOrAlt<any>[],
@@ -954,7 +971,7 @@ export class Parser {
             targetNode = prod;
             return;
           }
-          if ("definition" in prod && Array.isArray(prod.definition)) {
+          if ("definition" in prod && isArray(prod.definition)) {
             findAlt(prod.definition);
             if (targetNode) return;
           }
@@ -966,15 +983,24 @@ export class Parser {
       const prodMaxLA = (targetNode as any).maxLookahead ?? this.maxLookahead;
       const paths = getLookaheadPathsForOr(occurrence, rule, prodMaxLA);
 
-      // Build dispatch closure with counter management.
+      // Build dispatch closure; skip counter management when GAST shows it's unnecessary.
       const altStarts = this._orAltCounterStarts[mapKey];
       const counterDelta = this._orCounterDeltas[mapKey];
+      const needsCounter = orNeedsCounterManagement(
+        targetNode,
+        rule,
+        this.recoveryEnabled,
+      );
       const choiceToAlt =
         !targetNode.hasPredicates && !this.dynamicTokensEnabled
           ? buildOrChoiceMap(paths)
           : null;
       if (choiceToAlt !== null) {
-        if (altStarts !== undefined && counterDelta !== undefined) {
+        if (
+          needsCounter &&
+          altStarts !== undefined &&
+          counterDelta !== undefined
+        ) {
           this._orLookahead[mapKey] = function orDispatchLL1(
             this: Parser,
             orAlts: IOrAlt<any>[],
@@ -1011,7 +1037,11 @@ export class Parser {
           tmatcher,
           this.dynamicTokensEnabled,
         );
-        if (altStarts !== undefined && counterDelta !== undefined) {
+        if (
+          needsCounter &&
+          altStarts !== undefined &&
+          counterDelta !== undefined
+        ) {
           this._orLookahead[mapKey] = function orDispatch(
             this: Parser,
             orAlts: IOrAlt<any>[],
@@ -1357,7 +1387,7 @@ export class Parser {
       );
     }
 
-    if (Array.isArray(tokenVocabulary)) {
+    if (isArray(tokenVocabulary)) {
       // This only checks for Token vocabularies provided as arrays.
       // That is good enough because the main objective is to detect users of pre-V4.0 APIs
       // rather than all edge cases of empty Token vocabularies.
@@ -1378,7 +1408,7 @@ export class Parser {
       }
     }
 
-    if (Array.isArray(tokenVocabulary)) {
+    if (isArray(tokenVocabulary)) {
       this.tokensMap = (tokenVocabulary as TokenType[]).reduce(
         (acc: { [tokenName: string]: TokenType }, tokType: TokenType) => {
           acc[tokType.name] = tokType;
@@ -1656,8 +1686,8 @@ export class Parser {
 
     // Committed OPTION: precomputed LL(k) lookahead closure available.
     if (occurrence !== undefined && !this.IS_SPECULATING) {
-      const laFunc =
-        this._prodLookahead[this.currRuleShortName | OPTION_IDX | occurrence];
+      const optLaKey = this.currRuleShortName | OPTION_IDX | occurrence;
+      const laFunc = this._prodLookahead[optLaKey];
       if (laFunc !== undefined) {
         if (!laFunc.call(this)) {
           return undefined;
@@ -1990,7 +2020,7 @@ export class Parser {
 
     // Fast committed path: precomputed first-token set says whether the MANY
     // body may start. No speculation, no try/catch, minimal property access.
-    if (laSet !== undefined && !wasSpeculating) {
+    if (!wasSpeculating && laSet !== undefined) {
       while (notStuck) {
         if (gate !== undefined && !gate.call(this)) break;
         if (!laSet.call(this)) break;
@@ -2007,7 +2037,8 @@ export class Parser {
 
         ranAtLeastOnce = true;
       }
-    } else {
+    }
+    if (wasSpeculating || laSet === undefined) {
       // Slow speculative path: try the body under IS_SPECULATING=true,
       // rollback on SPEC_FAIL or on recognition exceptions with no progress.
       while (notStuck) {
@@ -2280,8 +2311,8 @@ export class Parser {
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
     occurrence: number,
   ): T {
-    const isArray = Array.isArray(altsOrOpts);
-    const alts = isArray
+    const isAltsArray = isArray(altsOrOpts);
+    const alts = isAltsArray
       ? (altsOrOpts as IOrAlt<any>[])
       : (altsOrOpts as OrMethodOpts<unknown>).DEF;
     const wasSpeculating = this.IS_SPECULATING;
@@ -2674,7 +2705,7 @@ export class Parser {
         this.IS_SPECULATING = false;
         this.restoreCstTop(savedCst);
         this._errors.length = savedErrors;
-        const em = isArray
+        const em = isAltsArray
           ? undefined
           : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
         this.raiseNoAltException(occurrence, em);
@@ -2682,7 +2713,7 @@ export class Parser {
       }
       throw SPEC_FAIL;
     }
-    const em = isArray
+    const em = isAltsArray
       ? undefined
       : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
     this.raiseNoAltException(occurrence, em);
@@ -3417,6 +3448,38 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    // Fast committed path (same as OPTION below — see comment there).
+    if (!this.IS_SPECULATING) {
+      const laFunc =
+        this._prodLookahead[this.currRuleShortName | OPTION_IDX | idx];
+      if (laFunc !== undefined) {
+        let action: GrammarAction<OUT>;
+        let gate: (() => boolean) | undefined;
+        if (typeof actionORMethodDef === "function") {
+          action = actionORMethodDef;
+          gate = undefined;
+        } else {
+          action = actionORMethodDef.DEF;
+          gate = actionORMethodDef.GATE;
+        }
+        if (gate !== undefined && !gate.call(this)) return undefined;
+        if (!laFunc.call(this)) return undefined;
+        const optPos = this.currIdx;
+        const optErrors = this._errors.length;
+        const optCst = this.saveCstTop();
+        try {
+          return action.call(this);
+        } catch (e) {
+          if (e === SPEC_FAIL || isRecognitionException(e)) {
+            this.restoreCstTop(optCst);
+            this.currIdx = optPos;
+            this._errors.length = optErrors;
+            return undefined;
+          }
+          throw e;
+        }
+      }
+    }
     return this.optionInternal(actionORMethodDef, idx);
   }
 
@@ -3424,6 +3487,18 @@ export class Parser {
   or(_idx: number, altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, idx);
+    // Primary path: precomputed LL(k) dispatch closure (same as OR below).
+    if (!this.IS_SPECULATING) {
+      const mapKey = this.currRuleShortName | idx;
+      const orDispatch = this._orLookahead[mapKey];
+      if (orDispatch !== undefined) {
+        const alts = isArray(altsOrOpts)
+          ? (altsOrOpts as IOrAlt<any>[])
+          : (altsOrOpts as OrMethodOpts<unknown>).DEF;
+        const result = orDispatch.call(this, alts);
+        if (result !== OR_NO_MATCH) return result;
+      }
+    }
     return this.orInternal(altsOrOpts, idx);
   }
 
@@ -3632,6 +3707,40 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    // Fast committed path: precomputed OPTION lookahead exists and not
+    // speculating. Keeps optionInternal (too large to inline) off the hot
+    // call stack. Try/catch is required — body can still fail internally.
+    if (!this.IS_SPECULATING) {
+      const laFunc =
+        this._prodLookahead[this.currRuleShortName | OPTION_IDX | idx];
+      if (laFunc !== undefined) {
+        let action: GrammarAction<OUT>;
+        let gate: (() => boolean) | undefined;
+        if (typeof actionORMethodDef === "function") {
+          action = actionORMethodDef;
+          gate = undefined;
+        } else {
+          action = actionORMethodDef.DEF;
+          gate = actionORMethodDef.GATE;
+        }
+        if (gate !== undefined && !gate.call(this)) return undefined;
+        if (!laFunc.call(this)) return undefined;
+        const optPos = this.currIdx;
+        const optErrors = this._errors.length;
+        const optCst = this.saveCstTop();
+        try {
+          return action.call(this);
+        } catch (e) {
+          if (e === SPEC_FAIL || isRecognitionException(e)) {
+            this.restoreCstTop(optCst);
+            this.currIdx = optPos;
+            this._errors.length = optErrors;
+            return undefined;
+          }
+          throw e;
+        }
+      }
+    }
     return this.optionInternal(actionORMethodDef, idx);
   }
 
@@ -3723,8 +3832,21 @@ export class Parser {
   // ──── OR family ────
   OR<T>(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>): T {
     const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
+    if (this.RECORDING_PHASE)
       return this.orInternalRecord(altsOrOpts, idx) as T;
+    // Primary path: precomputed LL(k) dispatch closure. Built during
+    // performSelfAnalysis. In the warm steady-state this always hits,
+    // keeping orInternal (too large to inline) off the hot call stack.
+    if (!this.IS_SPECULATING) {
+      const mapKey = this.currRuleShortName | idx;
+      const orDispatch = this._orLookahead[mapKey];
+      if (orDispatch !== undefined) {
+        const alts = isArray(altsOrOpts)
+          ? (altsOrOpts as IOrAlt<any>[])
+          : (altsOrOpts as OrMethodOpts<unknown>).DEF;
+        const result = orDispatch.call(this, alts);
+        if (result !== OR_NO_MATCH) return result as T;
+      }
     }
     return this.orInternal(altsOrOpts, idx);
   }
@@ -4918,6 +5040,85 @@ export class Parser {
 
 applyMixins(Parser, []);
 
+// --- OR counter-management analysis helpers ---
+
+/**
+ * Returns true when the production is "dispatch-sensitive": its mapKey lookup
+ * depends on a stable _dslCounter value (Alternation/Repetition/Option).
+ * Terminal and NonTerminal use _dslCounter only for error recovery — not the
+ * hot success path — so they are NOT dispatch-sensitive.
+ */
+function isDispatchNode(prod: IProduction): boolean {
+  return (
+    prod instanceof Alternation ||
+    prod instanceof Repetition ||
+    prod instanceof RepetitionMandatory ||
+    prod instanceof RepetitionWithSeparator ||
+    prod instanceof RepetitionMandatoryWithSeparator ||
+    prod instanceof Option
+  );
+}
+
+/**
+ * Find the immediate parent definition array that contains `target`.
+ * Returns null if target is not found (shouldn't happen for valid GAST).
+ */
+function findParentDef(
+  defs: IProduction[],
+  target: IProduction,
+): IProduction[] | null {
+  for (const node of defs) {
+    if (node === target) return defs;
+    const subDef = (node as any).definition;
+    if (isArray(subDef)) {
+      const found = findParentDef(subDef as IProduction[], target);
+      if (found !== null) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Returns true when counter management must be preserved in the OR dispatch
+ * closure. When false, orDispatchLL1Simple (no counter management) is safe.
+ *
+ * Counter management is required when:
+ * - Recovery is enabled: _dslCounter must be correct for follow-set lookups in
+ *   consumeInternalRecovery (CONSUME idx) and RULE_OCCURRENCE_STACK (subruleIdx).
+ * - An alt body contains a dispatch-sensitive node (Alternation/Repetition/Option)
+ *   whose mapKey lookup depends on a deterministic _dslCounter.
+ * - A dispatch-sensitive sibling follows this alternation in its parent production
+ *   (so _dslCounter after the OR must be normalized for subsequent dispatch).
+ */
+function orNeedsCounterManagement(
+  node: InstanceType<typeof Alternation>,
+  rule: InstanceType<typeof Rule>,
+  recoveryEnabled: boolean,
+): boolean {
+  // When recovery is enabled, idx values in CONSUME/SUBRULE affect follow-set
+  // lookups and RULE_OCCURRENCE_STACK — normalization is required for correctness.
+  if (recoveryEnabled) return true;
+  // (A) Any alt body has nested dispatch-sensitive node?
+  for (const alt of node.definition) {
+    for (const child of (alt as Alternative).definition) {
+      if (isDispatchNode(child)) return true;
+    }
+  }
+  // (B) Any dispatch-sensitive sibling follows this alternation in its parent?
+  const parentDef = findParentDef(rule.definition as IProduction[], node);
+  if (parentDef !== null) {
+    let passed = false;
+    for (const sibling of parentDef) {
+      if (passed) {
+        if (isDispatchNode(sibling)) return true;
+      } else if (sibling === node) {
+        passed = true;
+      }
+    }
+  }
+  return false;
+}
+
 // --- GastRecorder module-level helpers (absorbed from trait) ---
 // Prefixed with `gast` to avoid name collisions with engine methods.
 function gastRecordProd(
@@ -4950,7 +5151,7 @@ function gastRecordProd(
 function gastRecordOrProd(mainProdArg: any, occurrence: number): any {
   gastAssertMethodIdxIsValid(occurrence);
   const prevProd: any = this.recordingProdStack.at(-1);
-  const hasOptions = Array.isArray(mainProdArg) === false;
+  const hasOptions = isArray(mainProdArg) === false;
   const alts: IOrAlt<unknown>[] =
     hasOptions === false ? mainProdArg : mainProdArg.DEF;
 

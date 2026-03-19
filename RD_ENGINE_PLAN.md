@@ -81,10 +81,34 @@ exactly. The `Lexer` is improved but its interface is unchanged.
 
 ## Remaining Performance TODOs
 
+### Parser investigations
+
 - ✅ **Inline `choiceToAlt` into OR dispatch**: eliminated `laFunc.call()` for
   LL(1) no-predicate grammars. V8 cannot inline through `Function.prototype.call`;
   map is now a closure variable in `orDispatchLL1`. JSON +9%, CSS +5%. 78% of
   baseline warm (was 72%).
+- ✅ **`orDispatchLL1Simple` (no counter management)**: GAST analysis to skip
+  `_dslCounter` normalization for OR sites where no dispatch-sensitive node
+  follows. Implemented and tested. Benchmark impact: within noise (~11,300-12,400
+  ops/sec). Committed since it's correct with zero overhead.
+- ✅ **`const { isArray } = Array` module-level**: hoist to stable reference for
+  JIT. No measurable impact (within noise), committed for correctness.
+- ✅ **Hoist OR fast path from `orInternal` into `OR`/`or`**: `orInternal` is
+  ~300 lines — too large for V8 to inline. Moving the primary `_orLookahead`
+  dispatch into `OR` means `orInternal` is never called in the warm path.
+  `orInternal` profile self-time dropped from 6.1% → 0%. JSON +5%, CSS held.
+- ✅ **Hoist OPTION fast path from `optionInternalLogic` into `OPTION`/`option`**:
+  `optionInternalLogic` was 4.2% self-time. Fast path (including required
+  try/catch) moved into `OPTION`. `optionInternalLogic` dropped to 0% in profile;
+  `OPTION` self-time 2.2%. CSS improved ~1%.
+- ❌ **`_prodLookaheadLL1Tok` (inline LL(1) check for MANY/OPTION)**: Store
+  `tokenTypeIdx` for single-token OPTION/MANY lookaheads to avoid function call.
+  Benchmark: indistinguishable from noise. Reverted — added code with no benefit.
+  The OPTION committed path also requires try/catch (needed for error recovery),
+  which offsets any function-call savings.
+- ❌ **Hoist MANY fast path into `MANY`**: same approach as OR/OPTION. Implemented,
+  benchmarked — within noise. V8 appears to inline `manyInternalLogic` already
+  (it's 130 lines, under inlining threshold). Reverted.
 - ⬜ **Eliminate `_dslCounter` from hot paths**: when performSelfAnalysis was
   called, counter deltas are known statically. Bake them into the closure or
   pre-compute a static occurrence mapping. Saves 4-5 property accesses per OR.
@@ -93,9 +117,31 @@ exactly. The `Lexer` is improved but its interface is unchanged.
   analysis), the try/catch can be removed.
 - ⬜ **Specialize consumeInternal for committed path**: remove `_earlyExitLookahead`
   and `IS_SPECULATING` checks (2 property reads + 2 branches per CONSUME).
-- ⬜ **Single-dispatch MANY/OPTION closures**: like OR, replace map lookup with
-  a single cached closure per MANY/OPTION site. Currently uses
-  `_prodLookahead[laKey]` lookup per call.
+- ⬜ **Single-dispatch MANY closures**: like OR, replace `_prodLookahead[laKey]`
+  lookup with a single cached closure per MANY site.
+- ⬜ **`invokeRuleWithTryCst` try/catch** (10% of profile): structural per-rule
+  cost. Shared with upstream. Investigate if outer recovery can be removed for
+  `recoveryEnabled=false` (default) parsers.
+
+### Lexer investigations (after parser gap is closed)
+
+CPU profile breakdown (current): ~44% lexer, ~56% parser.
+Lexer costs are significant even at parity. Worth investigating after parser gap
+is minimized, as lexer improvements benefit all users regardless of parser type.
+
+- ⬜ **Reduce StringLiteral RegExp cost** (13% of profile): the JSON
+  `"(?:[^\\"]|\\(?:...))*"` regex is the single biggest CPU consumer after
+  tokenizeInternal. Investigate: (a) RegExp sticky flag perf, (b) hand-rolled
+  string scanner for simple quoted strings, (c) alternation ordering.
+- ⬜ **`matchLength` overhead** (4% of profile): called for every token. Check
+  if matchLength can be reduced to a direct property access for common token types.
+- ⬜ **`tokenize` function call overhead** (3% of profile): the public `tokenize`
+  wrapper adds cost on top of `tokenizeInternal`. Investigate inlining.
+- ⬜ **`singleTokensTypes.reduce` (2.6%)**: per-tokenize call overhead for
+  building the token type set. Cache or pre-compute.
+- ⬜ **Lexer IToken hidden class**: all token objects should share one hidden class
+  to allow V8 monomorphic IC on token property reads. Audit whether the current
+  single factory produces consistent shapes.
 
 ## Exploration
 
