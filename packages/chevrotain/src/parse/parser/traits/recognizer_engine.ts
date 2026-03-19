@@ -433,6 +433,24 @@ export class RecognizerEngine {
     return wrappedGrammarRule;
   }
 
+  /**
+   * Catch handler for `invokeRuleWithTryCst`. Decides how to handle
+   * exceptions thrown during rule execution:
+   *
+   * - **Recognition exception + reSync enabled**: attempt reSync recovery —
+   *   skip tokens until a follow-set token is found, then return a partial
+   *   CST node (if `outputCst`) or the recovery value.
+   * - **Recognition exception + first invoked rule**: terminate the parse
+   *   gracefully and return the recovery value (the parser should never
+   *   throw its own errors to user code).
+   * - **Recognition exception + nested rule**: re-throw so the parent rule
+   *   can attempt reSync at a higher level.
+   * - **Non-recognition exception** (e.g., JS runtime error): always re-throw.
+   *
+   * ReSync is disabled during backtracking (`IS_SPECULATING=true`) to
+   * prevent recovery from accepting invalid syntax that a different
+   * speculative path would parse correctly.
+   */
   invokeRuleCatch(
     this: MixedInParser,
     e: Error,
@@ -793,6 +811,27 @@ export class RecognizerEngine {
    * Stuck guard: if the body consumed no tokens despite completing without
    * throwing, stop to prevent infinite loops on epsilon-like bodies.
    */
+  /**
+   * Core MANY loop: runs the body speculatively until it fails.
+   * Modelled after @jesscss/parser's MANY with additional error handling.
+   *
+   * Each iteration: save state → `IS_SPECULATING=true` → try body →
+   * on `SPEC_FAIL` → restore and break. On success → check stuck guard.
+   *
+   * ## Recognition exception handling (for error recovery)
+   *
+   * OR's committed re-run (see `orInternal`) temporarily clears
+   * `IS_SPECULATING`, so `CONSUME` failures throw real
+   * `MismatchedTokenException` instead of `SPEC_FAIL`. These propagate
+   * as recognition exceptions rather than `SPEC_FAIL`:
+   *
+   * - **With progress** (lexer advanced past iteration start): the body
+   *   partially matched → real error → re-throw for recovery in
+   *   `invokeRuleCatch` or error reporting upstream.
+   * - **No progress**: body couldn't start → stop iterating. Errors from
+   *   the recognition exception (e.g., `NoViableAltException` from
+   *   ambiguous OR) are preserved in `_errors` for diagnostics.
+   */
   manyInternalLogic<OUT>(
     this: MixedInParser,
     prodOccurrence: number,
@@ -1057,17 +1096,32 @@ export class RecognizerEngine {
 
   /**
    * Iterates alternatives using zero-cost speculative backtracking.
-   * Modelled after @jesscss/parser's OR():
+   * Modelled after @jesscss/parser's OR().
    *
-   * For each alt in order:
-   * - GATE fails → skip
-   * - Otherwise → speculate: save state, set IS_SPECULATING=true, try ALT
-   * - On success → return immediately (first success wins)
-   * - On SPEC_FAIL → restore state, try next alt
+   * ## Three execution paths (tried in order):
    *
-   * If all alts fail: throw SPEC_FAIL (if speculating) or NoViableAltException.
-   * No bestProgress tracking — the speculative engine handles ambiguity by
-   * declaration order, and deep backtracking unwinds partial matches cleanly.
+   * **1. Fast-dispatch path** — `_orFastMaps[mapKey][la1.tokenTypeIdx]` gives
+   * the alt index observed to match this LA(1) token on a previous call.
+   * One property lookup → speculative ALT call. Gated-prefix alts are
+   * checked separately via `_orGatedPrefixAlts`.
+   *
+   * **2. Slow speculative path** — For each alt in declaration order:
+   * GATE fails → skip; otherwise save state, set `IS_SPECULATING=true`,
+   * try ALT. On success → return (first success wins). On SPEC_FAIL →
+   * restore state (pos + CST + errors), try next. Failed alts with
+   * progress populate the fast-dispatch map for future calls.
+   *
+   * **3. Committed re-run** — When all speculative alts fail but the
+   * fast-dispatch map has an entry for the current token (populated during
+   * step 2), re-run that alt with `IS_SPECULATING=false`. This lets
+   * `consumeInternal` throw real `MismatchedTokenException`, enabling:
+   *   - **Recovery** (if `recoveryEnabled`): single-token insertion/deletion
+   *     in `consumeInternalRecovery`, or reSync in `invokeRuleCatch`.
+   *   - **Error propagation** (if recovery disabled): exception bubbles to
+   *     the enclosing rule's `invokeRuleCatch` for error reporting.
+   * For ambiguous entries (-1), raises `NoViableAltException` directly.
+   * MANY's catch handler uses progress to decide whether to stop iterating
+   * (no progress) or re-throw (progress made).
    */
   orInternal<T>(
     this: MixedInParser,
@@ -1449,6 +1503,22 @@ export class RecognizerEngine {
     throw e;
   }
 
+  /**
+   * Matches the next token against `tokType`. Three outcomes:
+   *
+   * 1. **Match**: advance position, add to CST, return the token.
+   *    If `_earlyExitLookahead` is set, throws `FIRST_TOKEN_MATCH`
+   *    immediately (used by `makeSpecLookahead` for LL(1) peek).
+   *
+   * 2. **Mismatch + speculating** (`IS_SPECULATING=true`): throws the
+   *    `SPEC_FAIL` Symbol — zero allocation cost, no stack trace.
+   *    Caught by OR/MANY/OPTION for backtracking.
+   *
+   * 3. **Mismatch + committed** (`IS_SPECULATING=false`): delegates to
+   *    `consumeInternalError` → `consumeInternalRecovery` for
+   *    single-token insertion/deletion (if `recoveryEnabled`), or
+   *    throws `MismatchedTokenException` for upstream handling.
+   */
   consumeInternal(
     this: MixedInParser,
     tokType: TokenType,
@@ -1463,8 +1533,6 @@ export class RecognizerEngine {
 
     if (this.tokenMatcher(nextToken, tokType) === true) {
       this.consumeToken();
-      // FIRST_TOKEN_MATCH: abort speculative lookahead after the first
-      // successful CONSUME — throw directly without recovery path.
       if (this._earlyExitLookahead) throw FIRST_TOKEN_MATCH;
       this.cstPostTerminal(label, nextToken);
       return nextToken;
@@ -1519,14 +1587,22 @@ export class RecognizerEngine {
     );
   }
 
+  /**
+   * Attempts single-token insertion or deletion recovery for a failed
+   * CONSUME. Only runs when `recoveryEnabled=true` AND not backtracking
+   * (`IS_SPECULATING=false`). If recovery fails, re-throws the original
+   * `MismatchedTokenException` for reSync handling in `invokeRuleCatch`.
+   *
+   * This is the entry point for Chevrotain's per-token error recovery.
+   * OR's committed re-run temporarily clears `IS_SPECULATING` specifically
+   * so this method can fire.
+   */
   consumeInternalRecovery(
     this: MixedInParser,
     tokType: TokenType,
     idx: number,
     eFromConsumption: Error,
   ): IToken {
-    // no recovery allowed during backtracking, otherwise backtracking may recover invalid syntax and accept it
-    // but the original syntax could have been parsed successfully without any backtracking + recovery
     if (
       this.recoveryEnabled &&
       // TODO: more robust checking of the exception type. Perhaps Typescript extending expressions?

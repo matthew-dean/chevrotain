@@ -302,38 +302,31 @@ whether `{` follows the value (indicating a nested rule, not a declaration).
 This is NOT an engine issue — both @jesscss/parser and our Chevrotain fork
 handle backtracking correctly; the grammar just doesn't disambiguate.
 
-## Known Limitation: Error Recovery in OR (11 tests)
+## ~~Known Limitation: Error Recovery in OR~~ — FIXED
 
-11 Chevrotain error recovery tests fail because the bestProgress removal
-means OR no longer re-runs a failed alt committed. Error recovery
-(single-token insertion, single-token deletion, resync) requires a
-committed execution path where CONSUME throws MismatchedTokenException
-(not SPEC_FAIL) so recovery logic can kick in.
+All 11 recovery tests now pass (796/796). The fix uses three mechanisms:
 
-@jesscss/parser solves this by committing the LAST alt (no speculation
-on the final fallback). Chevrotain's recovery model is more complex —
-per-rule resync, in-rule recovery — and the last-alt-committed approach
-caused additional failures when combined with fast-dispatch and
-gated-prefix tracking.
+1. **OR committed re-run**: when all speculative alts fail but the
+   fast-dispatch map identifies which alt's first token matched (LL(1)
+   lookahead populated during speculation), re-run that alt with
+   `IS_SPECULATING=false`. This lets `consumeInternal` throw real
+   `MismatchedTokenException`, enabling single-token insertion/deletion
+   recovery. For ambiguous entries (-1), raises `NoViableAltException`.
 
-**Fix (future work):** Reconcile last-alt-committed with the fast-dispatch
-optimization layer. When `recoveryEnabled === true` AND not speculating,
-the last OR alt should run committed so recovery triggers naturally.
-When `recoveryEnabled === false` (the common case for EmbeddedActionsParser
-and the Jess css-parser), all alts remain speculative.
+2. **MANY recognition exception handling**: MANY now catches recognition
+   exceptions (from OR's committed re-run) alongside `SPEC_FAIL`.
+   No-progress exceptions stop the loop; progress exceptions propagate
+   for recovery or error reporting in `invokeRuleCatch`.
 
-The 11 failing tests are:
-
-- 6 SQL DDL error recovery tests (token insertion, deletion, resync)
-- 4 CST recovery tests (re-sync recovery, re-sync recovery nested)
-- 1 infinite loop detection test
-
-All involve `recoveryEnabled: true` parsers. No `EmbeddedActionsParser`
-tests are affected.
+3. **CST/error save-restore in OR slow path**: speculative alts that
+   partially match add orphan CST nodes via `cstPostTerminal`. These
+   are now cleaned up after each failed speculative alt via
+   `saveCstTop`/`restoreCstTop`, preventing CST corruption. This also
+   fixed 9 additional Jess css-parser tests (78/97, up from 69/97).
 
 ## What Final Success Looks Like
 
-After all 4 steps:
+Current state:
 
 1. The backtracking model matches @jesscss/parser: first-success-wins OR,
    full-state-save MANY, deep error propagation/catch
@@ -341,5 +334,7 @@ After all 4 steps:
    on TOP of the correct backtracking, giving LL(1) grammars committed
    dispatch performance
 3. Auto-occurrence counting (`_dslCounter`) eliminates numbered variants
-4. All tests pass, performance at or above current levels
-5. Jess css-parser can parse nested CSS selectors correctly
+4. **All 796 tests pass**, error recovery fully functional
+5. JSON benchmark ~8,700 ops/sec (vs 14,776 baseline — gap is spread
+   across mixin prototype chain overhead, not concentrated in OR)
+6. Jess css-parser can parse nested CSS selectors correctly

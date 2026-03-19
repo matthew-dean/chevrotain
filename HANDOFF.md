@@ -40,10 +40,9 @@ tracked in `RD_ENGINE_PLAN.md` (stages 0-8) and `BACKTRACKING_FIX.md`.
 
 ### Current test status:
 
-- **Chevrotain**: 785 passing, 11 failing (all error recovery tests —
-  documented in BACKTRACKING_FIX.md as known limitation)
-- **Jess css-parser**: 69/97 passing (28 failures are pre-existing from
-  Chevrotain migration, not from our changes)
+- **Chevrotain**: 796 passing, 0 failing (all 11 recovery tests fixed)
+- **Jess css-parser**: 78/97 passing (19 failures, down from 28 — CST
+  save/restore fix in OR slow path resolved 9 additional tests)
 - **Jess nested-pseudo**: 5/5 passing
 
 ### Current benchmark:
@@ -113,17 +112,25 @@ RIGHT design, but the ROI is modest. Higher-impact targets:
 - Rule wrapper overhead (invokeRuleWithTryCst at 6%)
 - Function call overhead (each DSL call is a prototype method lookup)
 
-### 2. 11 Failing recovery tests
+### 2. ~~11 Failing recovery tests~~ — FIXED
 
-**Root cause**: OR no longer re-runs a failed alt committed (bestProgress
-removed). Error recovery requires a committed execution path where CONSUME
-throws MismatchedTokenException (not SPEC_FAIL). @jesscss/parser solves this
-by committing the LAST alt — but our attempt broke other tests.
+All 11 recovery tests now pass. The fix uses three interconnected mechanisms:
 
-**Fix approach**: When `recoveryEnabled === true` AND not speculating, the
-last OR alt should run committed. When `recoveryEnabled === false` (the
-common case), all alts remain speculative. This is documented in
-BACKTRACKING_FIX.md.
+1. **OR committed re-run**: when all speculative alts fail but the
+   fast-dispatch map identifies which alt's first token matched (LL(1)),
+   re-run that alt with `IS_SPECULATING=false`. CONSUME then throws real
+   `MismatchedTokenException`, enabling single-token recovery. For
+   ambiguous entries (-1), raises `NoViableAltException` directly.
+
+2. **MANY recognition exception handling**: MANY catches recognition
+   exceptions (from OR's committed re-run) in addition to SPEC_FAIL.
+   No-progress exceptions stop the loop; progress exceptions propagate
+   for recovery or error reporting upstream.
+
+3. **CST/error save-restore in OR slow path**: speculative alts that
+   partially match add orphan CST nodes. These are now properly cleaned
+   up after each failed speculative alt, preventing CST corruption.
+   Also fixed 9 additional Jess css-parser tests (78/97 from 69/97).
 
 ### 3. Jess css-parser — Option 1 greedy fallback
 
@@ -238,14 +245,14 @@ Differences from @jesscss/parser (intentional — KEEP these):
 - GATED_OFFSET encoding for adaptive gate checks
 - Auto-occurrence counter management (\_dslCounter, \_orCounterDeltas)
 
-Differences from @jesscss/parser (bugs/gaps — FIX these):
+Differences from @jesscss/parser (intentional design divergence):
 
-- Our OR catches `SPEC_FAIL || isRecognitionException(e)` but @jesscss
-  catches `SPEC_FAIL || e instanceof ParseError`. Recognition exceptions
-  from committed sub-paths should be caught the same way.
 - @jesscss/parser commits the LAST alt (no speculation). Our fork speculates
-  ALL alts including the last. This breaks error recovery for
-  `recoveryEnabled: true` parsers (the 11 failing tests).
+  ALL alts, then uses a **committed re-run** via the fast-dispatch map when
+  all alts fail. This is more general than last-alt-commits because it
+  identifies the LL(1)-correct alt (not just the last one) and works for
+  both recovery-enabled and recovery-disabled parsers. For ambiguous
+  entries (-1), raises NoViableAltException directly.
 
 **MANY(defOrOpts)** — Our fork now matches @jesscss/parser:
 
@@ -289,10 +296,10 @@ We don't copy ruleStack — it's self-correcting via `ruleFinallyStateUpdate`.
 
 ### What @jesscss/parser does that we should still port
 
-1. **Last alt committed in OR**: @jesscss/parser line 574-576 runs the last
-   alt WITHOUT setting `speculating = true`. This lets error recovery work
-   for the fallback case. Our fork speculates all alts — the 11 recovery
-   test failures are from this gap.
+1. ~~**Last alt committed in OR**~~: FIXED via committed re-run mechanism
+   (see section 2 above). Our approach is more general — uses the
+   fast-dispatch map to identify the LL(1)-correct alt rather than
+   always committing the last one.
 
 2. **`tryConsume()` for separators**: @jesscss/parser has a `tryConsume()`
    method that returns `undefined` on mismatch instead of throwing. Used in
