@@ -4072,16 +4072,22 @@ export class Parser {
   }
 
   cstInvocationStateUpdate(fullRuleName: string): void {
+    // Skip CST building during speculation — nodes would be discarded
+    // on SPEC_FAIL anyway. Avoids allocation of CstNode objects,
+    // children arrays, and location objects.
+    if (this.IS_SPECULATING) return;
     const cstNode = createCstNode(fullRuleName);
     this.setInitialNodeLocation(cstNode);
     this.CST_STACK.push(cstNode);
   }
 
   cstFinallyStateUpdate(): void {
+    if (this.IS_SPECULATING) return;
     this.CST_STACK.pop();
   }
 
   cstPostRuleFull(ruleCstNode: CstNode): void {
+    if (this.IS_SPECULATING) return;
     const prevToken = this.LA(0) as Required<CstNodeLocation>;
     const loc = ruleCstNode.location as Required<CstNodeLocation>;
 
@@ -4097,6 +4103,7 @@ export class Parser {
   }
 
   cstPostRuleOnlyOffset(ruleCstNode: CstNode): void {
+    if (this.IS_SPECULATING) return;
     const prevToken = this.LA(0);
     const loc = ruleCstNode.location!;
 
@@ -4108,12 +4115,14 @@ export class Parser {
   }
 
   cstPostTerminal(key: string, consumedToken: IToken): void {
+    if (this.IS_SPECULATING) return;
     const rootCst = this.CST_STACK[this.CST_STACK.length - 1];
     addTerminalToCst(rootCst, consumedToken, key);
     this.setNodeLocationFromToken(rootCst.location!, <any>consumedToken);
   }
 
   cstPostNonTerminal(ruleCstResult: CstNode, ruleName: string): void {
+    if (this.IS_SPECULATING) return;
     const preCstNode = this.CST_STACK[this.CST_STACK.length - 1];
     addNoneTerminalToCst(preCstNode, ruleName, ruleCstResult);
     this.setNodeLocationFromNode(preCstNode.location!, ruleCstResult.location!);
