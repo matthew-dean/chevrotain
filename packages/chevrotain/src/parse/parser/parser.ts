@@ -315,6 +315,44 @@ export const SPEC_FAIL = Symbol("SPEC_FAIL");
 /** Sentinel returned by OR dispatch closures when no alt matched. */
 const OR_NO_MATCH = Symbol("OR_NO_MATCH");
 
+/**
+ * For LL(1) no-predicate OR sites: builds a tokenTypeIdx→altIdx map so the
+ * dispatch closure can do a single array lookup instead of an indirect
+ * laFunc.call(). V8 cannot inline laFunc through Function.prototype.call, so
+ * the indirect call shows up as a separate hot function in profiles. Inlining
+ * the map lookup eliminates that call frame entirely.
+ *
+ * Returns null when any path has length > 1 (LL(k>1) grammar) — the caller
+ * falls back to the laFunc approach.
+ */
+function buildOrChoiceMap(
+  paths: TokenType[][][],
+): Record<number, number> | null {
+  for (const altPaths of paths) {
+    for (const path of altPaths) {
+      if (path.length !== 1) return null;
+    }
+  }
+  const map: Record<number, number> = Object.create(null);
+  for (let altIdx = 0; altIdx < paths.length; altIdx++) {
+    for (const path of paths[altIdx]) {
+      const tok = path[0];
+      const tidx = tok.tokenTypeIdx;
+      if (tidx !== undefined && !(tidx in map)) {
+        map[tidx] = altIdx;
+      }
+      if (tok.categoryMatches !== undefined) {
+        for (const catIdx of tok.categoryMatches) {
+          if (!Object.hasOwn(map, catIdx)) {
+            map[catIdx] = altIdx;
+          }
+        }
+      }
+    }
+  }
+  return map;
+}
+
 // Entries >= GATED_OFFSET encode "altIdx + GATED_OFFSET" meaning the alt is
 // correct but preceding gated alts must be checked first. Decoding is just
 // `entry - GATED_OFFSET`. For gate-free grammars all entries are 0-255 so
@@ -727,49 +765,85 @@ export class Parser {
         const prodMaxLA = (node as any).maxLookahead ?? this.maxLookahead;
         try {
           const paths = getLookaheadPathsForOr(node.idx, rule, prodMaxLA);
-          const tmatcher = this.tokenMatcher;
-          const laFunc = buildAlternativesLookAheadFunc(
-            paths,
-            node.hasPredicates,
-            tmatcher,
-            this.dynamicTokensEnabled,
-          );
           // Capture counter management as closure variables so the hot
           // path avoids _orAltCounterStarts[mapKey] and _orCounterDeltas[mapKey]
           // property lookups. These values are known statically from recording.
           const altStarts = this._orAltCounterStarts[mapKey];
           const counterDelta = this._orCounterDeltas[mapKey];
-          if (altStarts !== undefined && counterDelta !== undefined) {
-            // Full dispatch closure: lookahead + counter + alt call.
-            // Captures altStarts and counterDelta as closure variables,
-            // eliminating _orAltCounterStarts and _orCounterDeltas
-            // property lookups on the hot path.
-            this._orLookahead[mapKey] = function orDispatch(
-              this: Parser,
-              alts: IOrAlt<any>[],
-            ): any {
-              const altIdx = laFunc.call(this, alts);
-              if (altIdx !== undefined) {
-                const saved = this._dslCounter;
-                this._dslCounter = saved + altStarts[altIdx];
-                const r = alts[altIdx].ALT.call(this);
-                this._dslCounter = saved + counterDelta;
-                return r;
-              }
-              return OR_NO_MATCH;
-            };
+          // For LL(1) no-predicate grammars, inline the token→altIdx map
+          // directly into the dispatch closure — eliminates the indirect
+          // laFunc.call() overhead (V8 cannot inline through Function.prototype.call).
+          const choiceToAlt =
+            !node.hasPredicates && !this.dynamicTokensEnabled
+              ? buildOrChoiceMap(paths)
+              : null;
+          if (choiceToAlt !== null) {
+            // LL(1) inline dispatch: single map lookup, no function call.
+            if (altStarts !== undefined && counterDelta !== undefined) {
+              this._orLookahead[mapKey] = function orDispatchLL1(
+                this: Parser,
+                alts: IOrAlt<any>[],
+              ): any {
+                const altIdx =
+                  choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
+                if (altIdx !== undefined) {
+                  const saved = this._dslCounter;
+                  this._dslCounter = saved + altStarts[altIdx];
+                  const r = alts[altIdx].ALT.call(this);
+                  this._dslCounter = saved + counterDelta;
+                  return r;
+                }
+                return OR_NO_MATCH;
+              };
+            } else {
+              this._orLookahead[mapKey] = function orDispatchLL1Simple(
+                this: Parser,
+                alts: IOrAlt<any>[],
+              ): any {
+                const altIdx =
+                  choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
+                if (altIdx !== undefined) {
+                  return alts[altIdx].ALT.call(this);
+                }
+                return OR_NO_MATCH;
+              };
+            }
           } else {
-            // No counter management needed — wrap laFunc to call ALT.
-            this._orLookahead[mapKey] = function orDispatchSimple(
-              this: Parser,
-              alts: IOrAlt<any>[],
-            ): any {
-              const altIdx = laFunc.call(this, alts);
-              if (altIdx !== undefined) {
-                return alts[altIdx].ALT.call(this);
-              }
-              return OR_NO_MATCH;
-            };
+            // LL(k>1) or has predicates: use laFunc via indirect call.
+            const tmatcher = this.tokenMatcher;
+            const laFunc = buildAlternativesLookAheadFunc(
+              paths,
+              node.hasPredicates,
+              tmatcher,
+              this.dynamicTokensEnabled,
+            );
+            if (altStarts !== undefined && counterDelta !== undefined) {
+              this._orLookahead[mapKey] = function orDispatch(
+                this: Parser,
+                alts: IOrAlt<any>[],
+              ): any {
+                const altIdx = laFunc.call(this, alts);
+                if (altIdx !== undefined) {
+                  const saved = this._dslCounter;
+                  this._dslCounter = saved + altStarts[altIdx];
+                  const r = alts[altIdx].ALT.call(this);
+                  this._dslCounter = saved + counterDelta;
+                  return r;
+                }
+                return OR_NO_MATCH;
+              };
+            } else {
+              this._orLookahead[mapKey] = function orDispatchSimple(
+                this: Parser,
+                alts: IOrAlt<any>[],
+              ): any {
+                const altIdx = laFunc.call(this, alts);
+                if (altIdx !== undefined) {
+                  return alts[altIdx].ALT.call(this);
+                }
+                return OR_NO_MATCH;
+              };
+            }
           }
         } catch (_e) {
           // GAST walk failed — fall back to speculative dispatch.
@@ -891,43 +965,79 @@ export class Parser {
 
       const prodMaxLA = (targetNode as any).maxLookahead ?? this.maxLookahead;
       const paths = getLookaheadPathsForOr(occurrence, rule, prodMaxLA);
-      const tmatcher = this.tokenMatcher;
-      const laFunc = buildAlternativesLookAheadFunc(
-        paths,
-        targetNode.hasPredicates,
-        tmatcher,
-        this.dynamicTokensEnabled,
-      );
 
       // Build dispatch closure with counter management.
       const altStarts = this._orAltCounterStarts[mapKey];
       const counterDelta = this._orCounterDeltas[mapKey];
-      if (altStarts !== undefined && counterDelta !== undefined) {
-        this._orLookahead[mapKey] = function orDispatch(
-          this: Parser,
-          orAlts: IOrAlt<any>[],
-        ): any {
-          const altIdx = laFunc.call(this, orAlts);
-          if (altIdx !== undefined) {
-            const saved = this._dslCounter;
-            this._dslCounter = saved + altStarts[altIdx];
-            const r = orAlts[altIdx].ALT.call(this);
-            this._dslCounter = saved + counterDelta;
-            return r;
-          }
-          return OR_NO_MATCH;
-        };
+      const choiceToAlt =
+        !targetNode.hasPredicates && !this.dynamicTokensEnabled
+          ? buildOrChoiceMap(paths)
+          : null;
+      if (choiceToAlt !== null) {
+        if (altStarts !== undefined && counterDelta !== undefined) {
+          this._orLookahead[mapKey] = function orDispatchLL1(
+            this: Parser,
+            orAlts: IOrAlt<any>[],
+          ): any {
+            const altIdx =
+              choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
+            if (altIdx !== undefined) {
+              const saved = this._dslCounter;
+              this._dslCounter = saved + altStarts[altIdx];
+              const r = orAlts[altIdx].ALT.call(this);
+              this._dslCounter = saved + counterDelta;
+              return r;
+            }
+            return OR_NO_MATCH;
+          };
+        } else {
+          this._orLookahead[mapKey] = function orDispatchLL1Simple(
+            this: Parser,
+            orAlts: IOrAlt<any>[],
+          ): any {
+            const altIdx =
+              choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
+            if (altIdx !== undefined) {
+              return orAlts[altIdx].ALT.call(this);
+            }
+            return OR_NO_MATCH;
+          };
+        }
       } else {
-        this._orLookahead[mapKey] = function orDispatchSimple(
-          this: Parser,
-          orAlts: IOrAlt<any>[],
-        ): any {
-          const altIdx = laFunc.call(this, orAlts);
-          if (altIdx !== undefined) {
-            return orAlts[altIdx].ALT.call(this);
-          }
-          return OR_NO_MATCH;
-        };
+        const tmatcher = this.tokenMatcher;
+        const laFunc = buildAlternativesLookAheadFunc(
+          paths,
+          targetNode.hasPredicates,
+          tmatcher,
+          this.dynamicTokensEnabled,
+        );
+        if (altStarts !== undefined && counterDelta !== undefined) {
+          this._orLookahead[mapKey] = function orDispatch(
+            this: Parser,
+            orAlts: IOrAlt<any>[],
+          ): any {
+            const altIdx = laFunc.call(this, orAlts);
+            if (altIdx !== undefined) {
+              const saved = this._dslCounter;
+              this._dslCounter = saved + altStarts[altIdx];
+              const r = orAlts[altIdx].ALT.call(this);
+              this._dslCounter = saved + counterDelta;
+              return r;
+            }
+            return OR_NO_MATCH;
+          };
+        } else {
+          this._orLookahead[mapKey] = function orDispatchSimple(
+            this: Parser,
+            orAlts: IOrAlt<any>[],
+          ): any {
+            const altIdx = laFunc.call(this, orAlts);
+            if (altIdx !== undefined) {
+              return orAlts[altIdx].ALT.call(this);
+            }
+            return OR_NO_MATCH;
+          };
+        }
       }
     } catch (_e) {
       // GAST walk failed — stay on speculative path.

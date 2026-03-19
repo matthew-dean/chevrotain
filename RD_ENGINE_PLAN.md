@@ -81,17 +81,18 @@ exactly. The `Lexer` is improved but its interface is unchanged.
 
 ## Remaining Performance TODOs
 
+- ✅ **Inline `choiceToAlt` into OR dispatch**: eliminated `laFunc.call()` for
+  LL(1) no-predicate grammars. V8 cannot inline through `Function.prototype.call`;
+  map is now a closure variable in `orDispatchLL1`. JSON +9%, CSS +5%. 78% of
+  baseline warm (was 72%).
 - ⬜ **Eliminate `_dslCounter` from hot paths**: when performSelfAnalysis was
   called, counter deltas are known statically. Bake them into the closure or
   pre-compute a static occurrence mapping. Saves 4-5 property accesses per OR.
 - ⬜ **Remove OPTION try/catch**: the committed OPTION path still has save/restore
-  - try/catch for correctness. If LL(k) guarantees are strengthened (deeper GAST
-    analysis), the try/catch can be removed.
+  try/catch for correctness. If LL(k) guarantees are strengthened (deeper GAST
+  analysis), the try/catch can be removed.
 - ⬜ **Specialize consumeInternal for committed path**: remove `_earlyExitLookahead`
   and `IS_SPECULATING` checks (2 property reads + 2 branches per CONSUME).
-- ⬜ **Lazy-build OR closure from first speculative pass**: when performSelfAnalysis
-  is not called, build the LL(1) closure from fast-map observations after the
-  first parse. Progressive optimization without GAST.
 - ⬜ **Single-dispatch MANY/OPTION closures**: like OR, replace map lookup with
   a single cached closure per MANY/OPTION site. Currently uses
   `_prodLookahead[laKey]` lookup per call.
