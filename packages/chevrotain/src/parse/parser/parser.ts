@@ -3437,6 +3437,18 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
+    // functions with try/catch are not inlined by V8 across call sites.
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
@@ -3607,6 +3619,18 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
+    // functions with try/catch are not inlined by V8 across call sites.
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
@@ -3617,6 +3641,18 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
+    // functions with try/catch are not inlined by V8 across call sites.
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
@@ -3627,6 +3663,18 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
+    // functions with try/catch are not inlined by V8 across call sites.
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
@@ -3637,6 +3685,18 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
+    // functions with try/catch are not inlined by V8 across call sites.
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
@@ -3647,6 +3707,18 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
+    // functions with try/catch are not inlined by V8 across call sites.
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
@@ -3657,6 +3729,18 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
+    // functions with try/catch are not inlined by V8 across call sites.
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
@@ -3667,6 +3751,18 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
+    // functions with try/catch are not inlined by V8 across call sites.
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
@@ -3677,6 +3773,18 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
+    // functions with try/catch are not inlined by V8 across call sites.
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
@@ -3687,6 +3795,18 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
+    // functions with try/catch are not inlined by V8 across call sites.
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
@@ -3697,6 +3817,18 @@ export class Parser {
     const idx = this._dslCounter++;
     if (this.RECORDING_PHASE)
       return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
+    // functions with try/catch are not inlined by V8 across call sites.
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
