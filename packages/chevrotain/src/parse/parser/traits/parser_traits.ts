@@ -8,8 +8,6 @@ import {
   Parser as ParserConstructorImpel,
 } from "../parser.js";
 import * as defs from "@chevrotain/types";
-import { GastRecorder } from "./gast_recorder.js";
-
 /**
  * This Type combines all the Parser traits.
  * It is used in all traits in the "this type assertion"
@@ -26,8 +24,7 @@ export type MixedInParser = ParserConstructorImpel &
   RecognizerApi &
   RecognizerEngine &
   Recoverable &
-  TreeBuilder &
-  GastRecorder;
+  TreeBuilder;
 
 interface MixedInCstParserConstructor {
   new (
