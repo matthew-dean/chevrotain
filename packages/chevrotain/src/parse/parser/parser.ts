@@ -2160,20 +2160,17 @@ export class Parser {
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
     occurrence: number,
   ): T {
-    const alts = Array.isArray(altsOrOpts) ? altsOrOpts : altsOrOpts.DEF;
-    const errMsg = Array.isArray(altsOrOpts)
-      ? undefined
-      : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
+    const isArray = Array.isArray(altsOrOpts);
+    const alts = isArray
+      ? (altsOrOpts as IOrAlt<any>[])
+      : (altsOrOpts as OrMethodOpts<unknown>).DEF;
     const wasSpeculating = this.IS_SPECULATING;
     const mapKey = this.currRuleShortName | occurrence;
-    const la1 = this.LA_FAST(1);
-    const la1TypeIdx = la1.tokenTypeIdx;
 
     // -----------------------------------------------------------------------
     // Primary path: single precomputed LL(k) closure. Built from GAST
     // during performSelfAnalysis, or lazily from the first speculative pass.
-    // One function call → altIdx → committed dispatch. Minimal overhead:
-    // ~4 property reads vs upstream's ~4 (parity).
+    // One function call → committed dispatch. ~5 property reads total.
     // -----------------------------------------------------------------------
     const orDispatch = this._orLookahead[mapKey];
     if (orDispatch !== undefined && !wasSpeculating) {
@@ -2183,6 +2180,10 @@ export class Parser {
       }
       // No alt matched — fall through to slow path for error handling.
     }
+
+    // LA(1) needed by the slow path and fast-map dispatch below.
+    const la1 = this.LA_FAST(1);
+    const la1TypeIdx = la1.tokenTypeIdx;
 
     // Save outer OR's gated-prefix tracking state so nested ORs (via
     // SUBRULEs) don't corrupt it.
@@ -2553,12 +2554,18 @@ export class Parser {
         this.IS_SPECULATING = false;
         this.restoreCstTop(savedCst);
         this._errors.length = savedErrors;
-        this.raiseNoAltException(occurrence, errMsg);
+        const em = isArray
+          ? undefined
+          : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
+        this.raiseNoAltException(occurrence, em);
         // raiseNoAltException throws — unreachable.
       }
       throw SPEC_FAIL;
     }
-    this.raiseNoAltException(occurrence, errMsg);
+    const em = isArray
+      ? undefined
+      : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
+    this.raiseNoAltException(occurrence, em);
   }
 
   ruleFinallyStateUpdate(): void {
