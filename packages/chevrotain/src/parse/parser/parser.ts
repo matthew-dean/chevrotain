@@ -326,6 +326,7 @@ export const GATED_OFFSET = 256;
  */
 function addOrFastMapEntry(
   orFastMaps: Record<number, Record<number, number>>,
+  orFastMapAltsRef: Record<number, IOrAlt<any>[]>,
   mapKey: number,
   tokenTypeIdx: number,
   altIdx: number,
@@ -335,6 +336,7 @@ function addOrFastMapEntry(
   if (map === undefined) {
     map = Object.create(null);
     orFastMaps[mapKey] = map;
+    orFastMapAltsRef[mapKey] = alts;
   }
   // Check if any preceding alt has a GATE.
   let hasGatedPredecessor = false;
@@ -851,6 +853,14 @@ export class Parser {
    */
   _orFastMaps!: Record<number, Record<number, number>>;
   /**
+   * The alts array reference that was used to populate each OR site's fast
+   * map. When a caller passes a different alts array (dynamic alternatives,
+   * e.g., CSS `main` called from different contexts), the cached altIdx
+   * may point to wrong/nonexistent alts. We detect this by identity check
+   * and skip the fast path.
+   */
+  _orFastMapAltsRef!: Record<number, IOrAlt<any>[]>;
+  /**
    * Per-OR set of alt indices whose first-token set is gate-dependent
    * (they have a gated OPTION/MANY/AT_LEAST_ONE before their first CONSUME).
    * Keyed by the same mapKey as _orFastMaps. These alts must always be
@@ -920,6 +930,7 @@ export class Parser {
     this._isInTrueBacktrack = false;
     this._earlyExitLookahead = false;
     this._orFastMaps = Object.create(null);
+    this._orFastMapAltsRef = Object.create(null);
     this._orGatedPrefixAlts = Object.create(null);
     this._orCounterDeltas = Object.create(null);
     this._orAltCounterStarts = Object.create(null);
@@ -1840,7 +1851,14 @@ export class Parser {
     const la1TypeIdx = la1.tokenTypeIdx;
     const fastMap = this._orFastMaps[mapKey];
     const gatedPrefixAlts = this._orGatedPrefixAlts[mapKey];
-    if (fastMap !== undefined || gatedPrefixAlts !== undefined) {
+    // Dynamic alternatives: if this OR site was cached with a different alts
+    // array (e.g., CSS `main` called from different contexts), the cached
+    // altIdx may point to wrong/nonexistent alts. Skip the fast path.
+    const cachedAltsRef = this._orFastMapAltsRef[mapKey];
+    if (
+      (fastMap !== undefined || gatedPrefixAlts !== undefined) &&
+      (cachedAltsRef === undefined || cachedAltsRef === alts)
+    ) {
       // Gated-prefix alts have higher priority than fast-map entries.
       // They must ALWAYS be tried first because their first-token set is
       // gate-dependent — the gate may open/close between calls.
@@ -2045,7 +2063,14 @@ export class Parser {
             if (gpa.length > 1) gpa.sort((a, b) => a - b);
           }
         } else {
-          addOrFastMapEntry(this._orFastMaps, mapKey, la1TypeIdx, i, alts);
+          addOrFastMapEntry(
+            this._orFastMaps,
+            this._orFastMapAltsRef,
+            mapKey,
+            la1TypeIdx,
+            i,
+            alts,
+          );
           // Record committability: if no OPTION/MANY/AT_LEAST_ONE fired
           // before the first CONSUME, committed dispatch is safe.
           if (!this._orAltHasAnyPrefix) {
@@ -2086,7 +2111,14 @@ export class Parser {
           // tokenTypeIdx, the entry becomes -1 (ambiguous).
           const progress = this.exportLexerState() - startLexPos;
           if (!this._orAltHasGatedPrefix && progress > 0) {
-            addOrFastMapEntry(this._orFastMaps, mapKey, la1TypeIdx, i, alts);
+            addOrFastMapEntry(
+              this._orFastMaps,
+              this._orFastMapAltsRef,
+              mapKey,
+              la1TypeIdx,
+              i,
+              alts,
+            );
           }
           this.importLexerState(startLexPos);
           // Restore CST/errors so next alt starts with clean state.
