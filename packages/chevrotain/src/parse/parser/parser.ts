@@ -935,6 +935,55 @@ export class Parser {
   }
 
   /**
+   * Lazily build a MANY/OPTION/AT_LEAST_ONE lookahead closure after the
+   * first speculative pass succeeds. Same pattern as lazyBuildOrClosure.
+   */
+  private lazyBuildProdClosure(
+    laKey: number,
+    occurrence: number,
+    _keyIdx: number,
+    prodType: PROD_TYPE,
+  ): void {
+    try {
+      this.ensureGastProductionsCachePopulated();
+      const ruleName = this.shortRuleNameToFull[this.currRuleShortName];
+      const rule = this.gastProductionsCache[ruleName];
+      if (rule === undefined) return;
+
+      const prodMaxLA = this.maxLookahead;
+      const paths = getLookaheadPathsForOptionalProd(
+        occurrence,
+        rule,
+        prodType,
+        prodMaxLA,
+      );
+      const insidePaths = paths[0];
+      const afterPaths = paths[1];
+      if (insidePaths === undefined || insidePaths.length === 0) return;
+      // Skip if inside/after overlap at first token.
+      if (afterPaths !== undefined && afterPaths.length > 0) {
+        const insideFirst = new Set(
+          insidePaths
+            .filter((p) => p.length > 0)
+            .map((p) => p[0]?.tokenTypeIdx),
+        );
+        const hasOverlap = afterPaths.some(
+          (p) => p.length > 0 && insideFirst.has(p[0]?.tokenTypeIdx),
+        );
+        if (hasOverlap) return;
+      }
+      const tmatcher = this.tokenMatcher;
+      this._prodLookahead[laKey] = buildSingleAlternativeLookaheadFunction(
+        insidePaths,
+        tmatcher,
+        this.dynamicTokensEnabled,
+      );
+    } catch (_e) {
+      // GAST walk failed — stay on speculative path.
+    }
+  }
+
+  /**
    * Lazily populates gastProductionsCache when GAST-dependent APIs
    * (getSerializedGastProductions, getGAstProductions) are called without
    * recoveryEnabled. Preserves backward compatibility — these APIs work
@@ -1524,6 +1573,18 @@ export class Parser {
         errors.length = startErrors;
         return undefined;
       }
+      // Lazy closure building for OPTION.
+      if (occurrence !== undefined) {
+        const optLaKey = this.currRuleShortName | OPTION_IDX | occurrence;
+        if (this._prodLookahead[optLaKey] === undefined) {
+          this.lazyBuildProdClosure(
+            optLaKey,
+            occurrence,
+            OPTION_IDX,
+            PROD_TYPE.OPTION,
+          );
+        }
+      }
       return result;
     } catch (e) {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
@@ -1881,6 +1942,17 @@ export class Parser {
 
         ranAtLeastOnce = true;
       }
+    }
+
+    // Lazy closure building: after the first speculative MANY succeeds,
+    // build the LL(k) lookahead closure for future committed dispatch.
+    if (ranAtLeastOnce && laSet === undefined) {
+      this.lazyBuildProdClosure(
+        laKey,
+        prodOccurrence,
+        MANY_IDX,
+        PROD_TYPE.REPETITION,
+      );
     }
 
     // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
