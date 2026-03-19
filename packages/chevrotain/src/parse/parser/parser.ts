@@ -312,6 +312,8 @@ export function attemptInRepetitionRecovery(
  * BACKTRACK() alternative costs nothing in GC pressure.
  */
 export const SPEC_FAIL = Symbol("SPEC_FAIL");
+/** Sentinel returned by OR dispatch closures when no alt matched. */
+const OR_NO_MATCH = Symbol("OR_NO_MATCH");
 
 // Entries >= GATED_OFFSET encode "altIdx + GATED_OFFSET" meaning the alt is
 // correct but preceding gated alts must be checked first. Decoding is just
@@ -732,7 +734,43 @@ export class Parser {
             tmatcher,
             this.dynamicTokensEnabled,
           );
-          this._orLookahead[mapKey] = laFunc;
+          // Capture counter management as closure variables so the hot
+          // path avoids _orAltCounterStarts[mapKey] and _orCounterDeltas[mapKey]
+          // property lookups. These values are known statically from recording.
+          const altStarts = this._orAltCounterStarts[mapKey];
+          const counterDelta = this._orCounterDeltas[mapKey];
+          if (altStarts !== undefined && counterDelta !== undefined) {
+            // Full dispatch closure: lookahead + counter + alt call.
+            // Captures altStarts and counterDelta as closure variables,
+            // eliminating _orAltCounterStarts and _orCounterDeltas
+            // property lookups on the hot path.
+            this._orLookahead[mapKey] = function orDispatch(
+              this: Parser,
+              alts: IOrAlt<any>[],
+            ): any {
+              const altIdx = laFunc.call(this, alts);
+              if (altIdx !== undefined) {
+                const saved = this._dslCounter;
+                this._dslCounter = saved + altStarts[altIdx];
+                const r = alts[altIdx].ALT.call(this);
+                this._dslCounter = saved + counterDelta;
+                return r;
+              }
+              return OR_NO_MATCH;
+            };
+          } else {
+            // No counter management needed — wrap laFunc to call ALT.
+            this._orLookahead[mapKey] = function orDispatchSimple(
+              this: Parser,
+              alts: IOrAlt<any>[],
+            ): any {
+              const altIdx = laFunc.call(this, alts);
+              if (altIdx !== undefined) {
+                return alts[altIdx].ALT.call(this);
+              }
+              return OR_NO_MATCH;
+            };
+          }
         } catch (_e) {
           // GAST walk failed — fall back to speculative dispatch.
         }
@@ -1988,18 +2026,11 @@ export class Parser {
     // One function call → altIdx → committed dispatch. Minimal overhead:
     // ~4 property reads vs upstream's ~4 (parity).
     // -----------------------------------------------------------------------
-    const laFunc = this._orLookahead[mapKey];
-    if (laFunc !== undefined && !wasSpeculating) {
-      const altIdx = laFunc.call(this, alts);
-      if (altIdx !== undefined) {
-        const savedDslCounter = this._dslCounter;
-        const altStarts = this._orAltCounterStarts[mapKey];
-        if (altStarts !== undefined)
-          this._dslCounter = savedDslCounter + altStarts[altIdx];
-        const r = alts[altIdx].ALT.call(this) as T;
-        const d = this._orCounterDeltas[mapKey];
-        if (d !== undefined) this._dslCounter = savedDslCounter + d;
-        return r;
+    const orDispatch = this._orLookahead[mapKey];
+    if (orDispatch !== undefined && !wasSpeculating) {
+      const result = orDispatch.call(this, alts);
+      if (result !== OR_NO_MATCH) {
+        return result as T;
       }
       // No alt matched — fall through to slow path for error handling.
     }
