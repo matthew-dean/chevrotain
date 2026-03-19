@@ -858,22 +858,26 @@ export class Parser {
     // parsed with a clear error message ("expecting EOF but found ...")
     this.tokensMap["EOF"] = EOF;
 
+    // Because ES2015+ syntax should be supported for creating Token classes
+    // We cannot assume that the Token classes were created using the "extendToken" utilities
+    // Therefore we must augment the Token classes both on Lexer initialization and on Parser initialization
+    augmentTokenTypes(Object.values(this.tokensMap));
+
+    // IMPORTANT: tokenMatcher selection must happen AFTER augmentTokenTypes()
+    // which populates categoryMatches and MATCH_SET. Before augmentation,
+    // categoryMatches is empty/undefined on all tokens, so the check would
+    // always pick the no-categories matcher — breaking any grammar that
+    // uses token categories (e.g. FunctionStart as parent of UrlStart).
     const allTokenTypes = Object.hasOwn(tokenVocabulary, "modes")
       ? (Object.values((<any>tokenVocabulary).modes) as any[][]).flat()
       : Object.values(tokenVocabulary);
     const noTokenCategoriesUsed = allTokenTypes.every(
-      // intentional "==" to also cover "undefined"
       (tokenConstructor: any) => tokenConstructor.categoryMatches?.length == 0,
     );
 
     this.tokenMatcher = noTokenCategoriesUsed
       ? tokenStructuredMatcherNoCategories
       : tokenStructuredMatcher;
-
-    // Because ES2015+ syntax should be supported for creating Token classes
-    // We cannot assume that the Token classes were created using the "extendToken" utilities
-    // Therefore we must augment the Token classes both on Lexer initialization and on Parser initialization
-    augmentTokenTypes(Object.values(this.tokensMap));
   }
 
   defineRule<ARGS extends unknown[], R>(
