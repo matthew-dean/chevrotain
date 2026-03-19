@@ -1983,62 +1983,25 @@ export class Parser {
     const la1TypeIdx = la1.tokenTypeIdx;
 
     // -----------------------------------------------------------------------
-    // Committed dispatch for non-speculating context.
-    // Two tiers:
-    // 1. Ultra-fast inline LL(1): direct hash lookup + committed call.
-    //    For gate-free, unambiguous, non-dynamic grammars (e.g., JSON).
-    // 2. LL(k) precomputed closure: handles predicates, multi-token
-    //    lookahead, and LL(1) that the inline path can't handle.
-    // Both tiers skip speculation entirely — no try/catch, no save/restore.
+    // Primary path: single precomputed LL(k) closure. Built from GAST
+    // during performSelfAnalysis, or lazily from the first speculative pass.
+    // One function call → altIdx → committed dispatch. Minimal overhead:
+    // ~4 property reads vs upstream's ~4 (parity).
     // -----------------------------------------------------------------------
-    if (!wasSpeculating && !this.dynamicTokensEnabled) {
-      const fastMap = this._orFastMaps[mapKey];
-      if (fastMap !== undefined) {
-        const fastAltIdx = fastMap[la1TypeIdx];
-        if (
-          fastAltIdx !== undefined &&
-          fastAltIdx >= 0 &&
-          fastAltIdx < GATED_OFFSET
-        ) {
-          const cm = this._orCommittable[mapKey];
-          if (cm !== undefined && cm[la1TypeIdx] === true) {
-            if (
-              this._orGatedPrefixAlts[mapKey] === undefined &&
-              (this._orFastMapAltsRef[mapKey] === undefined ||
-                this._orFastMapAltsRef[mapKey] === alts)
-            ) {
-              const alt = alts[fastAltIdx];
-              if (alt.GATE === undefined || alt.GATE.call(this)) {
-                const savedDslCounter = this._dslCounter;
-                const altStarts = this._orAltCounterStarts[mapKey];
-                if (altStarts !== undefined)
-                  this._dslCounter = savedDslCounter + altStarts[fastAltIdx];
-                const r = alt.ALT.call(this) as T;
-                const d = this._orCounterDeltas[mapKey];
-                if (d !== undefined) this._dslCounter = savedDslCounter + d;
-                return r;
-              }
-            }
-          }
-        }
+    const laFunc = this._orLookahead[mapKey];
+    if (laFunc !== undefined && !wasSpeculating) {
+      const altIdx = laFunc.call(this, alts);
+      if (altIdx !== undefined) {
+        const savedDslCounter = this._dslCounter;
+        const altStarts = this._orAltCounterStarts[mapKey];
+        if (altStarts !== undefined)
+          this._dslCounter = savedDslCounter + altStarts[altIdx];
+        const r = alts[altIdx].ALT.call(this) as T;
+        const d = this._orCounterDeltas[mapKey];
+        if (d !== undefined) this._dslCounter = savedDslCounter + d;
+        return r;
       }
-
-      // LL(k) precomputed fallback: handles cases the inline LL(1) path
-      // can't (predicates, multi-token lookahead, LL(1) ambiguity).
-      // Gated by _orLookahead existence to avoid penalizing hot LL(1) path.
-      if (this._orLookahead[mapKey] !== undefined) {
-        const altIdx = this._orLookahead[mapKey].call(this, alts);
-        if (altIdx !== undefined) {
-          const savedDslCounter = this._dslCounter;
-          const altStarts = this._orAltCounterStarts[mapKey];
-          if (altStarts !== undefined)
-            this._dslCounter = savedDslCounter + altStarts[altIdx];
-          const r = alts[altIdx].ALT.call(this) as T;
-          const d = this._orCounterDeltas[mapKey];
-          if (d !== undefined) this._dslCounter = savedDslCounter + d;
-          return r;
-        }
-      }
+      // No alt matched — fall through to slow path for error handling.
     }
 
     // Save outer OR's gated-prefix tracking state so nested ORs (via
