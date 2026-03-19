@@ -1474,6 +1474,10 @@ export class Parser {
     // instead of **every single** rule invocation.
     if (this.outputCst === true) {
       coreRuleFunction = function invokeRuleWithTry(...args: ARGS): R {
+        // Save _dslCounter as a local variable (register/stack) instead of
+        // a heap array slot. V8 can scalar-replace this entirely.
+        const savedDslCounter = this._dslCounter;
+        this._dslCounter = 0;
         try {
           this.ruleInvocationStateUpdate(shortName, ruleName, this.subruleIdx);
           impl.apply(this, args);
@@ -1483,17 +1487,23 @@ export class Parser {
         } catch (e) {
           return this.invokeRuleCatch(e, resyncEnabled, recoveryValueFunc) as R;
         } finally {
+          this._dslCounter = savedDslCounter;
           this.ruleFinallyStateUpdate();
         }
       };
     } else {
       coreRuleFunction = function invokeRuleWithTryCst(...args: ARGS): R {
+        // Save _dslCounter as a local variable (register/stack) instead of
+        // a heap array slot. V8 can scalar-replace this entirely.
+        const savedDslCounter = this._dslCounter;
+        this._dslCounter = 0;
         try {
           this.ruleInvocationStateUpdate(shortName, ruleName, this.subruleIdx);
           return impl.apply(this, args);
         } catch (e) {
           return this.invokeRuleCatch(e, resyncEnabled, recoveryValueFunc) as R;
         } finally {
+          this._dslCounter = savedDslCounter;
           this.ruleFinallyStateUpdate();
         }
       };
@@ -2679,8 +2689,7 @@ export class Parser {
   }
 
   ruleFinallyStateUpdate(): void {
-    // Restore the single DSL counter from the parent rule scope.
-    this._dslCounter = this._dslCounterStack[this.RULE_STACK_IDX];
+    // _dslCounter is restored by the local savedDslCounter in the invokeRule* finally.
     this.RULE_STACK_IDX--;
     this.RULE_OCCURRENCE_STACK_IDX--;
 
@@ -2875,9 +2884,8 @@ export class Parser {
     const depth = ++this.RULE_STACK_IDX;
     this.RULE_STACK[depth] = shortName;
     this.currRuleShortName = shortName;
-    // Save and reset the single DSL auto-occurrence counter.
-    this._dslCounterStack[depth] = this._dslCounter;
-    this._dslCounter = 0;
+    // _dslCounter is saved/restored as a local variable in invokeRuleWithTry/
+    // invokeRuleWithTryCst — no heap array needed here.
     // NOOP when cst is disabled
     this.cstInvocationStateUpdate(fullName);
   }
