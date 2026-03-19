@@ -14,8 +14,11 @@ import {
   TokenType,
 } from "@chevrotain/types";
 import { isRecognitionException } from "../../exceptions_public.js";
-import { DEFAULT_RULE_CONFIG, ParserDefinitionErrorType } from "../parser.js";
-import { SPEC_FAIL } from "./recognizer_engine.js";
+import {
+  DEFAULT_RULE_CONFIG,
+  ParserDefinitionErrorType,
+  SPEC_FAIL,
+} from "../parser.js";
 import { defaultGrammarValidatorErrorProvider } from "../../errors_public.js";
 import { validateRuleIsOverridden } from "../../grammar/checks.js";
 import { MixedInParser } from "./parser_traits.js";

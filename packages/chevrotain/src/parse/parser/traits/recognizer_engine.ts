@@ -51,13 +51,9 @@ import {
 import { Rule } from "@chevrotain/gast";
 import { ParserMethodInternal } from "../types.js";
 
-/**
- * Thrown instead of MismatchedTokenException during speculative parsing
- * (IS_SPECULATING === true). A Symbol throw has zero allocation cost — V8
- * never calls Error.captureStackTrace for non-Error throws, so every failed
- * BACKTRACK() alternative costs nothing in GC pressure.
- */
-export const SPEC_FAIL = Symbol("SPEC_FAIL");
+// SPEC_FAIL is now defined in parser.ts; re-export for backward compat.
+export { SPEC_FAIL } from "../parser.js";
+import { SPEC_FAIL } from "../parser.js";
 
 // Entries >= GATED_OFFSET encode "altIdx + GATED_OFFSET" meaning the alt is
 // correct but preceding gated alts must be checked first. Decoding is just

@@ -1,5 +1,4 @@
 import { RecognizerApi } from "./recognizer_api.js";
-import { RecognizerEngine } from "./recognizer_engine.js";
 import { Recoverable } from "./recoverable.js";
 import { TreeBuilder } from "./tree_builder.js";
 import {
@@ -22,7 +21,6 @@ import * as defs from "@chevrotain/types";
  */
 export type MixedInParser = ParserConstructorImpel &
   RecognizerApi &
-  RecognizerEngine &
   Recoverable &
   TreeBuilder;
 
