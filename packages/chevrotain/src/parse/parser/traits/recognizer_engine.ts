@@ -38,8 +38,12 @@ import {
   NextTerminalAfterManySepWalker,
   NextTerminalAfterManyWalker,
 } from "../../grammar/interpreter.js";
-import { DEFAULT_RULE_CONFIG, END_OF_FILE, TokenMatcher } from "../parser.js";
-import { IN_RULE_RECOVERY_EXCEPTION } from "./recoverable.js";
+import {
+  DEFAULT_RULE_CONFIG,
+  END_OF_FILE,
+  IN_RULE_RECOVERY_EXCEPTION,
+  TokenMatcher,
+} from "../parser.js";
 import { EOF } from "../../../scan/tokens_public.js";
 import { MixedInParser } from "./parser_traits.js";
 import {

@@ -1,6 +1,16 @@
 import { timer, toFastProperties } from "@chevrotain/utils";
 import { computeAllProdsFollows } from "../grammar/follow.js";
 import {
+  addNoneTerminalToCst,
+  addTerminalToCst,
+  setNodeLocationFull,
+  setNodeLocationOnlyOffset,
+} from "../cst/cst.js";
+import {
+  createBaseSemanticVisitorConstructor,
+  createBaseVisitorConstructorWithDefaults,
+} from "../cst/cst_visitor.js";
+import {
   createToken,
   createTokenInstance,
   EOF,
@@ -29,6 +39,7 @@ import {
   AtLeastOneSepMethodOpts,
   ConsumeMethodOpts,
   CstNode,
+  CstNodeLocation,
   DSLMethodOpts,
   DSLMethodOptsWithErr,
   GrammarAction,
@@ -36,10 +47,14 @@ import {
   IParserConfig,
   IParserErrorMessageProvider,
   IProduction,
+  ICstVisitor,
   IRecognitionException,
   IRuleConfig,
+  ISerializedGast,
   IToken,
+  ITokenGrammarPath,
   ManySepMethodOpts,
+  nodeLocationTrackingOptions,
   OrMethodOpts,
   ParserMethod,
   SubruleMethodOpts,
@@ -49,18 +64,19 @@ import {
 } from "@chevrotain/types";
 import {
   AbstractNextTerminalAfterProductionWalker,
+  IFirstAfterRepetition,
+  NextAfterTokenWalker,
   NextTerminalAfterAtLeastOneSepWalker,
   NextTerminalAfterAtLeastOneWalker,
   NextTerminalAfterManySepWalker,
   NextTerminalAfterManyWalker,
 } from "../grammar/interpreter.js";
-import { Recoverable } from "./traits/recoverable.js";
-import { IN_RULE_RECOVERY_EXCEPTION } from "./traits/recoverable.js";
+import { IN } from "../constants.js";
 import { ILookaheadStrategy } from "@chevrotain/types";
 import { LLkLookaheadStrategy } from "../grammar/llk_lookahead.js";
-import { TreeBuilder } from "./traits/tree_builder.js";
+// TreeBuilder absorbed into Parser (Stage 7)
 // LexerAdapter absorbed into Parser (Stage 7)
-import { RecognizerApi } from "./traits/recognizer_api.js";
+// RecognizerApi absorbed into Parser (Stage 7)
 // RecognizerEngine absorbed into Parser (Stage 7)
 
 // ErrorHandler absorbed into Parser (Stage 7)
@@ -78,6 +94,7 @@ import {
   RepetitionMandatoryWithSeparator,
   RepetitionWithSeparator,
   Rule,
+  serializeGrammar,
   Terminal,
 } from "@chevrotain/gast";
 import { Lexer } from "../../scan/lexer_public.js";
@@ -94,10 +111,14 @@ import {
   AT_LEAST_ONE_SEP_IDX,
   BITS_FOR_METHOD_TYPE,
   BITS_FOR_OCCURRENCE_IDX,
+  getKeyForAutomaticLookahead,
   MANY_IDX,
   MANY_SEP_IDX,
 } from "../grammar/keys.js";
-import { validateLookahead } from "../grammar/checks.js";
+import {
+  validateLookahead,
+  validateRuleIsOverridden,
+} from "../grammar/checks.js";
 
 export const END_OF_FILE = createTokenInstance(
   EOF,
@@ -194,6 +215,90 @@ export function EMPTY_ALT(value: any = undefined) {
   return function () {
     return value;
   };
+}
+
+// --- Recoverable module-level constants (absorbed from trait) ---
+
+export const EOF_FOLLOW_KEY: any = {};
+
+export interface IFollowKey {
+  ruleName: string;
+  idxInCallingRule: number;
+  inRule: string;
+}
+
+export const IN_RULE_RECOVERY_EXCEPTION = "InRuleRecoveryException";
+
+export class InRuleRecoveryException extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = IN_RULE_RECOVERY_EXCEPTION;
+  }
+}
+
+export function attemptInRepetitionRecovery(
+  this: MixedInParser,
+  prodFunc: Function,
+  args: any[],
+  lookaheadFunc: () => boolean,
+  dslMethodIdx: number,
+  prodOccurrence: number,
+  nextToksWalker: typeof AbstractNextTerminalAfterProductionWalker,
+  notStuck?: boolean,
+): void {
+  const key = getKeyForAutomaticLookahead(
+    this.currRuleShortName,
+    dslMethodIdx,
+    prodOccurrence,
+  );
+  let firstAfterRepInfo = this.firstAfterRepMap[key];
+  if (firstAfterRepInfo === undefined) {
+    const currRuleName = this.getCurrRuleFullName();
+    const ruleGrammar = this.getGAstProductions()[currRuleName];
+    const walker: AbstractNextTerminalAfterProductionWalker =
+      new nextToksWalker(ruleGrammar, prodOccurrence);
+    firstAfterRepInfo = walker.startWalking();
+    this.firstAfterRepMap[key] = firstAfterRepInfo;
+  }
+
+  let expectTokAfterLastMatch = firstAfterRepInfo.token;
+  let nextTokIdx = firstAfterRepInfo.occurrence;
+  const isEndOfRule = firstAfterRepInfo.isEndOfRule;
+
+  // special edge case of a TOP most repetition after which the input should END.
+  // this will force an attempt for inRule recovery in that scenario.
+  if (
+    this.RULE_STACK_IDX === 0 &&
+    isEndOfRule &&
+    expectTokAfterLastMatch === undefined
+  ) {
+    expectTokAfterLastMatch = EOF;
+    nextTokIdx = 1;
+  }
+
+  // We don't have anything to re-sync to...
+  // this condition was extracted from `shouldInRepetitionRecoveryBeTried` to act as a type-guard
+  if (expectTokAfterLastMatch === undefined || nextTokIdx === undefined) {
+    return;
+  }
+
+  if (
+    this.shouldInRepetitionRecoveryBeTried(
+      expectTokAfterLastMatch,
+      nextTokIdx,
+      notStuck,
+    )
+  ) {
+    // TODO: performance optimization: instead of passing the original args here, we modify
+    // the args param (or create a new one) and make sure the lookahead func is explicitly provided
+    // to avoid searching the cache for it once more.
+    this.tryInRepetitionRecovery(
+      prodFunc,
+      args,
+      lookaheadFunc,
+      expectTokAfterLastMatch,
+    );
+  }
 }
 
 // --- RecognizerEngine module-level constants (absorbed from trait) ---
@@ -301,6 +406,49 @@ const RECORDING_PHASE_CSTNODE: CstNode = {
     "See: https://chevrotain.io/docs/guide/internals.html#grammar-recording for details",
   children: {},
 };
+
+// --- TreeBuilder module-level helpers (absorbed from trait) ---
+
+/**
+ * Fixed-shape CstNode factory. Pre-declaring all fields — including the
+ * optional `recoveredNode` and `location` — ensures every CstNode object
+ * shares a single V8 hidden class from birth, keeping call sites that read
+ * these fields monomorphic.
+ */
+function createCstNode(name: string): CstNode {
+  return {
+    name,
+    children: Object.create(null),
+    location: undefined,
+  } as unknown as CstNode;
+}
+
+function createCstLocationOnlyOffset(): CstNodeLocation {
+  return { startOffset: NaN, endOffset: NaN } as CstNodeLocation;
+}
+
+function createCstLocationFull(): CstNodeLocation {
+  return {
+    startOffset: NaN,
+    startLine: NaN,
+    startColumn: NaN,
+    endOffset: NaN,
+    endLine: NaN,
+    endColumn: NaN,
+  };
+}
+
+/**
+ * Watermark snapshot of a CST node's mutable state taken before a
+ * non-speculative parse attempt that may fail (OPTION, AT_LEAST_ONE, OR
+ * committed fast-path). Stores each existing child array's length so that
+ * restoreCstTop() can truncate — no .slice() copies, no new objects.
+ */
+export interface CstTopSave {
+  keys: string[];
+  lens: number[];
+  location: Record<string, number> | undefined;
+}
 
 export class Parser {
   // Set this flag to true if you don't want the Parser to throw error when problems in it's definition are detected.
@@ -2121,6 +2269,1703 @@ export class Parser {
     this.traceInitIndent = -1;
   }
 
+  // --- Recoverable (absorbed from trait) ---
+  recoveryEnabled!: boolean;
+  firstAfterRepMap!: Record<string, IFirstAfterRepetition>;
+  resyncFollows!: Record<string, TokenType[]>;
+
+  initRecoverable(config: IParserConfig) {
+    this.firstAfterRepMap = {};
+    this.resyncFollows = {};
+
+    this.recoveryEnabled = Object.hasOwn(config, "recoveryEnabled")
+      ? (config.recoveryEnabled as boolean) // assumes end user provides the correct config value/type
+      : DEFAULT_PARSER_CONFIG.recoveryEnabled;
+
+    // performance optimization, NOOP will be inlined which
+    // effectively means that this optional feature does not exist
+    // when not used.
+    if (this.recoveryEnabled) {
+      this.attemptInRepetitionRecovery = attemptInRepetitionRecovery;
+    }
+  }
+
+  public getTokenToInsert(tokType: TokenType): IToken {
+    const tokToInsert = createTokenInstance(
+      tokType,
+      "",
+      NaN,
+      NaN,
+      NaN,
+      NaN,
+      NaN,
+      NaN,
+    );
+    tokToInsert.isInsertedInRecovery = true;
+    return tokToInsert;
+  }
+
+  public canTokenTypeBeInsertedInRecovery(tokType: TokenType): boolean {
+    return true;
+  }
+
+  public canTokenTypeBeDeletedInRecovery(tokType: TokenType): boolean {
+    return true;
+  }
+
+  tryInRepetitionRecovery(
+    this: MixedInParser,
+    grammarRule: Function,
+    grammarRuleArgs: any[],
+    lookAheadFunc: () => boolean,
+    expectedTokType: TokenType,
+  ): void {
+    // TODO: can the resyncTokenType be cached?
+    const reSyncTokType = this.findReSyncTokenType();
+    const savedLexerState = this.exportLexerState();
+    const resyncedTokens: IToken[] = [];
+    let passedResyncPoint = false;
+
+    const nextTokenWithoutResync = this.LA_FAST(1);
+    let currToken = this.LA_FAST(1);
+
+    const generateErrorMessage = () => {
+      const previousToken = this.LA(0);
+      // we are preemptively re-syncing before an error has been detected, therefor we must reproduce
+      // the error that would have been thrown
+      const msg = this.errorMessageProvider.buildMismatchTokenMessage({
+        expected: expectedTokType,
+        actual: nextTokenWithoutResync,
+        previous: previousToken,
+        ruleName: this.getCurrRuleFullName(),
+      });
+      const error = new MismatchedTokenException(
+        msg,
+        nextTokenWithoutResync,
+        this.LA(0),
+      );
+      // the first token here will be the original cause of the error, this is not part of the resyncedTokens property.
+      error.resyncedTokens = resyncedTokens.slice(0, -1);
+      this.SAVE_ERROR(error);
+    };
+
+    while (!passedResyncPoint) {
+      // re-synced to a point where we can safely exit the repetition/
+      if (this.tokenMatcher(currToken, expectedTokType)) {
+        generateErrorMessage();
+        return; // must return here to avoid reverting the inputIdx
+      } else if (lookAheadFunc.call(this)) {
+        // we skipped enough tokens so we can resync right back into another iteration of the repetition grammar rule
+        generateErrorMessage();
+        // recursive invocation in other to support multiple re-syncs in the same top level repetition grammar rule
+        grammarRule.apply(this, grammarRuleArgs);
+        return; // must return here to avoid reverting the inputIdx
+      } else if (this.tokenMatcher(currToken, reSyncTokType)) {
+        passedResyncPoint = true;
+      } else {
+        currToken = this.SKIP_TOKEN();
+        this.addToResyncTokens(currToken, resyncedTokens);
+      }
+    }
+
+    // we were unable to find a CLOSER point to resync inside the Repetition, reset the state.
+    // The parsing exception we were trying to prevent will happen in the NEXT parsing step. it may be handled by
+    // "between rules" resync recovery later in the flow.
+    this.importLexerState(savedLexerState);
+  }
+
+  shouldInRepetitionRecoveryBeTried(
+    this: MixedInParser,
+    expectTokAfterLastMatch: TokenType,
+    nextTokIdx: number,
+    notStuck: boolean | undefined,
+  ): boolean {
+    // Edge case of arriving from a MANY repetition which is stuck
+    // Attempting recovery in this case could cause an infinite loop
+    if (notStuck === false) {
+      return false;
+    }
+
+    // no need to recover, next token is what we expect...
+    if (this.tokenMatcher(this.LA_FAST(1), expectTokAfterLastMatch)) {
+      return false;
+    }
+
+    // error recovery is disabled during backtracking as it can make the parser ignore a valid grammar path
+    // and prefer some backtracking path that includes recovered errors.
+    if (this.isBackTracking()) {
+      return false;
+    }
+
+    // if we can perform inRule recovery (single token insertion or deletion) we always prefer that recovery algorithm
+    // because if it works, it makes the least amount of changes to the input stream (greedy algorithm)
+    //noinspection RedundantIfStatementJS
+    if (
+      this.canPerformInRuleRecovery(
+        expectTokAfterLastMatch,
+        this.getFollowsForInRuleRecovery(expectTokAfterLastMatch, nextTokIdx),
+      )
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
+  // TODO: should this be a member method or a utility? it does not have any state or usage of 'this'...
+  // TODO: should this be more explicitly part of the public API?
+  getNextPossibleTokenTypes(
+    this: MixedInParser,
+    grammarPath: ITokenGrammarPath,
+  ): TokenType[] {
+    const topRuleName = grammarPath.ruleStack[0]!;
+    const gastProductions = this.getGAstProductions();
+    const topProduction = gastProductions[topRuleName];
+    const nextPossibleTokenTypes = new NextAfterTokenWalker(
+      topProduction,
+      grammarPath,
+    ).startWalking();
+    return nextPossibleTokenTypes;
+  }
+
+  // Error Recovery functionality
+  getFollowsForInRuleRecovery(
+    this: MixedInParser,
+    tokType: TokenType,
+    tokIdxInRule: number,
+  ): TokenType[] {
+    const grammarPath = this.getCurrentGrammarPath(tokType, tokIdxInRule);
+    const follows = this.getNextPossibleTokenTypes(grammarPath);
+    return follows;
+  }
+
+  tryInRuleRecovery(
+    this: MixedInParser,
+    expectedTokType: TokenType,
+    follows: TokenType[],
+  ): IToken {
+    if (this.canRecoverWithSingleTokenInsertion(expectedTokType, follows)) {
+      const tokToInsert = this.getTokenToInsert(expectedTokType);
+      return tokToInsert;
+    }
+
+    if (this.canRecoverWithSingleTokenDeletion(expectedTokType)) {
+      const nextTok = this.SKIP_TOKEN();
+      this.consumeToken();
+      return nextTok;
+    }
+
+    throw new InRuleRecoveryException("sad sad panda");
+  }
+
+  canPerformInRuleRecovery(
+    this: MixedInParser,
+    expectedToken: TokenType,
+    follows: TokenType[],
+  ): boolean {
+    return (
+      this.canRecoverWithSingleTokenInsertion(expectedToken, follows) ||
+      this.canRecoverWithSingleTokenDeletion(expectedToken)
+    );
+  }
+
+  canRecoverWithSingleTokenInsertion(
+    this: MixedInParser,
+    expectedTokType: TokenType,
+    follows: TokenType[],
+  ): boolean {
+    if (!this.canTokenTypeBeInsertedInRecovery(expectedTokType)) {
+      return false;
+    }
+
+    // must know the possible following tokens to perform single token insertion
+    if (follows.length === 0) {
+      return false;
+    }
+
+    const mismatchedTok = this.LA_FAST(1);
+    const isMisMatchedTokInFollows =
+      follows.find((possibleFollowsTokType: TokenType) => {
+        return this.tokenMatcher(mismatchedTok, possibleFollowsTokType);
+      }) !== undefined;
+
+    return isMisMatchedTokInFollows;
+  }
+
+  canRecoverWithSingleTokenDeletion(
+    this: MixedInParser,
+    expectedTokType: TokenType,
+  ): boolean {
+    if (!this.canTokenTypeBeDeletedInRecovery(expectedTokType)) {
+      return false;
+    }
+
+    const isNextTokenWhatIsExpected = this.tokenMatcher(
+      // not using LA_FAST because LA(2) might be un-safe with maxLookahead=1
+      // in some edge cases (?)
+      this.LA(2),
+      expectedTokType,
+    );
+    return isNextTokenWhatIsExpected;
+  }
+
+  isInCurrentRuleReSyncSet(
+    this: MixedInParser,
+    tokenTypeIdx: TokenType,
+  ): boolean {
+    const followKey = this.getCurrFollowKey();
+    const currentRuleReSyncSet = this.getFollowSetFromFollowKey(followKey);
+    return currentRuleReSyncSet.includes(tokenTypeIdx);
+  }
+
+  /**
+   * Scans forward until finding a token whose type is in the follow set,
+   * signalling where the parser can safely resume. Uses a Set built once by
+   * flattenFollowSet() so each token is an O(1) lookup instead of O(n) scan.
+   * LA_FAST is safe here because sentinel EOF tokens pad the end of tokVector.
+   */
+  findReSyncTokenType(this: MixedInParser): TokenType {
+    const reSyncSet = this.flattenFollowSet();
+    // always terminates: EOF is always in the follow set and always in the input
+    let nextToken = this.LA_FAST(1);
+    let k = 2;
+    while (true) {
+      const match = reSyncSet.get(nextToken.tokenTypeIdx);
+      if (match !== undefined) {
+        return match;
+      }
+      nextToken = this.LA_FAST(k++);
+    }
+  }
+
+  getCurrFollowKey(this: MixedInParser): IFollowKey {
+    // the length is at least one as we always add the ruleName to the stack before invoking the rule.
+    if (this.RULE_STACK_IDX === 0) {
+      return EOF_FOLLOW_KEY;
+    }
+    const currRuleShortName = this.currRuleShortName;
+    const currRuleIdx = this.getLastExplicitRuleOccurrenceIndex();
+    const prevRuleShortName = this.getPreviousExplicitRuleShortName();
+
+    return {
+      ruleName: this.shortRuleNameToFullName(currRuleShortName),
+      idxInCallingRule: currRuleIdx,
+      inRule: this.shortRuleNameToFullName(prevRuleShortName),
+    };
+  }
+
+  buildFullFollowKeyStack(this: MixedInParser): IFollowKey[] {
+    const explicitRuleStack = this.RULE_STACK;
+    const explicitOccurrenceStack = this.RULE_OCCURRENCE_STACK;
+    const len = this.RULE_STACK_IDX + 1;
+
+    const result: IFollowKey[] = new Array(len);
+    for (let idx = 0; idx < len; idx++) {
+      if (idx === 0) {
+        result[idx] = EOF_FOLLOW_KEY;
+      } else {
+        result[idx] = {
+          ruleName: this.shortRuleNameToFullName(explicitRuleStack[idx]),
+          idxInCallingRule: explicitOccurrenceStack[idx],
+          inRule: this.shortRuleNameToFullName(explicitRuleStack[idx - 1]),
+        };
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Builds a Map from concrete tokenTypeIdx → follow-set TokenType for the
+   * current rule stack. Keying by index instead of object reference gives O(1)
+   * lookup in findReSyncTokenType without a linear scan per token. Category
+   * types are expanded so every concrete member maps to its category — the
+   * category object is returned by findReSyncTokenType so callers that check
+   * isInCurrentRuleReSyncSet still get the right follow-set entry.
+   */
+  flattenFollowSet(this: MixedInParser): Map<number, TokenType> {
+    const result = new Map<number, TokenType>();
+    for (const key of this.buildFullFollowKeyStack()) {
+      for (const tokType of this.getFollowSetFromFollowKey(key)) {
+        if (tokType.isParent) {
+          for (const idx of tokType.categoryMatches!) {
+            if (!result.has(idx)) result.set(idx, tokType);
+          }
+        } else {
+          if (!result.has(tokType.tokenTypeIdx!))
+            result.set(tokType.tokenTypeIdx!, tokType);
+        }
+      }
+    }
+    return result;
+  }
+
+  getFollowSetFromFollowKey(
+    this: MixedInParser,
+    followKey: IFollowKey,
+  ): TokenType[] {
+    if (followKey === EOF_FOLLOW_KEY) {
+      return [EOF];
+    }
+
+    const followName =
+      followKey.ruleName + followKey.idxInCallingRule + IN + followKey.inRule;
+
+    return this.resyncFollows[followName];
+  }
+
+  // It does not make any sense to include a virtual EOF token in the list of resynced tokens
+  // as EOF does not really exist and thus does not contain any useful information (line/column numbers)
+  addToResyncTokens(
+    this: MixedInParser,
+    token: IToken,
+    resyncTokens: IToken[],
+  ): IToken[] {
+    if (!this.tokenMatcher(token, EOF)) {
+      resyncTokens.push(token);
+    }
+    return resyncTokens;
+  }
+
+  reSyncTo(this: MixedInParser, tokType: TokenType): IToken[] {
+    const resyncedTokens: IToken[] = [];
+    let nextTok = this.LA_FAST(1);
+    while (this.tokenMatcher(nextTok, tokType) === false) {
+      nextTok = this.SKIP_TOKEN();
+      this.addToResyncTokens(nextTok, resyncedTokens);
+    }
+    // the last token is not part of the error.
+    return resyncedTokens.slice(0, -1);
+  }
+
+  attemptInRepetitionRecovery(
+    this: MixedInParser,
+    prodFunc: Function,
+    args: any[],
+    lookaheadFunc: () => boolean,
+    dslMethodIdx: number,
+    prodOccurrence: number,
+    nextToksWalker: typeof AbstractNextTerminalAfterProductionWalker,
+    notStuck?: boolean,
+  ): void {
+    // by default this is a NO-OP
+    // The actual implementation is with the function(not method) below
+  }
+
+  getCurrentGrammarPath(
+    this: MixedInParser,
+    tokType: TokenType,
+    tokIdxInRule: number,
+  ): ITokenGrammarPath {
+    const pathRuleStack: string[] = this.getHumanReadableRuleStack();
+    const pathOccurrenceStack: number[] = this.RULE_OCCURRENCE_STACK.slice(
+      0,
+      this.RULE_OCCURRENCE_STACK_IDX + 1,
+    );
+    const grammarPath: any = {
+      ruleStack: pathRuleStack,
+      occurrenceStack: pathOccurrenceStack,
+      lastTok: tokType,
+      lastTokOccurrence: tokIdxInRule,
+    };
+
+    return grammarPath;
+  }
+
+  getHumanReadableRuleStack(this: MixedInParser): string[] {
+    const len = this.RULE_STACK_IDX + 1;
+    const result: string[] = new Array(len);
+    for (let i = 0; i < len; i++) {
+      result[i] = this.shortRuleNameToFullName(this.RULE_STACK[i]);
+    }
+    return result;
+  }
+
+  // --- RecognizerApi (absorbed from trait) ---
+  ACTION<T>(this: MixedInParser, impl: () => T): T {
+    if (this.RECORDING_PHASE) return this.ACTION_RECORD(impl);
+    return impl.call(this);
+  }
+
+  // ──── lowercase consume ────
+  consume(
+    this: MixedInParser,
+    _idx: number,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  // ──── lowercase subrule ────
+  subrule<ARGS extends unknown[], R>(
+    this: MixedInParser,
+    _idx: number,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  // ──── lowercase option ────
+  option<OUT>(
+    this: MixedInParser,
+    _idx: number,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  // ──── lowercase or ────
+  or(
+    this: MixedInParser,
+    _idx: number,
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>,
+  ): any {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, idx);
+    return this.orInternal(altsOrOpts, idx);
+  }
+
+  // ──── lowercase many ────
+  many(
+    this: MixedInParser,
+    _idx: number,
+    actionORMethodDef: GrammarAction<any> | DSLMethodOpts<any>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    return this.manyInternal(idx, actionORMethodDef);
+  }
+
+  // ──── lowercase atLeastOne ────
+  atLeastOne(
+    this: MixedInParser,
+    _idx: number,
+    actionORMethodDef: GrammarAction<any> | DSLMethodOptsWithErr<any>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    return this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  // ──── CONSUME family ────
+  CONSUME(
+    this: MixedInParser,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  CONSUME1(
+    this: MixedInParser,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  CONSUME2(
+    this: MixedInParser,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  CONSUME3(
+    this: MixedInParser,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  CONSUME4(
+    this: MixedInParser,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  CONSUME5(
+    this: MixedInParser,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  CONSUME6(
+    this: MixedInParser,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  CONSUME7(
+    this: MixedInParser,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  CONSUME8(
+    this: MixedInParser,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  CONSUME9(
+    this: MixedInParser,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.consumeInternalRecord(tokType, idx, options);
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  // ──── SUBRULE family ────
+  SUBRULE<ARGS extends unknown[], R>(
+    this: MixedInParser,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  SUBRULE1<ARGS extends unknown[], R>(
+    this: MixedInParser,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  SUBRULE2<ARGS extends unknown[], R>(
+    this: MixedInParser,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  SUBRULE3<ARGS extends unknown[], R>(
+    this: MixedInParser,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  SUBRULE4<ARGS extends unknown[], R>(
+    this: MixedInParser,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  SUBRULE5<ARGS extends unknown[], R>(
+    this: MixedInParser,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  SUBRULE6<ARGS extends unknown[], R>(
+    this: MixedInParser,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  SUBRULE7<ARGS extends unknown[], R>(
+    this: MixedInParser,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  SUBRULE8<ARGS extends unknown[], R>(
+    this: MixedInParser,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  SUBRULE9<ARGS extends unknown[], R>(
+    this: MixedInParser,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  // ──── OPTION family ────
+  OPTION<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  OPTION1<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  OPTION2<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  OPTION3<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  OPTION4<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  OPTION5<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  OPTION6<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  OPTION7<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  OPTION8<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  OPTION9<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE)
+      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  /**
+   * Committed LL(1) fast dispatch -- shared by OR, OR1-OR9, and lowercase or.
+   */
+
+  // ──── OR family ────
+  OR<T>(
+    this: MixedInParser,
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+  ): T {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      return this.orInternalRecord(altsOrOpts, idx) as T;
+    }
+    return this.orInternal(altsOrOpts, idx);
+  }
+
+  OR1<T>(
+    this: MixedInParser,
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+  ): T {
+    return this.OR(altsOrOpts);
+  }
+
+  OR2<T>(
+    this: MixedInParser,
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+  ): T {
+    return this.OR(altsOrOpts);
+  }
+
+  OR3<T>(
+    this: MixedInParser,
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+  ): T {
+    return this.OR(altsOrOpts);
+  }
+
+  OR4<T>(
+    this: MixedInParser,
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+  ): T {
+    return this.OR(altsOrOpts);
+  }
+
+  OR5<T>(
+    this: MixedInParser,
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+  ): T {
+    return this.OR(altsOrOpts);
+  }
+
+  OR6<T>(
+    this: MixedInParser,
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+  ): T {
+    return this.OR(altsOrOpts);
+  }
+
+  OR7<T>(
+    this: MixedInParser,
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+  ): T {
+    return this.OR(altsOrOpts);
+  }
+
+  OR8<T>(
+    this: MixedInParser,
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+  ): T {
+    return this.OR(altsOrOpts);
+  }
+
+  OR9<T>(
+    this: MixedInParser,
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+  ): T {
+    return this.OR(altsOrOpts);
+  }
+
+  // ──── MANY family ────
+  MANY<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.manyInternal(idx, actionORMethodDef);
+  }
+
+  MANY1<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.manyInternal(idx, actionORMethodDef);
+  }
+
+  MANY2<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.manyInternal(idx, actionORMethodDef);
+  }
+
+  MANY3<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.manyInternal(idx, actionORMethodDef);
+  }
+
+  MANY4<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.manyInternal(idx, actionORMethodDef);
+  }
+
+  MANY5<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.manyInternal(idx, actionORMethodDef);
+  }
+
+  MANY6<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.manyInternal(idx, actionORMethodDef);
+  }
+
+  MANY7<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.manyInternal(idx, actionORMethodDef);
+  }
+
+  MANY8<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.manyInternal(idx, actionORMethodDef);
+  }
+
+  MANY9<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manyInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.manyInternal(idx, actionORMethodDef);
+  }
+
+  // ──── MANY_SEP family ────
+  MANY_SEP<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.manySepFirstInternal(idx, options);
+  }
+
+  MANY_SEP1<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.manySepFirstInternal(idx, options);
+  }
+
+  MANY_SEP2<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.manySepFirstInternal(idx, options);
+  }
+
+  MANY_SEP3<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.manySepFirstInternal(idx, options);
+  }
+
+  MANY_SEP4<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.manySepFirstInternal(idx, options);
+  }
+
+  MANY_SEP5<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.manySepFirstInternal(idx, options);
+  }
+
+  MANY_SEP6<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.manySepFirstInternal(idx, options);
+  }
+
+  MANY_SEP7<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.manySepFirstInternal(idx, options);
+  }
+
+  MANY_SEP8<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.manySepFirstInternal(idx, options);
+  }
+
+  MANY_SEP9<OUT>(this: MixedInParser, options: ManySepMethodOpts<OUT>): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.manySepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.manySepFirstInternal(idx, options);
+  }
+
+  // ──── AT_LEAST_ONE family ────
+  AT_LEAST_ONE<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  AT_LEAST_ONE1<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  AT_LEAST_ONE2<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  AT_LEAST_ONE3<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  AT_LEAST_ONE4<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  AT_LEAST_ONE5<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  AT_LEAST_ONE6<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  AT_LEAST_ONE7<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  AT_LEAST_ONE8<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  AT_LEAST_ONE9<OUT>(
+    this: MixedInParser,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneInternalRecord(idx, actionORMethodDef);
+      return;
+    }
+    this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  // ──── AT_LEAST_ONE_SEP family ────
+  AT_LEAST_ONE_SEP<OUT>(
+    this: MixedInParser,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
+  AT_LEAST_ONE_SEP1<OUT>(
+    this: MixedInParser,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
+  AT_LEAST_ONE_SEP2<OUT>(
+    this: MixedInParser,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
+  AT_LEAST_ONE_SEP3<OUT>(
+    this: MixedInParser,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
+  AT_LEAST_ONE_SEP4<OUT>(
+    this: MixedInParser,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
+  AT_LEAST_ONE_SEP5<OUT>(
+    this: MixedInParser,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
+  AT_LEAST_ONE_SEP6<OUT>(
+    this: MixedInParser,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
+  AT_LEAST_ONE_SEP7<OUT>(
+    this: MixedInParser,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
+  AT_LEAST_ONE_SEP8<OUT>(
+    this: MixedInParser,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
+  AT_LEAST_ONE_SEP9<OUT>(
+    this: MixedInParser,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    const idx = this._dslCounter++;
+    if (this.RECORDING_PHASE) {
+      this.atLeastOneSepFirstInternalRecord(idx, options);
+      return;
+    }
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
+  RULE<T>(
+    this: MixedInParser,
+    name: string,
+    implementation: (...implArgs: any[]) => T,
+    config: IRuleConfig<T> = DEFAULT_RULE_CONFIG,
+  ): (idxInCallingRule?: number, ...args: any[]) => T | any {
+    if (this.definedRulesNames.includes(name)) {
+      const errMsg =
+        defaultGrammarValidatorErrorProvider.buildDuplicateRuleNameError({
+          topLevelRule: name,
+          grammarName: this.className,
+        });
+
+      const error = {
+        message: errMsg,
+        type: ParserDefinitionErrorType.DUPLICATE_RULE_NAME,
+        ruleName: name,
+      };
+      this.definitionErrors.push(error);
+    }
+
+    this.definedRulesNames.push(name);
+
+    const ruleImplementation = this.defineRule(name, implementation, config);
+    (this as any)[name] = ruleImplementation;
+    return ruleImplementation;
+  }
+
+  OVERRIDE_RULE<T>(
+    this: MixedInParser,
+    name: string,
+    impl: (...implArgs: any[]) => T,
+    config: IRuleConfig<T> = DEFAULT_RULE_CONFIG,
+  ): (idxInCallingRule?: number, ...args: any[]) => T {
+    const ruleErrors: IParserDefinitionError[] = validateRuleIsOverridden(
+      name,
+      this.definedRulesNames,
+      this.className,
+    );
+    this.definitionErrors = this.definitionErrors.concat(ruleErrors);
+
+    const ruleImplementation = this.defineRule(name, impl, config);
+    (this as any)[name] = ruleImplementation;
+    return ruleImplementation;
+  }
+
+  /**
+   * Returns a zero-argument predicate that speculatively runs `grammarRule`
+   * and returns true if it succeeds. On failure, state is restored via three
+   * integer assignments (no array copies). Uses SPEC_FAIL (a Symbol) as the
+   * failure signal so V8 never allocates an Error during failed alternatives.
+   */
+  BACKTRACK<T>(
+    this: MixedInParser,
+    grammarRule: (...args: any[]) => T,
+    args?: any[],
+  ): () => boolean {
+    if (this.RECORDING_PHASE) return this.BACKTRACK_RECORD(grammarRule, args);
+    // Use coreRule to bypass root-level hooks (onBeforeParse/onAfterParse).
+    // Backtracking is speculative and should not trigger parse lifecycle hooks.
+    const ruleToCall = (grammarRule as any).coreRule ?? grammarRule;
+    return function (this: MixedInParser) {
+      const prevIsSpeculating = this.IS_SPECULATING;
+      const prevIsInTrueBacktrack = this._isInTrueBacktrack;
+      this.IS_SPECULATING = true;
+      this._isInTrueBacktrack = true;
+      const savedPos = this.currIdx;
+      const savedErrors = this._errors.length;
+      const savedRuleStack = this.RULE_STACK_IDX;
+      try {
+        ruleToCall.apply(this, args);
+        return true;
+      } catch (e) {
+        if (e === SPEC_FAIL || isRecognitionException(e)) {
+          return false;
+        } else {
+          throw e;
+        }
+      } finally {
+        this.currIdx = savedPos;
+        this._errors.length = savedErrors;
+        this.RULE_STACK_IDX = savedRuleStack;
+        this.IS_SPECULATING = prevIsSpeculating;
+        this._isInTrueBacktrack = prevIsInTrueBacktrack;
+      }
+    };
+  }
+
+  // GAST export APIs
+  public getGAstProductions(this: MixedInParser): Record<string, Rule> {
+    this.ensureGastProductionsCachePopulated();
+    return this.gastProductionsCache;
+  }
+
+  public getSerializedGastProductions(this: MixedInParser): ISerializedGast[] {
+    this.ensureGastProductionsCachePopulated();
+    return serializeGrammar(Object.values(this.gastProductionsCache));
+  }
+
+  // --- TreeBuilder (absorbed from trait) ---
+  outputCst!: boolean;
+  CST_STACK!: CstNode[];
+  baseCstVisitorConstructor!: Function;
+  baseCstVisitorWithDefaultsConstructor!: Function;
+
+  // dynamically assigned Methods
+  setNodeLocationFromNode!: (
+    nodeLocation: CstNodeLocation,
+    locationInformation: CstNodeLocation,
+  ) => void;
+  setNodeLocationFromToken!: (
+    nodeLocation: CstNodeLocation,
+    locationInformation: CstNodeLocation,
+  ) => void;
+  cstPostRule!: (this: MixedInParser, ruleCstNode: CstNode) => void;
+
+  setInitialNodeLocation!: (cstNode: CstNode) => void;
+  nodeLocationTracking!: nodeLocationTrackingOptions;
+
+  saveCstTop!: (this: MixedInParser) => CstTopSave | null;
+  restoreCstTop!: (this: MixedInParser, save: CstTopSave | null) => void;
+
+  initTreeBuilder(this: MixedInParser, config: IParserConfig) {
+    this.CST_STACK = [];
+
+    // outputCst is no longer exposed/defined in the pubic API
+    this.outputCst = (config as any).outputCst;
+
+    this.nodeLocationTracking = Object.hasOwn(config, "nodeLocationTracking")
+      ? (config.nodeLocationTracking as nodeLocationTrackingOptions)
+      : DEFAULT_PARSER_CONFIG.nodeLocationTracking;
+
+    if (!this.outputCst) {
+      this.cstInvocationStateUpdate = () => {};
+      this.cstFinallyStateUpdate = () => {};
+      this.cstPostTerminal = () => {};
+      this.cstPostNonTerminal = () => {};
+      this.cstPostRule = () => {};
+      this.saveCstTop = () => null;
+      this.restoreCstTop = () => {};
+    } else {
+      if (/full/i.test(this.nodeLocationTracking)) {
+        if (this.recoveryEnabled) {
+          this.setNodeLocationFromToken = setNodeLocationFull;
+          this.setNodeLocationFromNode = setNodeLocationFull;
+          this.cstPostRule = () => {};
+          this.setInitialNodeLocation = this.setInitialNodeLocationFullRecovery;
+        } else {
+          this.setNodeLocationFromToken = () => {};
+          this.setNodeLocationFromNode = () => {};
+          this.cstPostRule = this.cstPostRuleFull;
+          this.setInitialNodeLocation = this.setInitialNodeLocationFullRegular;
+        }
+      } else if (/onlyOffset/i.test(this.nodeLocationTracking)) {
+        if (this.recoveryEnabled) {
+          this.setNodeLocationFromToken = <any>setNodeLocationOnlyOffset;
+          this.setNodeLocationFromNode = <any>setNodeLocationOnlyOffset;
+          this.cstPostRule = () => {};
+          this.setInitialNodeLocation =
+            this.setInitialNodeLocationOnlyOffsetRecovery;
+        } else {
+          this.setNodeLocationFromToken = () => {};
+          this.setNodeLocationFromNode = () => {};
+          this.cstPostRule = this.cstPostRuleOnlyOffset;
+          this.setInitialNodeLocation =
+            this.setInitialNodeLocationOnlyOffsetRegular;
+        }
+      } else if (/none/i.test(this.nodeLocationTracking)) {
+        this.setNodeLocationFromToken = () => {};
+        this.setNodeLocationFromNode = () => {};
+        this.cstPostRule = () => {};
+        this.setInitialNodeLocation = () => {};
+      } else {
+        throw Error(
+          `Invalid <nodeLocationTracking> config option: "${config.nodeLocationTracking}"`,
+        );
+      }
+      // CST watermark helpers are the same regardless of location-tracking mode.
+      this.saveCstTop = this.saveCstTopImpl;
+      this.restoreCstTop = this.restoreCstTopImpl;
+    }
+  }
+
+  setInitialNodeLocationOnlyOffsetRecovery(
+    this: MixedInParser,
+    cstNode: any,
+  ): void {
+    cstNode.location = createCstLocationOnlyOffset();
+  }
+
+  setInitialNodeLocationOnlyOffsetRegular(
+    this: MixedInParser,
+    cstNode: any,
+  ): void {
+    const loc = createCstLocationOnlyOffset();
+    loc.startOffset = this.LA_FAST(1).startOffset;
+    cstNode.location = loc;
+  }
+
+  setInitialNodeLocationFullRecovery(this: MixedInParser, cstNode: any): void {
+    cstNode.location = createCstLocationFull();
+  }
+
+  setInitialNodeLocationFullRegular(this: MixedInParser, cstNode: any): void {
+    const nextToken = this.LA_FAST(1);
+    const loc = createCstLocationFull();
+    loc.startOffset = nextToken.startOffset;
+    loc.startLine = nextToken.startLine;
+    loc.startColumn = nextToken.startColumn;
+    cstNode.location = loc;
+  }
+
+  cstInvocationStateUpdate(this: MixedInParser, fullRuleName: string): void {
+    const cstNode = createCstNode(fullRuleName);
+    this.setInitialNodeLocation(cstNode);
+    this.CST_STACK.push(cstNode);
+  }
+
+  cstFinallyStateUpdate(this: MixedInParser): void {
+    this.CST_STACK.pop();
+  }
+
+  cstPostRuleFull(this: MixedInParser, ruleCstNode: CstNode): void {
+    const prevToken = this.LA(0) as Required<CstNodeLocation>;
+    const loc = ruleCstNode.location as Required<CstNodeLocation>;
+
+    if (loc.startOffset <= prevToken.startOffset === true) {
+      loc.endOffset = prevToken.endOffset;
+      loc.endLine = prevToken.endLine;
+      loc.endColumn = prevToken.endColumn;
+    } else {
+      loc.startOffset = NaN;
+      loc.startLine = NaN;
+      loc.startColumn = NaN;
+    }
+  }
+
+  cstPostRuleOnlyOffset(this: MixedInParser, ruleCstNode: CstNode): void {
+    const prevToken = this.LA(0);
+    const loc = ruleCstNode.location!;
+
+    if (loc.startOffset <= prevToken.startOffset === true) {
+      loc.endOffset = prevToken.endOffset;
+    } else {
+      loc.startOffset = NaN;
+    }
+  }
+
+  cstPostTerminal(
+    this: MixedInParser,
+    key: string,
+    consumedToken: IToken,
+  ): void {
+    const rootCst = this.CST_STACK[this.CST_STACK.length - 1];
+    addTerminalToCst(rootCst, consumedToken, key);
+    this.setNodeLocationFromToken(rootCst.location!, <any>consumedToken);
+  }
+
+  cstPostNonTerminal(
+    this: MixedInParser,
+    ruleCstResult: CstNode,
+    ruleName: string,
+  ): void {
+    const preCstNode = this.CST_STACK[this.CST_STACK.length - 1];
+    addNoneTerminalToCst(preCstNode, ruleName, ruleCstResult);
+    this.setNodeLocationFromNode(preCstNode.location!, ruleCstResult.location!);
+  }
+
+  saveCstTopImpl(this: MixedInParser): CstTopSave | null {
+    if (this.IS_SPECULATING) return null;
+    const top = this.CST_STACK[this.CST_STACK.length - 1];
+    if (top === undefined) return null;
+    const src = top.children;
+    const srcKeys = Object.keys(src);
+    const keys: string[] = new Array(srcKeys.length);
+    const lens: number[] = new Array(srcKeys.length);
+    for (let i = 0; i < srcKeys.length; i++) {
+      keys[i] = srcKeys[i];
+      lens[i] = src[srcKeys[i]].length;
+    }
+    return {
+      keys,
+      lens,
+      location:
+        top.location !== undefined
+          ? ({ ...top.location } as Record<string, number>)
+          : undefined,
+    };
+  }
+
+  restoreCstTopImpl(this: MixedInParser, save: CstTopSave | null): void {
+    if (save === null) return;
+    const top = this.CST_STACK[this.CST_STACK.length - 1];
+    if (top === undefined) return;
+    const { keys, lens } = save;
+    const ch = top.children;
+    for (let i = 0; i < keys.length; i++) {
+      ch[keys[i]].length = lens[i];
+    }
+    if (save.location !== undefined) {
+      (top as any).location = save.location;
+    }
+  }
+
+  getBaseCstVisitorConstructor<IN = any, OUT = any>(
+    this: MixedInParser,
+  ): {
+    new (...args: any[]): ICstVisitor<IN, OUT>;
+  } {
+    if (this.baseCstVisitorConstructor === undefined) {
+      const newBaseCstVisitorConstructor = createBaseSemanticVisitorConstructor(
+        this.className,
+        this.definedRulesNames,
+      );
+      this.baseCstVisitorConstructor = newBaseCstVisitorConstructor;
+      return newBaseCstVisitorConstructor;
+    }
+
+    return <any>this.baseCstVisitorConstructor;
+  }
+
+  getBaseCstVisitorConstructorWithDefaults<IN = any, OUT = any>(
+    this: MixedInParser,
+  ): {
+    new (...args: any[]): ICstVisitor<IN, OUT>;
+  } {
+    if (this.baseCstVisitorWithDefaultsConstructor === undefined) {
+      const newConstructor = createBaseVisitorConstructorWithDefaults(
+        this.className,
+        this.definedRulesNames,
+        this.getBaseCstVisitorConstructor(),
+      );
+      this.baseCstVisitorWithDefaultsConstructor = newConstructor;
+      return newConstructor;
+    }
+
+    return <any>this.baseCstVisitorWithDefaultsConstructor;
+  }
+
+  getPreviousExplicitRuleShortName(this: MixedInParser): number {
+    return this.RULE_STACK[this.RULE_STACK_IDX - 1];
+  }
+
+  getLastExplicitRuleOccurrenceIndex(this: MixedInParser): number {
+    return this.RULE_OCCURRENCE_STACK[this.RULE_OCCURRENCE_STACK_IDX];
+  }
+
   // --- GastRecorder (absorbed from trait) ---
   recordingProdStack!: ProdWithDef[];
   RECORDING_PHASE!: boolean;
@@ -2566,7 +4411,7 @@ export class Parser {
   }
 }
 
-applyMixins(Parser, [Recoverable, TreeBuilder, RecognizerApi]);
+applyMixins(Parser, []);
 
 // --- GastRecorder module-level helpers (absorbed from trait) ---
 // Prefixed with `gast` to avoid name collisions with engine methods.
