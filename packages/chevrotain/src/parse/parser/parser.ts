@@ -27,6 +27,8 @@ import {
   NotAllInputParsedException,
 } from "../exceptions_public.js";
 import {
+  buildAlternativesLookAheadFunc,
+  buildSingleAlternativeLookaheadFunction,
   getLookaheadPathsForOptionalProd,
   getLookaheadPathsForOr,
   PROD_TYPE,
@@ -716,6 +718,28 @@ export class Parser {
         }
       }
 
+      // Build LL(k) lookahead functions for each OR.
+      // These precomputed closures replace speculative backtracking entirely.
+      // For LL(1) grammars: hash map lookup (same as fast-map, but as a closure).
+      // For LL(k>1): nested token-matching loop up to maxLookahead tokens.
+      for (const node of alternations) {
+        const mapKey = ruleShortName | node.idx;
+        const prodMaxLA = (node as any).maxLookahead ?? this.maxLookahead;
+        try {
+          const paths = getLookaheadPathsForOr(node.idx, rule, prodMaxLA);
+          const tmatcher = this.tokenMatcher;
+          const laFunc = buildAlternativesLookAheadFunc(
+            paths,
+            node.hasPredicates,
+            tmatcher,
+            this.dynamicTokensEnabled,
+          );
+          this._orLookahead[mapKey] = laFunc;
+        } catch (_e) {
+          // GAST walk failed — fall back to speculative dispatch.
+        }
+      }
+
       // Build discriminating lookahead sets for MANY/OPTION/AT_LEAST_ONE.
       // Uses getLookaheadPathsForOptionalProd which computes BOTH the
       // body's first tokens AND the REST tokens (what follows), then
@@ -1002,6 +1026,13 @@ export class Parser {
    */
   _orCommittable!: Record<number, Record<number, boolean>>;
   /**
+   * Precomputed LL(k) lookahead functions for OR alternatives, built from
+   * GAST during performSelfAnalysis. Each function takes the parser as
+   * `this` and returns the alt index to take (or undefined if none match).
+   * Replaces both the fast-map dispatch AND speculative backtracking.
+   */
+  _orLookahead!: Record<number, (orAlts: IOrAlt<any>[]) => number | undefined>;
+  /**
    * Precomputed first-token sets for MANY/OPTION/AT_LEAST_ONE bodies.
    * Keyed by `getKeyForAutomaticLookahead(ruleShortName, prodTypeIdx, occurrence)`.
    * Values: `Record<tokenTypeIdx, true>` — a hash set. When present,
@@ -1035,6 +1066,7 @@ export class Parser {
     this._orAltHasGatedPrefix = false;
     this._orAltHasAnyPrefix = false;
     this._orCommittable = Object.create(null);
+    this._orLookahead = Object.create(null);
     this._prodLookahead = Object.create(null);
 
     this.definedRulesNames = [];
@@ -1967,10 +1999,13 @@ export class Parser {
     const la1TypeIdx = la1.tokenTypeIdx;
 
     // -----------------------------------------------------------------------
-    // Ultra-fast path: GAST-precomputed committed dispatch. No save/restore,
-    // no gated-prefix checks, no try/catch. Skips ~15 property accesses vs
-    // the general fast path. For gate-free LL(1) grammars (e.g. JSON) this
-    // is the hottest path.
+    // Committed dispatch for non-speculating context.
+    // Two tiers:
+    // 1. Ultra-fast inline LL(1): direct hash lookup + committed call.
+    //    For gate-free, unambiguous, non-dynamic grammars (e.g., JSON).
+    // 2. LL(k) precomputed closure: handles predicates, multi-token
+    //    lookahead, and LL(1) that the inline path can't handle.
+    // Both tiers skip speculation entirely — no try/catch, no save/restore.
     // -----------------------------------------------------------------------
     if (!wasSpeculating && !this.dynamicTokensEnabled) {
       const fastMap = this._orFastMaps[mapKey];
@@ -2001,6 +2036,23 @@ export class Parser {
               }
             }
           }
+        }
+      }
+
+      // LL(k) precomputed fallback: handles cases the inline LL(1) path
+      // can't (predicates, multi-token lookahead, LL(1) ambiguity).
+      // Gated by _orLookahead existence to avoid penalizing hot LL(1) path.
+      if (this._orLookahead[mapKey] !== undefined) {
+        const altIdx = this._orLookahead[mapKey].call(this, alts);
+        if (altIdx !== undefined) {
+          const savedDslCounter = this._dslCounter;
+          const altStarts = this._orAltCounterStarts[mapKey];
+          if (altStarts !== undefined)
+            this._dslCounter = savedDslCounter + altStarts[altIdx];
+          const r = alts[altIdx].ALT.call(this) as T;
+          const d = this._orCounterDeltas[mapKey];
+          if (d !== undefined) this._dslCounter = savedDslCounter + d;
+          return r;
         }
       }
     }
