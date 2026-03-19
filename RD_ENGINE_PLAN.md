@@ -75,7 +75,33 @@ exactly. The `Lexer` is improved but its interface is unchanged.
   - ✅ `input` setter calls `ensureGastProductionsCachePopulated()` instead of throwing when `selfAnalysisDone=false`
   - ✅ `getGAstProductions()` / `getSerializedGastProductions()` lazy-populate before returning
   - ✅ `toFastProperties(this)` called in lazy path before recording (matches explicit `performSelfAnalysis()`)
-- ⬜ Stage 7 — Flatten mixin architecture
+- ✅ Stage 7 — Flatten mixin architecture (all 9 traits absorbed into Parser)
+- ✅ Stage 8 — Precomputed LL(k) lookahead (OR, MANY, OPTION)
+- ✅ Stage 9 — Zero-cost CST speculation (skip CST building during IS_SPECULATING)
+
+## Remaining Performance TODOs
+
+- ⬜ **Eliminate `_dslCounter` from hot paths**: when performSelfAnalysis was
+  called, counter deltas are known statically. Bake them into the closure or
+  pre-compute a static occurrence mapping. Saves 4-5 property accesses per OR.
+- ⬜ **Remove OPTION try/catch**: the committed OPTION path still has save/restore
+  - try/catch for correctness. If LL(k) guarantees are strengthened (deeper GAST
+    analysis), the try/catch can be removed.
+- ⬜ **Specialize consumeInternal for committed path**: remove `_earlyExitLookahead`
+  and `IS_SPECULATING` checks (2 property reads + 2 branches per CONSUME).
+- ⬜ **Lazy-build OR closure from first speculative pass**: when performSelfAnalysis
+  is not called, build the LL(1) closure from fast-map observations after the
+  first parse. Progressive optimization without GAST.
+- ⬜ **Single-dispatch MANY/OPTION closures**: like OR, replace map lookup with
+  a single cached closure per MANY/OPTION site. Currently uses
+  `_prodLookahead[laKey]` lookup per call.
+
+## Exploration
+
+- **Parser compiler**: generate a specialized function per rule during
+  performSelfAnalysis that inlines all lookahead decisions, counter management,
+  and dispatch. No property lookups at runtime. Ultimate optimization but
+  highest complexity.
 
 ---
 
