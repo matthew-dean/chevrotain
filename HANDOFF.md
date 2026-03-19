@@ -195,7 +195,9 @@ node benchmark_web/benchmark.mjs --lib /tmp/package/lib/chevrotain.mjs --iterati
 The entire RD engine rewrite is modeled on `@jesscss/parser` at
 `/Users/matthew/git/oss/jess/packages/parser/src/parser.ts`. This is the
 authoritative reference for how each DSL method should behave. **Always
-consult it before writing speculative parsing code.**
+consult it before writing speculative parsing code.** (Note: @jesscss/parser
+might actually have some bugs, so make sure it actually is PARSING and producing
+AST output before you assume a particular path it takes is correct.)
 
 ### Method-by-method comparison
 

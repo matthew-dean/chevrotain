@@ -819,10 +819,11 @@ export class RecognizerEngine {
     // so all runtime iterations must produce the same occurrence indices.
     const savedRepDslCounter = this._dslCounter;
 
-    // IS_SPECULATING=true skips CST building (Stage 3) and error building, so
-    // no CST save/restore or error-length save/restore is needed here —
-    // only the lexer position requires rollback on SPEC_FAIL.
-    // RULE_STACK_IDX is always self-correcting via ruleFinallyStateUpdate (finally).
+    // Speculative body: IS_SPECULATING=true, catch SPEC_FAIL to stop.
+    // Also catches recognition exceptions from OR's committed re-run
+    // (which temporarily clears IS_SPECULATING for error recovery).
+    // If a recognition exception arrives with no progress, the body
+    // couldn't start → break. With progress, it's a real error → re-throw.
     while (notStuck) {
       // Track gated prefix for OR fast-path cache (first iteration only).
       if (gate !== undefined && this.IS_SPECULATING && !ranAtLeastOnce) {
@@ -843,15 +844,26 @@ export class RecognizerEngine {
       } catch (e) {
         this.IS_SPECULATING = wasSpeculating;
         if (e === SPEC_FAIL) {
-          // Speculative failure: restore full state and exit the loop.
-          // Because MANY always sets IS_SPECULATING=true before calling
-          // the body, all token mismatches throw SPEC_FAIL (not
-          // MismatchedTokenException). SPEC_FAIL propagates through
-          // nested subrule calls back to here. This enables deep
-          // backtracking exactly like @jesscss/parser.
+          // Speculative failure: body can't match → stop iterating.
           this.importLexerState(iterLexPos);
           this.restoreCstTop(iterCstSave);
           this._errors.length = iterErrors;
+          break;
+        }
+        if (isRecognitionException(e)) {
+          // Real error from OR's committed re-run (IS_SPECULATING was
+          // temporarily cleared). Check if the body made progress:
+          if (this.exportLexerState() > iterLexPos) {
+            // Body partially matched → real error → propagate for
+            // recovery (invokeRuleCatch) or error reporting.
+            throw e;
+          }
+          // No progress → body can't start → stop iterating.
+          // Restore pos and CST, but NOT errors — the recognition
+          // exception (e.g., NoViableAltException from ambiguous OR)
+          // was intentionally added to _errors and should be kept.
+          this.importLexerState(iterLexPos);
+          this.restoreCstTop(iterCstSave);
           break;
         }
         throw e;
@@ -1220,11 +1232,21 @@ export class RecognizerEngine {
 
     // -----------------------------------------------------------------------
     // Slow path: try each alt speculatively. First success wins.
-    // Matches @jesscss/parser's OR: save state, set speculating=true,
-    // try alt, on success return, on SPEC_FAIL restore and try next.
     // No bestProgress tracking — first success is final.
+    //
+    // Committed re-run: when all speculative alts fail but the fast-dispatch
+    // map identified which alt's first token matched (LL(1)), re-run that
+    // alt with IS_SPECULATING=false. This lets CONSUME throw real
+    // MismatchedTokenException for recovery (if enabled) or error
+    // propagation (if disabled). MANY catches the exception and checks
+    // progress to decide whether to stop or re-throw.
     // -----------------------------------------------------------------------
     const startLexPos = this.exportLexerState();
+    // Save CST/errors for clean state restoration. During speculation,
+    // successful CONSUMEs add CST nodes that aren't cleaned up on
+    // SPEC_FAIL (only lexer pos is restored).
+    const savedErrors = this._errors.length;
+    const savedCst = this.saveCstTop();
 
     for (let i = 0; i < alts.length; i++) {
       const alt = alts[i];
@@ -1281,13 +1303,65 @@ export class RecognizerEngine {
             addOrFastMapEntry(this._orFastMaps, mapKey, la1TypeIdx, i, alts);
           }
           this.importLexerState(startLexPos);
+          // Restore CST/errors so next alt starts with clean state.
+          this._errors.length = savedErrors;
+          this.restoreCstTop(savedCst);
           continue;
         }
         throw e;
       }
     }
 
-    // All alts failed. Restore gated-prefix tracking state.
+    // -----------------------------------------------------------------
+    // Committed re-run: all speculative alts failed, but the fast-dispatch
+    // map identified which alt's first token matched (LL(1) lookahead).
+    // Re-run that alt with IS_SPECULATING=false so CONSUME throws real
+    // MismatchedTokenException. This enables:
+    //   - Recovery (if recoveryEnabled): single-token insertion/deletion
+    //   - Error propagation (if recovery disabled): exception bubbles to
+    //     enclosing rule's invokeRuleCatch for error reporting
+    // MANY catches the propagating exception and uses progress to decide
+    // whether to stop iterating or re-throw for higher-level handling.
+    // -----------------------------------------------------------------
+    {
+      const recoveryMap = this._orFastMaps[mapKey];
+      if (recoveryMap !== undefined) {
+        let recoveryAltIdx = recoveryMap[la1TypeIdx];
+        if (recoveryAltIdx !== undefined && recoveryAltIdx >= 0) {
+          if (recoveryAltIdx >= GATED_OFFSET) recoveryAltIdx -= GATED_OFFSET;
+          // Restore clean state before committed re-run.
+          this.restoreCstTop(savedCst);
+          this._errors.length = savedErrors;
+          if (altStarts !== undefined)
+            this._dslCounter = savedDslCounter + altStarts[recoveryAltIdx];
+          this._orAltStartLexPos = startLexPos;
+          this._orAltHasGatedPrefix = false;
+          // Clear IS_SPECULATING so CONSUME throws real errors.
+          this.IS_SPECULATING = false;
+          try {
+            const result = alts[recoveryAltIdx].ALT.call(this) as T;
+            this.IS_SPECULATING = wasSpeculating;
+            this._orAltStartLexPos = savedAltStartLexPos;
+            this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+            {
+              const d = this._orCounterDeltas[mapKey];
+              if (d !== undefined) this._dslCounter = savedDslCounter + d;
+            }
+            return result;
+          } catch (e) {
+            // Recovery in invokeRuleCatch may have handled it (subrule
+            // returns normally). If the error propagates here, it means
+            // recovery couldn't fix it — let it bubble up.
+            this.IS_SPECULATING = wasSpeculating;
+            this._orAltStartLexPos = savedAltStartLexPos;
+            this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+            throw e;
+          }
+        }
+      }
+    }
+
+    // All alts failed. Restore tracking state.
     this._orAltStartLexPos = savedAltStartLexPos;
     this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
     {
@@ -1295,9 +1369,23 @@ export class RecognizerEngine {
       if (d !== undefined) this._dslCounter = savedDslCounter + d;
     }
 
-    // Signal failure: SPEC_FAIL if speculating (bubbles to outer OR/MANY),
-    // otherwise raise a real NoViableAltException.
-    if (this.IS_SPECULATING) throw SPEC_FAIL;
+    // If the fast map has ANY entry for this token (including ambiguous -1),
+    // the token matched at least one alt's first CONSUME during speculation.
+    // Raise a real NoViableAltException so the error propagates through MANY
+    // for proper error reporting, rather than being silently swallowed as
+    // SPEC_FAIL. MANY's catch handler uses progress to decide whether to
+    // stop iterating (no progress) or re-throw (progress made).
+    if (this.IS_SPECULATING) {
+      const failMap = this._orFastMaps[mapKey];
+      if (failMap !== undefined && failMap[la1TypeIdx] !== undefined) {
+        this.IS_SPECULATING = false;
+        this.restoreCstTop(savedCst);
+        this._errors.length = savedErrors;
+        this.raiseNoAltException(occurrence, errMsg);
+        // raiseNoAltException throws — unreachable.
+      }
+      throw SPEC_FAIL;
+    }
     this.raiseNoAltException(occurrence, errMsg);
   }
 
