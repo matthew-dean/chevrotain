@@ -754,6 +754,19 @@ export class Parser {
    * first-token set depends on gate state.
    */
   _orAltHasGatedPrefix!: boolean;
+  /**
+   * Set to true when ANY OPTION/MANY/AT_LEAST_ONE (gated or not) is
+   * encountered before the first CONSUME in an OR alt. When true, the
+   * alt's first-token match is not sufficient for committed dispatch —
+   * the alt could fail partway through depending on the OPTION path.
+   */
+  _orAltHasAnyPrefix!: boolean;
+  /**
+   * Per-OR, per-tokenTypeIdx committability. `true` = the alt that matched
+   * this token had no OPTION/MANY prefix, so committed dispatch is safe.
+   * `false` = the alt has a prefix, needs speculation.
+   */
+  _orCommittable!: Record<number, Record<number, boolean>>;
 
   initRecognizerEngine(
     this: MixedInParser,
@@ -777,6 +790,8 @@ export class Parser {
     this._orAltCounterStarts = Object.create(null);
     this._orAltStartLexPos = 0;
     this._orAltHasGatedPrefix = false;
+    this._orAltHasAnyPrefix = false;
+    this._orCommittable = Object.create(null);
 
     this.definedRulesNames = [];
     this.tokensMap = {};
@@ -1075,14 +1090,16 @@ export class Parser {
       gate = undefined;
     }
 
-    // GATE as a filter: if it fails skip immediately; if it passes fall through
-    // to the speculative save/restore path (gate is a necessary but not sufficient
-    // condition — the body may still not match the current tokens).
-    // Track gated prefix: if this gated production fires before the first
-    // CONSUME in an OR alt, the alt's first-token set is gate-dependent.
-    if (gate !== undefined && this.IS_SPECULATING) {
+    // Track prefix: if ANY OPTION fires before the first CONSUME in an OR alt,
+    // the alt's first-token is not sufficient for committed dispatch (the
+    // OPTION path could change the outcome for the same first token).
+    if (this.IS_SPECULATING) {
       if (this.exportLexerState() === this._orAltStartLexPos) {
-        this._orAltHasGatedPrefix = true;
+        this._orAltHasAnyPrefix = true;
+        // Track gated prefix separately for fast-map cache policy.
+        if (gate !== undefined) {
+          this._orAltHasGatedPrefix = true;
+        }
       }
     }
     if (gate !== undefined && !gate.call(this)) {
@@ -1148,10 +1165,13 @@ export class Parser {
       gate = undefined;
     }
 
-    // Track gated prefix for OR fast-path cache.
-    if (gate !== undefined && this.IS_SPECULATING) {
+    // Track prefix for OR fast-path cache.
+    if (this.IS_SPECULATING) {
       if (this.exportLexerState() === this._orAltStartLexPos) {
-        this._orAltHasGatedPrefix = true;
+        this._orAltHasAnyPrefix = true;
+        if (gate !== undefined) {
+          this._orAltHasGatedPrefix = true;
+        }
       }
     }
     if (gate !== undefined && !gate.call(this)) {
@@ -1388,10 +1408,13 @@ export class Parser {
     // If a recognition exception arrives with no progress, the body
     // couldn't start → break. With progress, it's a real error → re-throw.
     while (notStuck) {
-      // Track gated prefix for OR fast-path cache (first iteration only).
-      if (gate !== undefined && this.IS_SPECULATING && !ranAtLeastOnce) {
+      // Track prefix for OR fast-path cache (first iteration only).
+      if (this.IS_SPECULATING && !ranAtLeastOnce) {
         if (this.exportLexerState() === this._orAltStartLexPos) {
-          this._orAltHasGatedPrefix = true;
+          this._orAltHasAnyPrefix = true;
+          if (gate !== undefined) {
+            this._orAltHasGatedPrefix = true;
+          }
         }
       }
       if (gate !== undefined && !gate.call(this)) break;
@@ -1661,6 +1684,7 @@ export class Parser {
     // SUBRULEs) don't corrupt it.
     const savedAltStartLexPos = this._orAltStartLexPos;
     const savedAltHasGatedPrefix = this._orAltHasGatedPrefix;
+    const savedAltHasAnyPrefix = this._orAltHasAnyPrefix;
 
     const savedDslCounter = this._dslCounter;
     const mapKey = this.currRuleShortName | occurrence;
@@ -1775,6 +1799,43 @@ export class Parser {
         if (alt.GATE === undefined || alt.GATE.call(this)) {
           if (altStarts !== undefined)
             this._dslCounter = savedDslCounter + altStarts[realAltIdx];
+
+          // Check committability: if the alt had no OPTION/MANY prefix
+          // when it was observed during speculation, committed dispatch
+          // is safe — the first token uniquely determines the path.
+          const cm = this._orCommittable[mapKey];
+          if (
+            !wasSpeculating &&
+            !this.dynamicTokensEnabled &&
+            cm !== undefined &&
+            cm[la1TypeIdx] === true
+          ) {
+            // COMMITTED DISPATCH: no save/restore needed on success.
+            // If the alt unexpectedly fails (e.g., dynamic token re-lex),
+            // catch, revoke committability, and fall through to speculative.
+            const cmLexPos = this.currIdx;
+            const cmErrors = this._errors.length;
+            const cmCst = this.saveCstTop();
+            try {
+              const r = alt.ALT.call(this) as T;
+              {
+                const d = this._orCounterDeltas[mapKey];
+                if (d !== undefined) this._dslCounter = savedDslCounter + d;
+              }
+              this._orAltStartLexPos = savedAltStartLexPos;
+              this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+              this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
+              return r;
+            } catch (_e) {
+              // Revoke committability — this entry is not safe.
+              cm[la1TypeIdx] = false;
+              this.restoreCstTop(cmCst);
+              this.currIdx = cmLexPos;
+              this._errors.length = cmErrors;
+              // Fall through to speculative dispatch below.
+            }
+          }
+
           const fastLexPos = this.currIdx;
           if (wasSpeculating) {
             try {
@@ -1834,6 +1895,7 @@ export class Parser {
         this._dslCounter = savedDslCounter + altStarts[i];
       this._orAltStartLexPos = startLexPos;
       this._orAltHasGatedPrefix = false;
+      this._orAltHasAnyPrefix = false;
       try {
         const result = alt.ALT.call(this) as T;
         this.IS_SPECULATING = wasSpeculating;
@@ -1850,9 +1912,21 @@ export class Parser {
           }
         } else {
           addOrFastMapEntry(this._orFastMaps, mapKey, la1TypeIdx, i, alts);
+          // Record committability: if no OPTION/MANY/AT_LEAST_ONE fired
+          // before the first CONSUME, committed dispatch is safe.
+          if (!this._orAltHasAnyPrefix) {
+            let cm = this._orCommittable[mapKey];
+            if (cm === undefined) {
+              cm = Object.create(null);
+              this._orCommittable[mapKey] = cm;
+            }
+            cm[la1TypeIdx] = true;
+          }
         }
         this._orAltStartLexPos = savedAltStartLexPos;
         this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+        this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
+        this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
         {
           const d = this._orCounterDeltas[mapKey];
           if (d !== undefined) this._dslCounter = savedDslCounter + d;
@@ -1921,6 +1995,7 @@ export class Parser {
             this.IS_SPECULATING = wasSpeculating;
             this._orAltStartLexPos = savedAltStartLexPos;
             this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+            this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
             {
               const d = this._orCounterDeltas[mapKey];
               if (d !== undefined) this._dslCounter = savedDslCounter + d;
@@ -1933,6 +2008,7 @@ export class Parser {
             this.IS_SPECULATING = wasSpeculating;
             this._orAltStartLexPos = savedAltStartLexPos;
             this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+            this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
             throw e;
           }
         }
