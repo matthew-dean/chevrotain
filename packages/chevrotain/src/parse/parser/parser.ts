@@ -1335,6 +1335,8 @@ export class Parser {
       gate = undefined;
     }
 
+    const errors = this._errors;
+
     // Track prefix: if ANY OPTION fires before the first CONSUME in an OR alt,
     // the alt's first-token is not sufficient for committed dispatch (the
     // OPTION path could change the outcome for the same first token).
@@ -1371,17 +1373,17 @@ export class Parser {
 
     // Speculative OPTION: save state, try body, restore on failure.
     const startLexPos = this.exportLexerState();
-    const startErrors = this._errors.length;
+    const startErrors = errors.length;
     const cstSave = this.saveCstTop();
     try {
       const result = action.call(this);
       if (
         this.exportLexerState() === startLexPos ||
-        this._errors.length > startErrors
+        errors.length > startErrors
       ) {
         this.restoreCstTop(cstSave);
         this.importLexerState(startLexPos);
-        this._errors.length = startErrors;
+        errors.length = startErrors;
         return undefined;
       }
       return result;
@@ -1389,7 +1391,7 @@ export class Parser {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
         this.restoreCstTop(cstSave);
         this.importLexerState(startLexPos);
-        this._errors.length = startErrors;
+        errors.length = startErrors;
         return undefined;
       }
       throw e;
@@ -1419,13 +1421,18 @@ export class Parser {
   ): void {
     let action: GrammarAction<OUT>;
     let gate: (() => boolean) | undefined;
+    let errMsg: string | undefined;
     if (typeof actionORMethodDef !== "function") {
       action = actionORMethodDef.DEF;
       gate = actionORMethodDef.GATE;
+      errMsg = actionORMethodDef.ERR_MSG;
     } else {
       action = actionORMethodDef;
       gate = undefined;
+      errMsg = undefined;
     }
+
+    const errors = this._errors;
 
     // Track prefix for OR fast-path cache.
     if (this.IS_SPECULATING) {
@@ -1440,7 +1447,7 @@ export class Parser {
       throw this.raiseEarlyExitException(
         prodOccurrence,
         PROD_TYPE.REPETITION_MANDATORY,
-        (actionORMethodDef as DSLMethodOptsWithErr<OUT>).ERR_MSG,
+        errMsg,
       );
     }
 
@@ -1451,11 +1458,12 @@ export class Parser {
     // it committed. This prevents invokeRuleCatch inside the action from silently
     // recovering (advancing to the follow token) and making AT_LEAST_ONE think
     // the first iteration succeeded when no matching tokens were consumed.
-    if (!this.makeSpecLookahead(action)()) {
+    const lookaheadFunc = this.makeSpecLookahead(action);
+    if (!lookaheadFunc()) {
       throw this.raiseEarlyExitException(
         prodOccurrence,
         PROD_TYPE.REPETITION_MANDATORY,
-        (actionORMethodDef as DSLMethodOptsWithErr<OUT>).ERR_MSG,
+        errMsg,
       );
     }
 
@@ -1463,7 +1471,7 @@ export class Parser {
     {
       this._dslCounter = savedRepDslCounter;
       const firstLexPos = this.exportLexerState();
-      const firstErrors = this._errors.length;
+      const firstErrors = errors.length;
       const firstCstSave = this.saveCstTop();
       try {
         action.call(this);
@@ -1471,11 +1479,11 @@ export class Parser {
         if (e === SPEC_FAIL || isRecognitionException(e)) {
           this.restoreCstTop(firstCstSave);
           this.importLexerState(firstLexPos);
-          this._errors.length = firstErrors;
+          errors.length = firstErrors;
           throw this.raiseEarlyExitException(
             prodOccurrence,
             PROD_TYPE.REPETITION_MANDATORY,
-            (actionORMethodDef as DSLMethodOptsWithErr<OUT>).ERR_MSG,
+            errMsg,
           );
         }
         throw e;
@@ -1487,12 +1495,11 @@ export class Parser {
     // that nested invokeRuleCatch can perform normal error recovery. This
     // matches the original LL(k) engine's behaviour where each iteration was
     // fully committed once the lookahead said "yes".
-    const lookaheadFunc = this.makeSpecLookahead(action);
     while (lookaheadFunc()) {
       if (gate !== undefined && !gate.call(this)) break;
       this._dslCounter = savedRepDslCounter;
       const iterLexPos = this.exportLexerState();
-      const iterErrors = this._errors.length;
+      const iterErrors = errors.length;
       const cstSave = this.saveCstTop();
       try {
         // Run committed — any recovery happens inside the subrule's invokeRuleCatch.
@@ -1504,7 +1511,7 @@ export class Parser {
         if (e === SPEC_FAIL || isRecognitionException(e)) {
           this.restoreCstTop(cstSave);
           this.importLexerState(iterLexPos);
-          this._errors.length = iterErrors;
+          errors.length = iterErrors;
           break;
         }
         throw e;
@@ -1513,7 +1520,7 @@ export class Parser {
       if (this.exportLexerState() <= iterLexPos) {
         this.restoreCstTop(cstSave);
         this.importLexerState(iterLexPos);
-        this._errors.length = iterErrors;
+        errors.length = iterErrors;
         break;
       }
     }
@@ -1553,6 +1560,8 @@ export class Parser {
   ): void {
     const action = options.DEF;
     const separator = options.SEP;
+    const errors = this._errors;
+    const tokenMatcher = this.tokenMatcher;
 
     // Save _dslCounter so each iteration starts from the same value.
     const savedRepDslCounter = this._dslCounter;
@@ -1561,15 +1570,15 @@ export class Parser {
     {
       this._dslCounter = savedRepDslCounter;
       const firstLexPos = this.exportLexerState();
-      const firstErrors = this._errors.length;
+      const firstErrors = errors.length;
       const firstCstSave = this.saveCstTop();
       try {
-        (action as GrammarAction<OUT>).call(this);
+        action.call(this);
       } catch (e) {
         if (e === SPEC_FAIL || isRecognitionException(e)) {
           this.restoreCstTop(firstCstSave);
           this.importLexerState(firstLexPos);
-          this._errors.length = firstErrors;
+          errors.length = firstErrors;
           throw this.raiseEarlyExitException(
             prodOccurrence,
             PROD_TYPE.REPETITION_MANDATORY_WITH_SEPARATOR,
@@ -1580,16 +1589,15 @@ export class Parser {
       }
     }
 
-    // The separator token acts as a reliable lookahead for subsequent iterations.
-    const separatorLookAheadFunc = () => {
-      return this.tokenMatcher(this.LA_FAST(1), separator);
-    };
-
-    // 2nd..nth iterations
-    while (this.tokenMatcher(this.LA_FAST(1), separator) === true) {
+    // Subsequent iterations: separator-driven, no speculation needed.
+    // Save _dslCounter before each iteration so occurrence numbering inside
+    // the repeated body stays identical across iterations.
+    const separatorLookAheadFunc = () =>
+      tokenMatcher(this.LA_FAST(1), separator);
+    while (tokenMatcher(this.LA_FAST(1), separator) === true) {
       this.CONSUME(separator);
       this._dslCounter = savedRepDslCounter;
-      (action as GrammarAction<OUT>).call(this);
+      action.call(this);
     }
 
     // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
@@ -1642,7 +1650,7 @@ export class Parser {
     this: MixedInParser,
     prodOccurrence: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
-  ) {
+  ): void {
     let action: GrammarAction<OUT>;
     let gate: (() => boolean) | undefined;
     if (typeof actionORMethodDef !== "function") {
@@ -1653,18 +1661,9 @@ export class Parser {
       gate = undefined;
     }
 
+    const errors = this._errors;
     const wasSpeculating = this.IS_SPECULATING;
-    let notStuck = true;
-    let ranAtLeastOnce = false;
-    // lookaheadFunc built lazily on first exit (for recovery pass below)
-    let lookaheadFunc: (() => boolean) | undefined;
-
-    // Save _dslCounter so each iteration of the repetition body starts from
-    // the same counter value. The GAST records only one iteration's DSL calls,
-    // so all runtime iterations must produce the same occurrence indices.
     const savedRepDslCounter = this._dslCounter;
-
-    // Check for precomputed lookahead set (built from GAST).
     const laKey = getKeyForAutomaticLookahead(
       this.currRuleShortName,
       MANY_IDX,
@@ -1672,29 +1671,33 @@ export class Parser {
     );
     const laSet = this._prodLookahead[laKey];
 
+    let notStuck = true;
+    let ranAtLeastOnce = false;
+    let lookaheadFunc: (() => boolean) | undefined;
+
+    // Fast committed path: precomputed first-token set says whether the MANY
+    // body may start. No speculation or try/catch needed here.
     if (laSet !== undefined && !wasSpeculating) {
-      // -----------------------------------------------------------------
-      // COMMITTED MANY: precomputed lookahead available and not speculating.
-      // Check LA(1) against the token set → run body committed.
-      // No try/catch, no state save/restore. Matches upstream behavior.
-      // -----------------------------------------------------------------
       while (notStuck) {
         if (gate !== undefined && !gate.call(this)) break;
         if (laSet[this.LA_FAST(1).tokenTypeIdx] !== true) break;
+
         this._dslCounter = savedRepDslCounter;
         const iterLexPos = this.exportLexerState();
+
         action.call(this);
+
+        // Stuck guard: the body must consume at least one token.
         if (this.exportLexerState() <= iterLexPos) {
           notStuck = false;
           break;
         }
+
         ranAtLeastOnce = true;
       }
     } else {
-      // -----------------------------------------------------------------
-      // SPECULATIVE MANY: no precomputed lookahead, or already speculating.
-      // IS_SPECULATING=true, catch SPEC_FAIL to stop.
-      // -----------------------------------------------------------------
+      // Slow speculative path: try the body under IS_SPECULATING=true,
+      // rollback on SPEC_FAIL or on recognition exceptions with no progress.
       while (notStuck) {
         if (this.IS_SPECULATING && !ranAtLeastOnce) {
           if (this.exportLexerState() === this._orAltStartLexPos) {
@@ -1704,46 +1707,55 @@ export class Parser {
             }
           }
         }
+
         if (gate !== undefined && !gate.call(this)) break;
+
         this._dslCounter = savedRepDslCounter;
         const iterLexPos = this.exportLexerState();
-        const iterErrors = this._errors.length;
-        const iterCstSave = this.saveCstTop();
+        const iterErrors = errors.length;
+        const cstSave = this.saveCstTop();
+
         this.IS_SPECULATING = true;
         try {
           action.call(this);
           this.IS_SPECULATING = wasSpeculating;
         } catch (e) {
           this.IS_SPECULATING = wasSpeculating;
+
           if (e === SPEC_FAIL) {
             this.importLexerState(iterLexPos);
-            this.restoreCstTop(iterCstSave);
-            this._errors.length = iterErrors;
+            this.restoreCstTop(cstSave);
+            errors.length = iterErrors;
             break;
           }
+
           if (isRecognitionException(e)) {
             if (this.exportLexerState() > iterLexPos) {
               throw e;
             }
             this.importLexerState(iterLexPos);
-            this.restoreCstTop(iterCstSave);
+            this.restoreCstTop(cstSave);
+            errors.length = iterErrors;
             break;
           }
+
           throw e;
         }
+
+        // Stuck guard: successful speculative iteration that consumed nothing.
         if (this.exportLexerState() <= iterLexPos) {
           this.importLexerState(iterLexPos);
           notStuck = false;
           break;
         }
+
         ranAtLeastOnce = true;
       }
     }
 
-    // Only attempt in-repetition recovery if ≥1 iterations ran successfully.
+    // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
     if (ranAtLeastOnce) {
       lookaheadFunc ??= this.makeSpecLookahead(action);
-      // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
       this.attemptInRepetitionRecovery(
         this.manyInternal,
         [prodOccurrence, actionORMethodDef],
@@ -1780,13 +1792,15 @@ export class Parser {
   ): void {
     const action = options.DEF;
     const separator = options.SEP;
+    const errors = this._errors;
+    const tokenMatcher = this.tokenMatcher;
 
     // Save _dslCounter so each iteration starts from the same value.
     const savedRepDslCounter = this._dslCounter;
 
     // Optional first iteration — try without IS_SPECULATING.
     const firstLexPos = this.exportLexerState();
-    const firstErrors = this._errors.length;
+    const firstErrors = errors.length;
     const firstCstSave = this.saveCstTop();
     try {
       action.call(this);
@@ -1794,24 +1808,23 @@ export class Parser {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
         this.restoreCstTop(firstCstSave);
         this.importLexerState(firstLexPos);
-        this._errors.length = firstErrors;
-        return; // zero iterations — MANY_SEP is optional
+        errors.length = firstErrors;
+        return;
       }
       throw e;
     }
-    // Stuck guard: first element consumed no tokens → treat as zero iterations.
+    // Stuck guard: body consumed nothing → treat as "not present".
     if (this.exportLexerState() <= firstLexPos) {
       this.restoreCstTop(firstCstSave);
       this.importLexerState(firstLexPos);
-      this._errors.length = firstErrors;
+      errors.length = firstErrors;
       return;
     }
 
-    const separatorLookAheadFunc = () => {
-      return this.tokenMatcher(this.LA_FAST(1), separator);
-    };
-    // 2nd..nth iterations
-    while (this.tokenMatcher(this.LA_FAST(1), separator) === true) {
+    // Subsequent iterations: separator-driven, no speculation needed.
+    const separatorLookAheadFunc = () =>
+      tokenMatcher(this.LA_FAST(1), separator);
+    while (tokenMatcher(this.LA_FAST(1), separator) === true) {
       this.CONSUME(separator);
       this._dslCounter = savedRepDslCounter;
       action.call(this);
@@ -1859,8 +1872,8 @@ export class Parser {
         action.call(this);
         return true;
       } catch (e) {
-        if (e === SPEC_FAIL || isRecognitionException(e)) return false;
         if (e === FIRST_TOKEN_MATCH) return true;
+        if (e === SPEC_FAIL || isRecognitionException(e)) return false;
         throw e;
       } finally {
         this._earlyExitLookahead = false;
