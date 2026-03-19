@@ -115,6 +115,40 @@ exactly. The `Lexer` is improved but its interface is unchanged.
   switched from `Object.create(null)` to `[]`. `MAX_METHOD_IDX` hardcoded to
   127 (independent of bit constants). JSON +9% (11,913 → 13,014 ops/sec, 90%
   of v12 14,448). CSS now faster than v12 (2,119 vs 2,025 ops/sec).
+
+### Current profile breakdown (post-compact-key, JSON EmbeddedActionsParser warm)
+
+| Symbol                 | Ours  | v12   | Notes                                    |
+| ---------------------- | ----- | ----- | ---------------------------------------- |
+| `tokenizeInternal`     | 37%   | 41%   | Absolute lexer time is equal             |
+| RegExps (all)          | 18%   | 24%   | Same                                     |
+| `invokeRuleWithTryCst` | 1.3%  | 0.6%  | Extra: `_dslCounter` save/restore        |
+| `orDispatchLL1Simple`  | 0.5%  | 0%    | Indirect closure call; v12 inlines equiv |
+| `manyInternalLogic`    | 0.3%  | 0.3%  | Same                                     |
+| GC / C++               | 28.4% | 24.8% | Largely measurement noise                |
+
+The lexer takes the same absolute wall-time as v12. The remaining ~10% gap is:
+
+1. `invokeRuleWithTryCst` 2× v12 cost — the 3 extra property r/w for `_dslCounter`
+   save/restore. Estimated savings if removed: ~1.8% total.
+2. `orDispatchLL1Simple` — indirect closure call not inlined by V8 because the
+   closure both looks up altIdx AND calls `ALT.call(this)` (v12 separates these,
+   making the lookup closure small enough to inline). Estimated savings: ~0.5%.
+3. Residual structural overhead from `_dslCounter` management throughout: the
+   full elimination requires replacing `_dslCounter` with static compile-time
+   indices (like v12's OR1/OR2 naming), which is a major refactor.
+
+- ⬜ **`orDispatchLL1Simple` — split lookup from call**: return altIdx from the
+  closure instead of calling ALT; have OR() call `alts[altIdx].ALT.call(this)`
+  directly. Makes the closure small enough for V8 to inline (like v12). Trades
+  closure simplicity for slightly more code in OR() — net should be a win.
+- ⬜ **`invokeRuleWithTryCst` — skip `_dslCounter` save/restore when possible**:
+  parser methods that are only ever called as top-level rules (never as subrules)
+  don't need the save/restore. Could specialize at `RULE()` definition time.
+- ⬜ **Post-performSelfAnalysis method specialization**: after `performSelfAnalysis`
+  completes, `RECORDING_PHASE` is always false. Swap prototype OR/MANY/OPTION
+  methods to versions that skip the `RECORDING_PHASE` guard. Saves 1 property
+  read + branch per DSL call. Needs careful prototype-swap implementation.
 - ⬜ **Eliminate `_dslCounter` from hot paths**: when performSelfAnalysis was
   called, counter deltas are known statically. Bake them into the closure or
   pre-compute a static occurrence mapping. Saves 4-5 property accesses per OR.
@@ -125,13 +159,13 @@ exactly. The `Lexer` is improved but its interface is unchanged.
   and `IS_SPECULATING` checks (2 property reads + 2 branches per CONSUME).
 - ⬜ **Single-dispatch MANY closures**: like OR, replace `_prodLookahead[laKey]`
   lookup with a single cached closure per MANY site.
-- ⬜ **`invokeRuleWithTryCst` try/catch** (10% of profile): structural per-rule
-  cost. Shared with upstream. Investigate if outer recovery can be removed for
-  `recoveryEnabled=false` (default) parsers.
+- ⬜ **`invokeRuleWithTryCst` try/catch** (structural per-rule cost): investigate
+  if the outer recovery try/catch can be removed for `recoveryEnabled=false`
+  (default) parsers — shared with upstream, but worth profiling the saving.
 
 ### Lexer investigations (after parser gap is closed)
 
-CPU profile breakdown (current): ~44% lexer, ~56% parser.
+CPU profile breakdown (current, post-compact-key): ~55% lexer, ~16% parser, ~29% GC.
 Lexer costs are significant even at parity. Worth investigating after parser gap
 is minimized, as lexer improvements benefit all users regardless of parser type.
 
