@@ -769,34 +769,27 @@ export class Parser {
         const insidePaths = paths[0];
         const afterPaths = paths[1];
         if (insidePaths === undefined || insidePaths.length === 0) continue;
-        // Only use simple token set check when all inside paths are LL(1).
-        const allSingleToken = insidePaths.every((p) => p.length === 1);
-        if (!allSingleToken) continue;
-        // Verify inside and after paths don't overlap at k=1.
-        // If they do, LL(1) can't distinguish enter vs skip.
-        if (afterPaths !== undefined) {
-          const afterSingleToken = afterPaths.every((p) => p.length === 1);
-          if (afterSingleToken) {
-            const afterSet = new Set(afterPaths.map((p) => p[0]?.tokenTypeIdx));
-            const hasOverlap = insidePaths.some((p) =>
-              afterSet.has(p[0]?.tokenTypeIdx),
-            );
-            if (hasOverlap) continue; // ambiguous at k=1 → skip
-          }
+        // Skip if inside and after paths overlap — committed dispatch would
+        // enter the body when it should skip. This happens when the
+        // production's maxLookahead is too low to disambiguate.
+        if (afterPaths !== undefined && afterPaths.length > 0) {
+          const insideFirst = new Set(
+            insidePaths
+              .filter((p) => p.length > 0)
+              .map((p) => p[0]?.tokenTypeIdx),
+          );
+          const hasOverlap = afterPaths.some(
+            (p) => p.length > 0 && insideFirst.has(p[0]?.tokenTypeIdx),
+          );
+          if (hasOverlap) continue;
         }
-        const set: Record<number, true> = Object.create(null);
-        for (const path of insidePaths) {
-          const tokType = path[0];
-          if (tokType.tokenTypeIdx !== undefined) {
-            set[tokType.tokenTypeIdx] = true;
-            if (tokType.categoryMatches) {
-              for (const catIdx of tokType.categoryMatches) {
-                set[catIdx] = true;
-              }
-            }
-          }
-        }
-        this._prodLookahead[laKey] = set;
+        // Build an LL(k) lookahead closure.
+        const tmatcher = this.tokenMatcher;
+        this._prodLookahead[laKey] = buildSingleAlternativeLookaheadFunction(
+          insidePaths,
+          tmatcher,
+          this.dynamicTokensEnabled,
+        );
       }
     }
   }
@@ -1037,7 +1030,13 @@ export class Parser {
    * the production uses `set[LA(1).tokenTypeIdx]` instead of speculative
    * try/catch — matching upstream's precomputed lookahead behavior.
    */
-  _prodLookahead!: Record<number, Record<number, true>>;
+  /**
+   * Precomputed LL(k) lookahead closures for MANY/OPTION/AT_LEAST_ONE.
+   * Built by buildSingleAlternativeLookaheadFunction during performSelfAnalysis.
+   * For LL(1): single token check. For LL(k>1): multi-token path matching.
+   * Returns true if the body should be entered, false to skip.
+   */
+  _prodLookahead!: Record<number, () => boolean>;
 
   initRecognizerEngine(
     tokenVocabulary: TokenVocabulary,
@@ -1371,16 +1370,30 @@ export class Parser {
       return undefined;
     }
 
-    // Committed OPTION: precomputed discriminating lookahead available.
+    // Committed OPTION: precomputed LL(k) lookahead closure available.
     if (occurrence !== undefined && !this.IS_SPECULATING) {
-      // Inline key computation and lookahead check for minimal overhead.
-      const laSet =
+      const laFunc =
         this._prodLookahead[this.currRuleShortName | OPTION_IDX | occurrence];
-      if (laSet !== undefined) {
-        if (laSet[this.tokVector[this.currIdx + 1].tokenTypeIdx] !== true) {
+      if (laFunc !== undefined) {
+        if (!laFunc.call(this)) {
           return undefined;
         }
-        return action.call(this);
+        // Committed OPTION body. If it fails (e.g., body needs more
+        // tokens than lookahead checked), treat as "skip OPTION".
+        const optPos = this.currIdx;
+        const optErrors = errors.length;
+        const optCst = this.saveCstTop();
+        try {
+          return action.call(this);
+        } catch (e) {
+          if (e === SPEC_FAIL || isRecognitionException(e)) {
+            this.restoreCstTop(optCst);
+            this.currIdx = optPos;
+            errors.length = optErrors;
+            return undefined;
+          }
+          throw e;
+        }
       }
     }
 
@@ -1682,11 +1695,9 @@ export class Parser {
     // Fast committed path: precomputed first-token set says whether the MANY
     // body may start. No speculation, no try/catch, minimal property access.
     if (laSet !== undefined && !wasSpeculating) {
-      const tv = this.tokVector;
       while (notStuck) {
         if (gate !== undefined && !gate.call(this)) break;
-        // Inline LA_FAST(1) → tokVector[currIdx + 1] to avoid method call.
-        if (laSet[tv[this.currIdx + 1].tokenTypeIdx] !== true) break;
+        if (!laSet.call(this)) break;
 
         this._dslCounter = savedRepDslCounter;
         const iterPos = this.currIdx;
