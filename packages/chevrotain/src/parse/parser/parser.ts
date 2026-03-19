@@ -2048,7 +2048,12 @@ export class Parser {
             !wasSpeculating &&
             !this.dynamicTokensEnabled &&
             cm !== undefined &&
-            cm[la1TypeIdx] === true
+            cm[la1TypeIdx] === true &&
+            // Dynamic alts guard: committable entry must match the current
+            // alts array. GAST-populated entries have no altsRef, so they're
+            // safe (GAST analysis is independent of runtime alts). Runtime-
+            // populated entries have an altsRef that must match.
+            (cachedAltsRef === undefined || cachedAltsRef === alts)
           ) {
             // COMMITTED DISPATCH: zero overhead. If the alt fails, the
             // exception propagates to invokeRuleCatch for recovery.
