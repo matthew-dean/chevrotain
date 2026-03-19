@@ -115,6 +115,7 @@ import {
   getKeyForAutomaticLookahead,
   MANY_IDX,
   MANY_SEP_IDX,
+  OPTION_IDX,
 } from "../grammar/keys.js";
 import {
   validateLookahead,
@@ -612,22 +613,31 @@ export class Parser {
       const ruleShortName = this.fullRuleNameToShort[rule.name];
       if (ruleShortName === undefined) continue;
 
-      // Recursively find all Alternation nodes in this rule's GAST.
+      // Recursively find all production nodes in this rule's GAST.
       const alternations: InstanceType<typeof Alternation>[] = [];
-      const findAlternations = (prods: IProduction[]) => {
+      type RepInfo = {
+        prod: IProduction & { idx: number; definition: IProduction[] };
+        typeIdx: number;
+      };
+      const repetitions: RepInfo[] = [];
+      const findProductions = (prods: IProduction[]) => {
         for (const prod of prods) {
-          // Don't follow NonTerminal references — they point to other
-          // rules whose Alternations have their own ruleShortName.
           if (prod instanceof NonTerminal) continue;
           if (prod instanceof Alternation) {
             alternations.push(prod);
+          } else if (prod instanceof Repetition) {
+            repetitions.push({ prod, typeIdx: MANY_IDX });
+          } else if (prod instanceof RepetitionMandatory) {
+            repetitions.push({ prod, typeIdx: AT_LEAST_ONE_IDX });
+          } else if (prod instanceof Option) {
+            repetitions.push({ prod, typeIdx: OPTION_IDX });
           }
           if ("definition" in prod && Array.isArray(prod.definition)) {
-            findAlternations(prod.definition);
+            findProductions(prod.definition);
           }
         }
       };
-      findAlternations(rule.definition);
+      findProductions(rule.definition);
 
       for (const node of alternations) {
         const mapKey = ruleShortName | node.idx;
@@ -691,6 +701,50 @@ export class Parser {
             }
           }
         }
+      }
+
+      // Build discriminating lookahead sets for MANY/OPTION/AT_LEAST_ONE.
+      // Uses getLookaheadPathsForOptionalProd which computes BOTH the
+      // body's first tokens AND the REST tokens (what follows), then
+      // finds discriminating sequences. For LL(1), this is the body's
+      // first tokens MINUS any tokens shared with REST.
+      for (const { prod, typeIdx } of repetitions) {
+        const laKey = getKeyForAutomaticLookahead(
+          ruleShortName,
+          typeIdx,
+          prod.idx,
+        );
+        let paths;
+        try {
+          paths = getLookaheadPathsForOptionalProd(
+            prod.idx,
+            rule,
+            typeIdx as PROD_TYPE,
+            this.maxLookahead,
+          );
+        } catch (_e) {
+          // GAST walk failed (e.g., unresolved NonTerminal refs) — skip.
+          continue;
+        }
+        // paths[0] = inside paths (enter body), paths[1] = after paths (skip)
+        const insidePaths = paths[0];
+        if (insidePaths === undefined || insidePaths.length === 0) continue;
+        // Only use simple token set check when all inside paths are LL(1).
+        const allSingleToken = insidePaths.every((p) => p.length === 1);
+        if (!allSingleToken) continue;
+        const set: Record<number, true> = Object.create(null);
+        for (const path of insidePaths) {
+          const tokType = path[0];
+          if (tokType.tokenTypeIdx !== undefined) {
+            set[tokType.tokenTypeIdx] = true;
+            if (tokType.categoryMatches) {
+              for (const catIdx of tokType.categoryMatches) {
+                set[catIdx] = true;
+              }
+            }
+          }
+        }
+        this._prodLookahead[laKey] = set;
       }
     }
   }
@@ -917,6 +971,14 @@ export class Parser {
    * `false` = the alt has a prefix, needs speculation.
    */
   _orCommittable!: Record<number, Record<number, boolean>>;
+  /**
+   * Precomputed first-token sets for MANY/OPTION/AT_LEAST_ONE bodies.
+   * Keyed by `getKeyForAutomaticLookahead(ruleShortName, prodTypeIdx, occurrence)`.
+   * Values: `Record<tokenTypeIdx, true>` — a hash set. When present,
+   * the production uses `set[LA(1).tokenTypeIdx]` instead of speculative
+   * try/catch — matching upstream's precomputed lookahead behavior.
+   */
+  _prodLookahead!: Record<number, Record<number, true>>;
 
   initRecognizerEngine(
     this: MixedInParser,
@@ -943,6 +1005,7 @@ export class Parser {
     this._orAltHasGatedPrefix = false;
     this._orAltHasAnyPrefix = false;
     this._orCommittable = Object.create(null);
+    this._prodLookahead = Object.create(null);
 
     this.definedRulesNames = [];
     this.tokensMap = {};
@@ -1208,9 +1271,9 @@ export class Parser {
   optionInternal<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
-    _occurrence: number,
+    occurrence: number,
   ): OUT | undefined {
-    return this.optionInternalLogic(actionORMethodDef);
+    return this.optionInternalLogic(actionORMethodDef, occurrence);
   }
 
   /**
@@ -1230,6 +1293,7 @@ export class Parser {
   optionInternalLogic<OUT>(
     this: MixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+    occurrence?: number,
   ): OUT | undefined {
     let action: GrammarAction<OUT>;
     let gate: (() => boolean) | undefined;
@@ -1257,13 +1321,16 @@ export class Parser {
       return undefined;
     }
 
+    // TODO: Committed OPTION requires knowing the REST tokens (what follows
+    // the OPTION) to distinguish "enter body" from "skip". For now, OPTION
+    // remains speculative. MANY is the bigger win (hot loops).
+
+    // Speculative OPTION: save state, try body, restore on failure.
     const startLexPos = this.exportLexerState();
     const startErrors = this._errors.length;
     const cstSave = this.saveCstTop();
     try {
       const result = action.call(this);
-      // Stuck guard: if body didn't advance pos, or recovery added
-      // errors (meaning the optional content wasn't really present), undo.
       if (
         this.exportLexerState() === startLexPos ||
         this._errors.length > startErrors
@@ -1553,65 +1620,80 @@ export class Parser {
     // so all runtime iterations must produce the same occurrence indices.
     const savedRepDslCounter = this._dslCounter;
 
-    // Speculative body: IS_SPECULATING=true, catch SPEC_FAIL to stop.
-    // Also catches recognition exceptions from OR's committed re-run
-    // (which temporarily clears IS_SPECULATING for error recovery).
-    // If a recognition exception arrives with no progress, the body
-    // couldn't start → break. With progress, it's a real error → re-throw.
-    while (notStuck) {
-      // Track prefix for OR fast-path cache (first iteration only).
-      if (this.IS_SPECULATING && !ranAtLeastOnce) {
-        if (this.exportLexerState() === this._orAltStartLexPos) {
-          this._orAltHasAnyPrefix = true;
-          if (gate !== undefined) {
-            this._orAltHasGatedPrefix = true;
-          }
-        }
-      }
-      if (gate !== undefined && !gate.call(this)) break;
-      // Reset counter for this iteration to match GAST recording.
-      this._dslCounter = savedRepDslCounter;
-      const iterLexPos = this.exportLexerState();
-      const iterErrors = this._errors.length;
-      const iterCstSave = this.saveCstTop();
-      this.IS_SPECULATING = true;
-      try {
+    // Check for precomputed lookahead set (built from GAST).
+    const laKey = getKeyForAutomaticLookahead(
+      this.currRuleShortName,
+      MANY_IDX,
+      prodOccurrence,
+    );
+    const laSet = this._prodLookahead[laKey];
+
+    if (laSet !== undefined && !wasSpeculating) {
+      // -----------------------------------------------------------------
+      // COMMITTED MANY: precomputed lookahead available and not speculating.
+      // Check LA(1) against the token set → run body committed.
+      // No try/catch, no state save/restore. Matches upstream behavior.
+      // -----------------------------------------------------------------
+      while (notStuck) {
+        if (gate !== undefined && !gate.call(this)) break;
+        if (laSet[this.LA_FAST(1).tokenTypeIdx] !== true) break;
+        this._dslCounter = savedRepDslCounter;
+        const iterLexPos = this.exportLexerState();
         action.call(this);
-        this.IS_SPECULATING = wasSpeculating;
-      } catch (e) {
-        this.IS_SPECULATING = wasSpeculating;
-        if (e === SPEC_FAIL) {
-          // Speculative failure: body can't match → stop iterating.
-          this.importLexerState(iterLexPos);
-          this.restoreCstTop(iterCstSave);
-          this._errors.length = iterErrors;
+        if (this.exportLexerState() <= iterLexPos) {
+          notStuck = false;
           break;
         }
-        if (isRecognitionException(e)) {
-          // Real error from OR's committed re-run (IS_SPECULATING was
-          // temporarily cleared). Check if the body made progress:
-          if (this.exportLexerState() > iterLexPos) {
-            // Body partially matched → real error → propagate for
-            // recovery (invokeRuleCatch) or error reporting.
-            throw e;
+        ranAtLeastOnce = true;
+      }
+    } else {
+      // -----------------------------------------------------------------
+      // SPECULATIVE MANY: no precomputed lookahead, or already speculating.
+      // IS_SPECULATING=true, catch SPEC_FAIL to stop.
+      // -----------------------------------------------------------------
+      while (notStuck) {
+        if (this.IS_SPECULATING && !ranAtLeastOnce) {
+          if (this.exportLexerState() === this._orAltStartLexPos) {
+            this._orAltHasAnyPrefix = true;
+            if (gate !== undefined) {
+              this._orAltHasGatedPrefix = true;
+            }
           }
-          // No progress → body can't start → stop iterating.
-          // Restore pos and CST, but NOT errors — the recognition
-          // exception (e.g., NoViableAltException from ambiguous OR)
-          // was intentionally added to _errors and should be kept.
+        }
+        if (gate !== undefined && !gate.call(this)) break;
+        this._dslCounter = savedRepDslCounter;
+        const iterLexPos = this.exportLexerState();
+        const iterErrors = this._errors.length;
+        const iterCstSave = this.saveCstTop();
+        this.IS_SPECULATING = true;
+        try {
+          action.call(this);
+          this.IS_SPECULATING = wasSpeculating;
+        } catch (e) {
+          this.IS_SPECULATING = wasSpeculating;
+          if (e === SPEC_FAIL) {
+            this.importLexerState(iterLexPos);
+            this.restoreCstTop(iterCstSave);
+            this._errors.length = iterErrors;
+            break;
+          }
+          if (isRecognitionException(e)) {
+            if (this.exportLexerState() > iterLexPos) {
+              throw e;
+            }
+            this.importLexerState(iterLexPos);
+            this.restoreCstTop(iterCstSave);
+            break;
+          }
+          throw e;
+        }
+        if (this.exportLexerState() <= iterLexPos) {
           this.importLexerState(iterLexPos);
-          this.restoreCstTop(iterCstSave);
+          notStuck = false;
           break;
         }
-        throw e;
+        ranAtLeastOnce = true;
       }
-      // Stuck guard: body consumed no tokens → stop to prevent infinite loops.
-      if (this.exportLexerState() <= iterLexPos) {
-        this.importLexerState(iterLexPos);
-        notStuck = false;
-        break;
-      }
-      ranAtLeastOnce = true;
     }
 
     // Only attempt in-repetition recovery if ≥1 iterations ran successfully.
