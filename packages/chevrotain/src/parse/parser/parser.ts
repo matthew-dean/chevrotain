@@ -858,6 +858,83 @@ export class Parser {
   }
 
   /**
+   * Lazily build an OR dispatch closure after the first speculative pass.
+   * Ensures GAST is populated (via lazy recording), then builds the LL(k)
+   * closure from GAST — same as prePopulateOrFastMaps but for a single OR.
+   */
+  private lazyBuildOrClosure(mapKey: number): void {
+    try {
+      this.ensureGastProductionsCachePopulated();
+      const ruleName = this.shortRuleNameToFull[this.currRuleShortName];
+      const rule = this.gastProductionsCache[ruleName];
+      if (rule === undefined) return;
+
+      // Find the Alternation with matching idx in this rule's GAST.
+      const occurrence =
+        mapKey & ((1 << (BITS_FOR_METHOD_TYPE + BITS_FOR_OCCURRENCE_IDX)) - 1);
+      let targetNode: InstanceType<typeof Alternation> | undefined;
+      const findAlt = (prods: IProduction[]) => {
+        for (const prod of prods) {
+          if (prod instanceof NonTerminal) continue;
+          if (prod instanceof Alternation && prod.idx === occurrence) {
+            targetNode = prod;
+            return;
+          }
+          if ("definition" in prod && Array.isArray(prod.definition)) {
+            findAlt(prod.definition);
+            if (targetNode) return;
+          }
+        }
+      };
+      findAlt(rule.definition);
+      if (targetNode === undefined) return;
+
+      const prodMaxLA = (targetNode as any).maxLookahead ?? this.maxLookahead;
+      const paths = getLookaheadPathsForOr(occurrence, rule, prodMaxLA);
+      const tmatcher = this.tokenMatcher;
+      const laFunc = buildAlternativesLookAheadFunc(
+        paths,
+        targetNode.hasPredicates,
+        tmatcher,
+        this.dynamicTokensEnabled,
+      );
+
+      // Build dispatch closure with counter management.
+      const altStarts = this._orAltCounterStarts[mapKey];
+      const counterDelta = this._orCounterDeltas[mapKey];
+      if (altStarts !== undefined && counterDelta !== undefined) {
+        this._orLookahead[mapKey] = function orDispatch(
+          this: Parser,
+          orAlts: IOrAlt<any>[],
+        ): any {
+          const altIdx = laFunc.call(this, orAlts);
+          if (altIdx !== undefined) {
+            const saved = this._dslCounter;
+            this._dslCounter = saved + altStarts[altIdx];
+            const r = orAlts[altIdx].ALT.call(this);
+            this._dslCounter = saved + counterDelta;
+            return r;
+          }
+          return OR_NO_MATCH;
+        };
+      } else {
+        this._orLookahead[mapKey] = function orDispatchSimple(
+          this: Parser,
+          orAlts: IOrAlt<any>[],
+        ): any {
+          const altIdx = laFunc.call(this, orAlts);
+          if (altIdx !== undefined) {
+            return orAlts[altIdx].ALT.call(this);
+          }
+          return OR_NO_MATCH;
+        };
+      }
+    } catch (_e) {
+      // GAST walk failed — stay on speculative path.
+    }
+  }
+
+  /**
    * Lazily populates gastProductionsCache when GAST-dependent APIs
    * (getSerializedGastProductions, getGAstProductions) are called without
    * recoveryEnabled. Preserves backward compatibility — these APIs work
@@ -2284,10 +2361,14 @@ export class Parser {
         this._orAltStartLexPos = savedAltStartLexPos;
         this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
         this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
-        this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
         {
           const d = this._orCounterDeltas[mapKey];
           if (d !== undefined) this._dslCounter = savedDslCounter + d;
+        }
+        // Lazy closure building: if no precomputed closure exists yet,
+        // try to build one from GAST for future calls. One-time cost.
+        if (this._orLookahead[mapKey] === undefined) {
+          this.lazyBuildOrClosure(mapKey);
         }
         return result;
       } catch (e) {
