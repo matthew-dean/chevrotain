@@ -48,7 +48,10 @@ const RECORDING_NULL_OBJECT = {
 Object.freeze(RECORDING_NULL_OBJECT);
 
 const HANDLE_SEPARATOR = true;
-const MAX_METHOD_IDX = Math.pow(2, BITS_FOR_OCCURRENCE_IDX) - 1;
+// Hardcoded ceiling so validation stays correct regardless of BITS_FOR_OCCURRENCE_IDX.
+// _dslCounter can reach values well above 2^BITS_FOR_OCCURRENCE_IDX (it encodes
+// the flat sequence of all DSL calls in a rule body), so we cap at 127 (7-bit).
+const MAX_METHOD_IDX = 127;
 
 const RFT = createToken({ name: "RECORDING_PHASE_TOKEN", pattern: Lexer.NA });
 augmentTokenTypes([RFT]);

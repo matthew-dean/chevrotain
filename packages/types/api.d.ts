@@ -56,6 +56,26 @@ declare abstract class BaseParser {
   getSerializedGastProductions(): ISerializedGast[];
 
   /**
+   * Override hook: snapshot any extra mutable state before a speculative parse
+   * attempt (OPTION, MANY, OR alt). Return value is passed to `restoreCheckpoint`
+   * if the attempt fails. Call `super.saveCheckpoint()` and wrap the result so the
+   * base CST state is also restored.
+   *
+   * @example
+   * protected override saveCheckpoint(): any {
+   *   return { cst: super.saveCheckpoint(), myStack: this.myStack.length };
+   * }
+   * protected override restoreCheckpoint(save: ReturnType<typeof this.saveCheckpoint>): void {
+   *   super.restoreCheckpoint(save.cst);
+   *   this.myStack.length = save.myStack;
+   * }
+   */
+  protected saveCheckpoint(): any;
+
+  /** @see saveCheckpoint */
+  protected restoreCheckpoint(save: any): void;
+
+  /**
    * @param grammarRule - The rule to try and parse in backtracking mode.
    * @param args - argument to be passed to the grammar rule execution
    *

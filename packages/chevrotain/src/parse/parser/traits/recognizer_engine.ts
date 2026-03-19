@@ -558,7 +558,7 @@ export class RecognizerEngine {
 
     const startLexPos = this.exportLexerState();
     const startErrors = this._errors.length;
-    const cstSave = this.saveCstTop();
+    const cstSave = this.saveCheckpoint();
     try {
       const result = action.call(this);
       // Stuck guard: if body didn't advance pos, or recovery added
@@ -567,7 +567,7 @@ export class RecognizerEngine {
         this.exportLexerState() === startLexPos ||
         this._errors.length > startErrors
       ) {
-        this.restoreCstTop(cstSave);
+        this.restoreCheckpoint(cstSave);
         this.importLexerState(startLexPos);
         this._errors.length = startErrors;
         return undefined;
@@ -575,7 +575,7 @@ export class RecognizerEngine {
       return result;
     } catch (e) {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
-        this.restoreCstTop(cstSave);
+        this.restoreCheckpoint(cstSave);
         this.importLexerState(startLexPos);
         this._errors.length = startErrors;
         return undefined;
@@ -649,12 +649,12 @@ export class RecognizerEngine {
       this._dslCounter = savedRepDslCounter;
       const firstLexPos = this.exportLexerState();
       const firstErrors = this._errors.length;
-      const firstCstSave = this.saveCstTop();
+      const firstCstSave = this.saveCheckpoint();
       try {
         action.call(this);
       } catch (e) {
         if (e === SPEC_FAIL || isRecognitionException(e)) {
-          this.restoreCstTop(firstCstSave);
+          this.restoreCheckpoint(firstCstSave);
           this.importLexerState(firstLexPos);
           this._errors.length = firstErrors;
           throw this.raiseEarlyExitException(
@@ -678,7 +678,7 @@ export class RecognizerEngine {
       this._dslCounter = savedRepDslCounter;
       const iterLexPos = this.exportLexerState();
       const iterErrors = this._errors.length;
-      const cstSave = this.saveCstTop();
+      const cstSave = this.saveCheckpoint();
       try {
         // Run committed — any recovery happens inside the subrule's invokeRuleCatch.
         action.call(this);
@@ -687,7 +687,7 @@ export class RecognizerEngine {
         // SUBRULE to do resync recovery). Restore state and exit the loop so
         // the tokens can be consumed by whatever follows AT_LEAST_ONE.
         if (e === SPEC_FAIL || isRecognitionException(e)) {
-          this.restoreCstTop(cstSave);
+          this.restoreCheckpoint(cstSave);
           this.importLexerState(iterLexPos);
           this._errors.length = iterErrors;
           break;
@@ -696,7 +696,7 @@ export class RecognizerEngine {
       }
       // Stuck guard: body consumed no tokens → restore and stop.
       if (this.exportLexerState() <= iterLexPos) {
-        this.restoreCstTop(cstSave);
+        this.restoreCheckpoint(cstSave);
         this.importLexerState(iterLexPos);
         this._errors.length = iterErrors;
         break;
@@ -747,12 +747,12 @@ export class RecognizerEngine {
       this._dslCounter = savedRepDslCounter;
       const firstLexPos = this.exportLexerState();
       const firstErrors = this._errors.length;
-      const firstCstSave = this.saveCstTop();
+      const firstCstSave = this.saveCheckpoint();
       try {
         (action as GrammarAction<OUT>).call(this);
       } catch (e) {
         if (e === SPEC_FAIL || isRecognitionException(e)) {
-          this.restoreCstTop(firstCstSave);
+          this.restoreCheckpoint(firstCstSave);
           this.importLexerState(firstLexPos);
           this._errors.length = firstErrors;
           throw this.raiseEarlyExitException(
@@ -875,7 +875,7 @@ export class RecognizerEngine {
       this._dslCounter = savedRepDslCounter;
       const iterLexPos = this.exportLexerState();
       const iterErrors = this._errors.length;
-      const iterCstSave = this.saveCstTop();
+      const iterCstSave = this.saveCheckpoint();
       this.IS_SPECULATING = true;
       try {
         action.call(this);
@@ -885,7 +885,7 @@ export class RecognizerEngine {
         if (e === SPEC_FAIL) {
           // Speculative failure: body can't match → stop iterating.
           this.importLexerState(iterLexPos);
-          this.restoreCstTop(iterCstSave);
+          this.restoreCheckpoint(iterCstSave);
           this._errors.length = iterErrors;
           break;
         }
@@ -902,7 +902,7 @@ export class RecognizerEngine {
           // exception (e.g., NoViableAltException from ambiguous OR)
           // was intentionally added to _errors and should be kept.
           this.importLexerState(iterLexPos);
-          this.restoreCstTop(iterCstSave);
+          this.restoreCheckpoint(iterCstSave);
           break;
         }
         throw e;
@@ -963,12 +963,12 @@ export class RecognizerEngine {
     // Optional first iteration — try without IS_SPECULATING.
     const firstLexPos = this.exportLexerState();
     const firstErrors = this._errors.length;
-    const firstCstSave = this.saveCstTop();
+    const firstCstSave = this.saveCheckpoint();
     try {
       action.call(this);
     } catch (e) {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
-        this.restoreCstTop(firstCstSave);
+        this.restoreCheckpoint(firstCstSave);
         this.importLexerState(firstLexPos);
         this._errors.length = firstErrors;
         return; // zero iterations — MANY_SEP is optional
@@ -977,7 +977,7 @@ export class RecognizerEngine {
     }
     // Stuck guard: first element consumed no tokens → treat as zero iterations.
     if (this.exportLexerState() <= firstLexPos) {
-      this.restoreCstTop(firstCstSave);
+      this.restoreCheckpoint(firstCstSave);
       this.importLexerState(firstLexPos);
       this._errors.length = firstErrors;
       return;
@@ -1182,7 +1182,7 @@ export class RecognizerEngine {
             }
           } else {
             const fastErrors = this._errors.length;
-            const fastCstSave = this.saveCstTop();
+            const fastCstSave = this.saveCheckpoint();
             try {
               const r = alt.ALT.call(this) as T;
               {
@@ -1191,7 +1191,7 @@ export class RecognizerEngine {
               }
               return r;
             } catch (_e) {
-              this.restoreCstTop(fastCstSave);
+              this.restoreCheckpoint(fastCstSave);
               this.currIdx = fastLexPos;
               this._errors.length = fastErrors;
             }
@@ -1228,7 +1228,7 @@ export class RecognizerEngine {
                 }
               } else {
                 const gErr = this._errors.length;
-                const gCst = this.saveCstTop();
+                const gCst = this.saveCheckpoint();
                 try {
                   const r = galt.ALT.call(this) as T;
                   {
@@ -1237,7 +1237,7 @@ export class RecognizerEngine {
                   }
                   return r;
                 } catch (_e) {
-                  this.restoreCstTop(gCst);
+                  this.restoreCheckpoint(gCst);
                   this.currIdx = gPos;
                   this._errors.length = gErr;
                 }
@@ -1265,7 +1265,7 @@ export class RecognizerEngine {
             }
           } else {
             const fastErrors = this._errors.length;
-            const fastCstSave = this.saveCstTop();
+            const fastCstSave = this.saveCheckpoint();
             try {
               const r = alt.ALT.call(this) as T;
               {
@@ -1274,7 +1274,7 @@ export class RecognizerEngine {
               }
               return r;
             } catch (_e) {
-              this.restoreCstTop(fastCstSave);
+              this.restoreCheckpoint(fastCstSave);
               this.currIdx = fastLexPos;
               this._errors.length = fastErrors;
             }
@@ -1300,7 +1300,7 @@ export class RecognizerEngine {
     // successful CONSUMEs add CST nodes that aren't cleaned up on
     // SPEC_FAIL (only lexer pos is restored).
     const savedErrors = this._errors.length;
-    const savedCst = this.saveCstTop();
+    const savedCst = this.saveCheckpoint();
 
     for (let i = 0; i < alts.length; i++) {
       const alt = alts[i];
@@ -1359,7 +1359,7 @@ export class RecognizerEngine {
           this.importLexerState(startLexPos);
           // Restore CST/errors so next alt starts with clean state.
           this._errors.length = savedErrors;
-          this.restoreCstTop(savedCst);
+          this.restoreCheckpoint(savedCst);
           continue;
         }
         throw e;
@@ -1384,7 +1384,7 @@ export class RecognizerEngine {
         if (recoveryAltIdx !== undefined && recoveryAltIdx >= 0) {
           if (recoveryAltIdx >= GATED_OFFSET) recoveryAltIdx -= GATED_OFFSET;
           // Restore clean state before committed re-run.
-          this.restoreCstTop(savedCst);
+          this.restoreCheckpoint(savedCst);
           this._errors.length = savedErrors;
           if (altStarts !== undefined)
             this._dslCounter = savedDslCounter + altStarts[recoveryAltIdx];
@@ -1433,7 +1433,7 @@ export class RecognizerEngine {
       const failMap = this._orFastMaps[mapKey];
       if (failMap !== undefined && failMap[la1TypeIdx] !== undefined) {
         this.IS_SPECULATING = false;
-        this.restoreCstTop(savedCst);
+        this.restoreCheckpoint(savedCst);
         this._errors.length = savedErrors;
         this.raiseNoAltException(occurrence, errMsg);
         // raiseNoAltException throws — unreachable.

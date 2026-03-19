@@ -431,7 +431,9 @@ const RECORDING_NULL_OBJECT = {
 Object.freeze(RECORDING_NULL_OBJECT);
 
 const HANDLE_SEPARATOR = true;
-const MAX_METHOD_IDX = Math.pow(2, BITS_FOR_OCCURRENCE_IDX) - 1;
+// Hardcoded ceiling independent of BITS_FOR_OCCURRENCE_IDX — _dslCounter counts
+// all DSL calls flat in a rule body, not just occurrence indices within one type.
+const MAX_METHOD_IDX = 127;
 
 const RFT = createToken({ name: "RECORDING_PHASE_TOKEN", pattern: Lexer.NA });
 augmentTokenTypes([RFT]);
@@ -490,7 +492,7 @@ function createCstLocationFull(): CstNodeLocation {
  * Watermark snapshot of a CST node's mutable state taken before a
  * non-speculative parse attempt that may fail (OPTION, AT_LEAST_ONE, OR
  * committed fast-path). Stores each existing child array's length so that
- * restoreCstTop() can truncate — no .slice() copies, no new objects.
+ * restoreCheckpoint() can truncate — no .slice() copies, no new objects.
  */
 export interface CstTopSave {
   keys: string[];
@@ -1350,24 +1352,24 @@ export class Parser {
     // TODO: would using an ES6 Map or plain object be faster (CST building scenario)
     this.shortRuleNameToFull = {};
     this.fullRuleNameToShort = {};
-    this.ruleShortNameIdx = 256;
+    this.ruleShortNameIdx = 0;
     this.tokenMatcher = tokenStructuredMatcherNoCategories;
     this.subruleIdx = 0;
     this.currRuleShortName = 0;
     this.IS_SPECULATING = false;
     this._isInTrueBacktrack = false;
     this._earlyExitLookahead = false;
-    this._orFastMaps = Object.create(null);
-    this._orFastMapAltsRef = Object.create(null);
-    this._orGatedPrefixAlts = Object.create(null);
-    this._orCounterDeltas = Object.create(null);
-    this._orAltCounterStarts = Object.create(null);
+    this._orFastMaps = [];
+    this._orFastMapAltsRef = [];
+    this._orGatedPrefixAlts = [];
+    this._orCounterDeltas = [];
+    this._orAltCounterStarts = [];
     this._orAltStartLexPos = 0;
     this._orAltHasGatedPrefix = false;
     this._orAltHasAnyPrefix = false;
-    this._orCommittable = Object.create(null);
-    this._orLookahead = Object.create(null);
-    this._prodLookahead = Object.create(null);
+    this._orCommittable = [];
+    this._orLookahead = [];
+    this._prodLookahead = [];
 
     this.definedRulesNames = [];
     this.tokensMap = {};
@@ -1696,12 +1698,12 @@ export class Parser {
         // tokens than lookahead checked), treat as "skip OPTION".
         const optPos = this.currIdx;
         const optErrors = errors.length;
-        const optCst = this.saveCstTop();
+        const optCst = this.saveCheckpoint();
         try {
           return action.call(this);
         } catch (e) {
           if (e === SPEC_FAIL || isRecognitionException(e)) {
-            this.restoreCstTop(optCst);
+            this.restoreCheckpoint(optCst);
             this.currIdx = optPos;
             errors.length = optErrors;
             return undefined;
@@ -1714,11 +1716,11 @@ export class Parser {
     // Speculative OPTION: save state, try body, restore on failure.
     const startPos = this.currIdx;
     const startErrors = errors.length;
-    const cstSave = this.saveCstTop();
+    const cstSave = this.saveCheckpoint();
     try {
       const result = action.call(this);
       if (this.currIdx === startPos || errors.length > startErrors) {
-        this.restoreCstTop(cstSave);
+        this.restoreCheckpoint(cstSave);
         this.currIdx = startPos;
         errors.length = startErrors;
         return undefined;
@@ -1738,7 +1740,7 @@ export class Parser {
       return result;
     } catch (e) {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
-        this.restoreCstTop(cstSave);
+        this.restoreCheckpoint(cstSave);
         this.currIdx = startPos;
         errors.length = startErrors;
         return undefined;
@@ -1819,12 +1821,12 @@ export class Parser {
       this._dslCounter = savedRepDslCounter;
       const firstLexPos = this.exportLexerState();
       const firstErrors = errors.length;
-      const firstCstSave = this.saveCstTop();
+      const firstCstSave = this.saveCheckpoint();
       try {
         action.call(this);
       } catch (e) {
         if (e === SPEC_FAIL || isRecognitionException(e)) {
-          this.restoreCstTop(firstCstSave);
+          this.restoreCheckpoint(firstCstSave);
           this.importLexerState(firstLexPos);
           errors.length = firstErrors;
           throw this.raiseEarlyExitException(
@@ -1847,7 +1849,7 @@ export class Parser {
       this._dslCounter = savedRepDslCounter;
       const iterLexPos = this.exportLexerState();
       const iterErrors = errors.length;
-      const cstSave = this.saveCstTop();
+      const cstSave = this.saveCheckpoint();
       try {
         // Run committed — any recovery happens inside the subrule's invokeRuleCatch.
         action.call(this);
@@ -1856,7 +1858,7 @@ export class Parser {
         // SUBRULE to do resync recovery). Restore state and exit the loop so
         // the tokens can be consumed by whatever follows AT_LEAST_ONE.
         if (e === SPEC_FAIL || isRecognitionException(e)) {
-          this.restoreCstTop(cstSave);
+          this.restoreCheckpoint(cstSave);
           this.importLexerState(iterLexPos);
           errors.length = iterErrors;
           break;
@@ -1865,7 +1867,7 @@ export class Parser {
       }
       // Stuck guard: body consumed no tokens → restore and stop.
       if (this.exportLexerState() <= iterLexPos) {
-        this.restoreCstTop(cstSave);
+        this.restoreCheckpoint(cstSave);
         this.importLexerState(iterLexPos);
         errors.length = iterErrors;
         break;
@@ -1916,12 +1918,12 @@ export class Parser {
       this._dslCounter = savedRepDslCounter;
       const firstLexPos = this.exportLexerState();
       const firstErrors = errors.length;
-      const firstCstSave = this.saveCstTop();
+      const firstCstSave = this.saveCheckpoint();
       try {
         action.call(this);
       } catch (e) {
         if (e === SPEC_FAIL || isRecognitionException(e)) {
-          this.restoreCstTop(firstCstSave);
+          this.restoreCheckpoint(firstCstSave);
           this.importLexerState(firstLexPos);
           errors.length = firstErrors;
           throw this.raiseEarlyExitException(
@@ -2056,7 +2058,7 @@ export class Parser {
         this._dslCounter = savedRepDslCounter;
         const iterPos = this.currIdx;
         const iterErrors = errors.length;
-        const cstSave = this.saveCstTop();
+        const cstSave = this.saveCheckpoint();
 
         this.IS_SPECULATING = true;
         try {
@@ -2067,7 +2069,7 @@ export class Parser {
 
           if (e === SPEC_FAIL) {
             this.currIdx = iterPos;
-            this.restoreCstTop(cstSave);
+            this.restoreCheckpoint(cstSave);
             errors.length = iterErrors;
             break;
           }
@@ -2077,7 +2079,7 @@ export class Parser {
               throw e;
             }
             this.currIdx = iterPos;
-            this.restoreCstTop(cstSave);
+            this.restoreCheckpoint(cstSave);
             errors.length = iterErrors;
             break;
           }
@@ -2152,12 +2154,12 @@ export class Parser {
     // Optional first iteration — try without IS_SPECULATING.
     const firstLexPos = this.exportLexerState();
     const firstErrors = errors.length;
-    const firstCstSave = this.saveCstTop();
+    const firstCstSave = this.saveCheckpoint();
     try {
       action.call(this);
     } catch (e) {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
-        this.restoreCstTop(firstCstSave);
+        this.restoreCheckpoint(firstCstSave);
         this.importLexerState(firstLexPos);
         errors.length = firstErrors;
         return;
@@ -2166,7 +2168,7 @@ export class Parser {
     }
     // Stuck guard: body consumed nothing → treat as "not present".
     if (this.exportLexerState() <= firstLexPos) {
-      this.restoreCstTop(firstCstSave);
+      this.restoreCheckpoint(firstCstSave);
       this.importLexerState(firstLexPos);
       errors.length = firstErrors;
       return;
@@ -2390,7 +2392,7 @@ export class Parser {
             }
           } else {
             const fastErrors = this._errors.length;
-            const fastCstSave = this.saveCstTop();
+            const fastCstSave = this.saveCheckpoint();
             try {
               const r = alt.ALT.call(this) as T;
               {
@@ -2399,7 +2401,7 @@ export class Parser {
               }
               return r;
             } catch (_e) {
-              this.restoreCstTop(fastCstSave);
+              this.restoreCheckpoint(fastCstSave);
               this.currIdx = fastLexPos;
               this._errors.length = fastErrors;
             }
@@ -2436,7 +2438,7 @@ export class Parser {
                 }
               } else {
                 const gErr = this._errors.length;
-                const gCst = this.saveCstTop();
+                const gCst = this.saveCheckpoint();
                 try {
                   const r = galt.ALT.call(this) as T;
                   {
@@ -2445,7 +2447,7 @@ export class Parser {
                   }
                   return r;
                 } catch (_e) {
-                  this.restoreCstTop(gCst);
+                  this.restoreCheckpoint(gCst);
                   this.currIdx = gPos;
                   this._errors.length = gErr;
                 }
@@ -2502,7 +2504,7 @@ export class Parser {
             }
           } else {
             const fastErrors = this._errors.length;
-            const fastCstSave = this.saveCstTop();
+            const fastCstSave = this.saveCheckpoint();
             try {
               const r = alt.ALT.call(this) as T;
               {
@@ -2511,7 +2513,7 @@ export class Parser {
               }
               return r;
             } catch (_e) {
-              this.restoreCstTop(fastCstSave);
+              this.restoreCheckpoint(fastCstSave);
               this.currIdx = fastLexPos;
               this._errors.length = fastErrors;
             }
@@ -2537,7 +2539,7 @@ export class Parser {
     // successful CONSUMEs add CST nodes that aren't cleaned up on
     // SPEC_FAIL (only lexer pos is restored).
     const savedErrors = this._errors.length;
-    const savedCst = this.saveCstTop();
+    const savedCst = this.saveCheckpoint();
 
     for (let i = 0; i < alts.length; i++) {
       const alt = alts[i];
@@ -2627,7 +2629,7 @@ export class Parser {
           this.importLexerState(startLexPos);
           // Restore CST/errors so next alt starts with clean state.
           this._errors.length = savedErrors;
-          this.restoreCstTop(savedCst);
+          this.restoreCheckpoint(savedCst);
           continue;
         }
         throw e;
@@ -2652,7 +2654,7 @@ export class Parser {
         if (recoveryAltIdx !== undefined && recoveryAltIdx >= 0) {
           if (recoveryAltIdx >= GATED_OFFSET) recoveryAltIdx -= GATED_OFFSET;
           // Restore clean state before committed re-run.
-          this.restoreCstTop(savedCst);
+          this.restoreCheckpoint(savedCst);
           this._errors.length = savedErrors;
           if (altStarts !== undefined)
             this._dslCounter = savedDslCounter + altStarts[recoveryAltIdx];
@@ -2703,7 +2705,7 @@ export class Parser {
       const failMap = this._orFastMaps[mapKey];
       if (failMap !== undefined && failMap[la1TypeIdx] !== undefined) {
         this.IS_SPECULATING = false;
-        this.restoreCstTop(savedCst);
+        this.restoreCheckpoint(savedCst);
         this._errors.length = savedErrors;
         const em = isAltsArray
           ? undefined
@@ -3478,12 +3480,12 @@ export class Parser {
         if (!laFunc.call(this)) return undefined;
         const optPos = this.currIdx;
         const optErrors = this._errors.length;
-        const optCst = this.saveCstTop();
+        const optCst = this.saveCheckpoint();
         try {
           return action.call(this);
         } catch (e) {
           if (e === SPEC_FAIL || isRecognitionException(e)) {
-            this.restoreCstTop(optCst);
+            this.restoreCheckpoint(optCst);
             this.currIdx = optPos;
             this._errors.length = optErrors;
             return undefined;
@@ -3859,12 +3861,12 @@ export class Parser {
         if (!laFunc.call(this)) return undefined;
         const optPos = this.currIdx;
         const optErrors = this._errors.length;
-        const optCst = this.saveCstTop();
+        const optCst = this.saveCheckpoint();
         try {
           return action.call(this);
         } catch (e) {
           if (e === SPEC_FAIL || isRecognitionException(e)) {
-            this.restoreCstTop(optCst);
+            this.restoreCheckpoint(optCst);
             this.currIdx = optPos;
             this._errors.length = optErrors;
             return undefined;
@@ -4519,9 +4521,6 @@ export class Parser {
   setInitialNodeLocation!: (cstNode: CstNode) => void;
   nodeLocationTracking!: nodeLocationTrackingOptions;
 
-  saveCstTop!: () => CstTopSave | null;
-  restoreCstTop!: (save: CstTopSave | null) => void;
-
   initTreeBuilder(config: IParserConfig) {
     this.CST_STACK = [];
 
@@ -4538,8 +4537,6 @@ export class Parser {
       this.cstPostTerminal = () => {};
       this.cstPostNonTerminal = () => {};
       this.cstPostRule = () => {};
-      this.saveCstTop = () => null;
-      this.restoreCstTop = () => {};
     } else {
       if (/full/i.test(this.nodeLocationTracking)) {
         if (this.recoveryEnabled) {
@@ -4577,9 +4574,7 @@ export class Parser {
           `Invalid <nodeLocationTracking> config option: "${config.nodeLocationTracking}"`,
         );
       }
-      // CST watermark helpers are the same regardless of location-tracking mode.
-      this.saveCstTop = this.saveCstTopImpl;
-      this.restoreCstTop = this.restoreCstTopImpl;
+      // CST watermark helpers are class methods — no assignment needed.
     }
   }
 
@@ -4663,8 +4658,28 @@ export class Parser {
     this.setNodeLocationFromNode(preCstNode.location!, ruleCstResult.location!);
   }
 
-  saveCstTopImpl(): CstTopSave | null {
-    if (this.IS_SPECULATING) return null;
+  /**
+   * Snapshot the CST watermark (child-array lengths + location) before a
+   * speculative parse attempt. Returns `null` when CST is disabled or when
+   * already speculating (CST is not written during speculation).
+   *
+   * **Override hook:** subclasses that maintain extra parser state can override
+   * this method and call `super.saveCheckpoint()` to include that state in the
+   * save object returned. The saved value is passed back verbatim to
+   * `restoreCheckpoint` when the speculation fails, so any shape is fine.
+   *
+   * ```ts
+   * protected override saveCheckpoint(): any {
+   *   return { cst: super.saveCheckpoint(), myStack: this.myStack.length };
+   * }
+   * protected override restoreCheckpoint(save: ReturnType<typeof this.saveCheckpoint>): void {
+   *   super.restoreCheckpoint(save.cst);
+   *   this.myStack.length = save.myStack;
+   * }
+   * ```
+   */
+  protected saveCheckpoint(): any {
+    if (!this.outputCst || this.IS_SPECULATING) return null;
     const top = this.CST_STACK[this.CST_STACK.length - 1];
     if (top === undefined) return null;
     const src = top.children;
@@ -4685,8 +4700,9 @@ export class Parser {
     };
   }
 
-  restoreCstTopImpl(save: CstTopSave | null): void {
-    if (save === null) return;
+  /** @see saveCheckpoint */
+  protected restoreCheckpoint(save: any): void {
+    if (!this.outputCst || save === null || save === undefined) return;
     const top = this.CST_STACK[this.CST_STACK.length - 1];
     if (top === undefined) return;
     const { keys, lens } = save;

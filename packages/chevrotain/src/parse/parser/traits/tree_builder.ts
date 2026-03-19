@@ -64,7 +64,7 @@ import { DEFAULT_PARSER_CONFIG } from "../parser.js";
  * Watermark snapshot of a CST node's mutable state taken before a
  * non-speculative parse attempt that may fail (OPTION, AT_LEAST_ONE, OR
  * committed fast-path). Stores each existing child array's length so that
- * restoreCstTop() can truncate — no .slice() copies, no new objects.
+ * restoreCheckpoint() can truncate — no .slice() copies, no new objects.
  *
  * Keys added during a failed attempt end up as empty arrays on the children
  * object; that is semantically equivalent to absent for any CST consumer
@@ -104,17 +104,17 @@ export class TreeBuilder {
   /**
    * Saves a snapshot of the current top CST node's mutable state before a
    * speculative parse attempt. Dynamically dispatched — NOOP when outputCst = false.
-   * @see saveCstTopImpl for the real implementation.
+   * @see saveCheckpointImpl for the real implementation.
    */
-  saveCstTop: (this: MixedInParser) => CstTopSave | null;
+  saveCheckpoint: (this: MixedInParser) => CstTopSave | null;
 
   /**
    * Restores the top CST node to a previously saved snapshot, undoing any
    * terminal/non-terminal additions from a failed speculative attempt.
    * Dynamically dispatched — NOOP when outputCst = false.
-   * @see restoreCstTopImpl for the real implementation.
+   * @see restoreCheckpointImpl for the real implementation.
    */
-  restoreCstTop: (this: MixedInParser, save: CstTopSave | null) => void;
+  restoreCheckpoint: (this: MixedInParser, save: CstTopSave | null) => void;
 
   initTreeBuilder(this: MixedInParser, config: IParserConfig) {
     this.CST_STACK = [];
@@ -132,8 +132,8 @@ export class TreeBuilder {
       this.cstPostTerminal = () => {};
       this.cstPostNonTerminal = () => {};
       this.cstPostRule = () => {};
-      this.saveCstTop = () => null;
-      this.restoreCstTop = () => {};
+      this.saveCheckpoint = () => null;
+      this.restoreCheckpoint = () => {};
     } else {
       if (/full/i.test(this.nodeLocationTracking)) {
         if (this.recoveryEnabled) {
@@ -171,9 +171,7 @@ export class TreeBuilder {
           `Invalid <nodeLocationTracking> config option: "${config.nodeLocationTracking}"`,
         );
       }
-      // CST watermark helpers are the same regardless of location-tracking mode.
-      this.saveCstTop = this.saveCstTopImpl;
-      this.restoreCstTop = this.restoreCstTopImpl;
+      // CST watermark helpers are class methods — no assignment needed.
     }
   }
 
@@ -284,14 +282,14 @@ export class TreeBuilder {
   }
 
   /**
-   * Real implementation of saveCstTop. Records the length of each child array
+   * Real implementation of saveCheckpoint. Records the length of each child array
    * already on the top CST node — O(k) reads, zero allocations beyond the
    * small watermark object itself. No .slice() copies.
    *
    * Stage 3 guards skip all CST mutations while IS_SPECULATING=true, so
    * the top node is always unchanged during speculation — nothing to save.
    */
-  saveCstTopImpl(this: MixedInParser): CstTopSave | null {
+  saveCheckpointImpl(this: MixedInParser): CstTopSave | null {
     if (this.IS_SPECULATING) return null;
     const top = this.CST_STACK[this.CST_STACK.length - 1];
     if (top === undefined) return null;
@@ -314,12 +312,12 @@ export class TreeBuilder {
   }
 
   /**
-   * Real implementation of restoreCstTop. Truncates each child array back to
+   * Real implementation of restoreCheckpoint. Truncates each child array back to
    * its pre-attempt length via .length = savedLen — no object replacement,
    * no hidden-class transitions. Keys added by the failed attempt remain as
    * empty arrays (semantically identical to absent for .length-checking consumers).
    */
-  restoreCstTopImpl(this: MixedInParser, save: CstTopSave | null): void {
+  restoreCheckpointImpl(this: MixedInParser, save: CstTopSave | null): void {
     if (save === null) return;
     const top = this.CST_STACK[this.CST_STACK.length - 1];
     if (top === undefined) return;
