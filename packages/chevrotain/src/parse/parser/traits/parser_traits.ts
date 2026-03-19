@@ -1,4 +1,3 @@
-import { ErrorHandler } from "./error_handler.js";
 import { RecognizerApi } from "./recognizer_api.js";
 import { RecognizerEngine } from "./recognizer_engine.js";
 import { Recoverable } from "./recoverable.js";
@@ -24,7 +23,6 @@ import { GastRecorder } from "./gast_recorder.js";
  * applyMixins infrastructure will be deleted.
  */
 export type MixedInParser = ParserConstructorImpel &
-  ErrorHandler &
   RecognizerApi &
   RecognizerEngine &
   Recoverable &

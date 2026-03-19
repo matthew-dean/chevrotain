@@ -6,12 +6,23 @@ import {
   defaultParserErrorProvider,
 } from "../errors_public.js";
 import {
+  EarlyExitException,
+  isRecognitionException,
+  NoViableAltException,
+} from "../exceptions_public.js";
+import {
+  getLookaheadPathsForOptionalProd,
+  getLookaheadPathsForOr,
+  PROD_TYPE,
+} from "../grammar/lookahead.js";
+import {
   resolveGrammar,
   validateGrammar,
 } from "../grammar/gast/gast_resolver_public.js";
 import {
   CstNode,
   IParserConfig,
+  IParserErrorMessageProvider,
   IRecognitionException,
   IRuleConfig,
   IToken,
@@ -24,9 +35,9 @@ import { LLkLookaheadStrategy } from "../grammar/llk_lookahead.js";
 import { TreeBuilder } from "./traits/tree_builder.js";
 // LexerAdapter absorbed into Parser (Stage 7)
 import { RecognizerApi } from "./traits/recognizer_api.js";
-import { RecognizerEngine } from "./traits/recognizer_engine.js";
+import { RecognizerEngine, SPEC_FAIL } from "./traits/recognizer_engine.js";
 
-import { ErrorHandler } from "./traits/error_handler.js";
+// ErrorHandler absorbed into Parser (Stage 7)
 import { MixedInParser } from "./traits/parser_traits.js";
 import { GastRecorder } from "./traits/gast_recorder.js";
 import { applyMixins } from "./utils/apply_mixins.js";
@@ -384,6 +395,114 @@ export class Parser {
       : new LLkLookaheadStrategy({ maxLookahead: this.maxLookahead });
   }
 
+  // --- ErrorHandler (absorbed from trait) ---
+  _errors!: IRecognitionException[];
+  errorMessageProvider!: IParserErrorMessageProvider;
+
+  initErrorHandler(config: IParserConfig) {
+    this._errors = [];
+    this.errorMessageProvider = Object.hasOwn(config, "errorMessageProvider")
+      ? (config.errorMessageProvider as IParserErrorMessageProvider)
+      : DEFAULT_PARSER_CONFIG.errorMessageProvider;
+  }
+
+  SAVE_ERROR(
+    this: MixedInParser,
+    error: IRecognitionException,
+  ): IRecognitionException {
+    if (isRecognitionException(error)) {
+      error.context = {
+        ruleStack: this.getHumanReadableRuleStack(),
+        ruleOccurrenceStack: this.RULE_OCCURRENCE_STACK.slice(
+          0,
+          this.RULE_OCCURRENCE_STACK_IDX + 1,
+        ),
+      };
+      this._errors.push(error);
+      return error;
+    } else {
+      throw Error(
+        "Trying to save an Error which is not a RecognitionException",
+      );
+    }
+  }
+
+  get errors(): IRecognitionException[] {
+    return [...this._errors];
+  }
+
+  set errors(newErrors: IRecognitionException[]) {
+    this._errors = newErrors;
+  }
+
+  raiseEarlyExitException(
+    this: MixedInParser,
+    occurrence: number,
+    prodType: PROD_TYPE,
+    userDefinedErrMsg: string | undefined,
+  ): never {
+    if (this.IS_SPECULATING) throw SPEC_FAIL;
+    const ruleName = this.getCurrRuleFullName();
+    const ruleGrammar = this.getGAstProductions()[ruleName];
+
+    let insideProdPaths: TokenType[][] | undefined;
+    if (ruleGrammar !== undefined) {
+      const lookAheadPathsPerAlternative = getLookaheadPathsForOptionalProd(
+        occurrence,
+        ruleGrammar,
+        prodType,
+        this.maxLookahead,
+      );
+      insideProdPaths = lookAheadPathsPerAlternative[0];
+    }
+    const actualTokens = [];
+    for (let i = 1; i <= this.maxLookahead; i++) {
+      actualTokens.push(this.LA(i));
+    }
+    const msg = this.errorMessageProvider.buildEarlyExitMessage({
+      expectedIterationPaths: insideProdPaths ?? [],
+      actual: actualTokens,
+      previous: this.LA(0),
+      customUserDescription: userDefinedErrMsg,
+      ruleName: ruleName,
+    });
+
+    throw this.SAVE_ERROR(new EarlyExitException(msg, this.LA(1), this.LA(0)));
+  }
+
+  raiseNoAltException(
+    this: MixedInParser,
+    occurrence: number,
+    errMsgTypes: string | undefined,
+  ): never {
+    if (this.IS_SPECULATING) throw SPEC_FAIL;
+    const ruleName = this.getCurrRuleFullName();
+    const ruleGrammar = this.getGAstProductions()[ruleName];
+    const lookAheadPathsPerAlternative = getLookaheadPathsForOr(
+      occurrence,
+      ruleGrammar,
+      this.maxLookahead,
+    );
+
+    const actualTokens = [];
+    for (let i = 1; i <= this.maxLookahead; i++) {
+      actualTokens.push(this.LA(i));
+    }
+    const previousToken = this.LA(0);
+
+    const errMsg = this.errorMessageProvider.buildNoViableAltMessage({
+      expectedPathsPerAlt: lookAheadPathsPerAlternative,
+      actual: actualTokens,
+      previous: previousToken,
+      customUserDescription: errMsgTypes,
+      ruleName: this.getCurrRuleFullName(),
+    });
+
+    throw this.SAVE_ERROR(
+      new NoViableAltException(errMsg, this.LA(1), previousToken),
+    );
+  }
+
   // --- LexerAdapter (absorbed from trait) ---
   tokVector!: IToken[];
   tokVectorLength!: number;
@@ -508,7 +627,6 @@ applyMixins(Parser, [
   TreeBuilder,
   RecognizerEngine,
   RecognizerApi,
-  ErrorHandler,
   GastRecorder,
 ]);
 
