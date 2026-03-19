@@ -109,6 +109,12 @@ exactly. The `Lexer` is improved but its interface is unchanged.
 - ❌ **Hoist MANY fast path into `MANY`**: same approach as OR/OPTION. Implemented,
   benchmarked — within noise. V8 appears to inline `manyInternalLogic` already
   (it's 130 lines, under inlining threshold). Reverted.
+- ✅ **Compact key scheme** (`BITS_FOR_OCCURRENCE_IDX=5`, `BITS_FOR_METHOD_TYPE=3`,
+  `ruleShortNameIdx` from 0): keys dropped from ~1.5M to ~25K. V8 switches
+  from large-key hash-table to small-integer fast lookup. All lookahead maps
+  switched from `Object.create(null)` to `[]`. `MAX_METHOD_IDX` hardcoded to
+  127 (independent of bit constants). JSON +9% (11,913 → 13,014 ops/sec, 90%
+  of v12 14,448). CSS now faster than v12 (2,119 vs 2,025 ops/sec).
 - ⬜ **Eliminate `_dslCounter` from hot paths**: when performSelfAnalysis was
   called, counter deltas are known statically. Bake them into the closure or
   pre-compute a static occurrence mapping. Saves 4-5 property accesses per OR.
