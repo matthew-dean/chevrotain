@@ -1354,35 +1354,27 @@ export class Parser {
     }
 
     // Committed OPTION: precomputed discriminating lookahead available.
-    // The set was built by getLookaheadPathsForOptionalProd during
-    // performSelfAnalysis — it discriminates body tokens from REST tokens.
     if (occurrence !== undefined && !this.IS_SPECULATING) {
-      const laKey = getKeyForAutomaticLookahead(
-        this.currRuleShortName,
-        OPTION_IDX,
-        occurrence,
-      );
-      const laSet = this._prodLookahead[laKey];
+      // Inline key computation and lookahead check for minimal overhead.
+      const laSet =
+        this._prodLookahead[this.currRuleShortName | OPTION_IDX | occurrence];
       if (laSet !== undefined) {
-        if (laSet[this.LA_FAST(1).tokenTypeIdx] !== true) {
-          return undefined; // LA(1) not in body's first-token set → skip
+        if (laSet[this.tokVector[this.currIdx + 1].tokenTypeIdx] !== true) {
+          return undefined;
         }
-        return action.call(this); // Committed — no try/catch
+        return action.call(this);
       }
     }
 
     // Speculative OPTION: save state, try body, restore on failure.
-    const startLexPos = this.exportLexerState();
+    const startPos = this.currIdx;
     const startErrors = errors.length;
     const cstSave = this.saveCstTop();
     try {
       const result = action.call(this);
-      if (
-        this.exportLexerState() === startLexPos ||
-        errors.length > startErrors
-      ) {
+      if (this.currIdx === startPos || errors.length > startErrors) {
         this.restoreCstTop(cstSave);
-        this.importLexerState(startLexPos);
+        this.currIdx = startPos;
         errors.length = startErrors;
         return undefined;
       }
@@ -1390,7 +1382,7 @@ export class Parser {
     } catch (e) {
       if (e === SPEC_FAIL || isRecognitionException(e)) {
         this.restoreCstTop(cstSave);
-        this.importLexerState(startLexPos);
+        this.currIdx = startPos;
         errors.length = startErrors;
         return undefined;
       }
@@ -1676,19 +1668,20 @@ export class Parser {
     let lookaheadFunc: (() => boolean) | undefined;
 
     // Fast committed path: precomputed first-token set says whether the MANY
-    // body may start. No speculation or try/catch needed here.
+    // body may start. No speculation, no try/catch, minimal property access.
     if (laSet !== undefined && !wasSpeculating) {
+      const tv = this.tokVector;
       while (notStuck) {
         if (gate !== undefined && !gate.call(this)) break;
-        if (laSet[this.LA_FAST(1).tokenTypeIdx] !== true) break;
+        // Inline LA_FAST(1) → tokVector[currIdx + 1] to avoid method call.
+        if (laSet[tv[this.currIdx + 1].tokenTypeIdx] !== true) break;
 
         this._dslCounter = savedRepDslCounter;
-        const iterLexPos = this.exportLexerState();
+        const iterPos = this.currIdx;
 
         action.call(this);
 
-        // Stuck guard: the body must consume at least one token.
-        if (this.exportLexerState() <= iterLexPos) {
+        if (this.currIdx <= iterPos) {
           notStuck = false;
           break;
         }
@@ -1700,7 +1693,7 @@ export class Parser {
       // rollback on SPEC_FAIL or on recognition exceptions with no progress.
       while (notStuck) {
         if (this.IS_SPECULATING && !ranAtLeastOnce) {
-          if (this.exportLexerState() === this._orAltStartLexPos) {
+          if (this.currIdx === this._orAltStartLexPos) {
             this._orAltHasAnyPrefix = true;
             if (gate !== undefined) {
               this._orAltHasGatedPrefix = true;
@@ -1711,7 +1704,7 @@ export class Parser {
         if (gate !== undefined && !gate.call(this)) break;
 
         this._dslCounter = savedRepDslCounter;
-        const iterLexPos = this.exportLexerState();
+        const iterPos = this.currIdx;
         const iterErrors = errors.length;
         const cstSave = this.saveCstTop();
 
@@ -1723,17 +1716,17 @@ export class Parser {
           this.IS_SPECULATING = wasSpeculating;
 
           if (e === SPEC_FAIL) {
-            this.importLexerState(iterLexPos);
+            this.currIdx = iterPos;
             this.restoreCstTop(cstSave);
             errors.length = iterErrors;
             break;
           }
 
           if (isRecognitionException(e)) {
-            if (this.exportLexerState() > iterLexPos) {
+            if (this.currIdx > iterPos) {
               throw e;
             }
-            this.importLexerState(iterLexPos);
+            this.currIdx = iterPos;
             this.restoreCstTop(cstSave);
             errors.length = iterErrors;
             break;
@@ -1742,9 +1735,8 @@ export class Parser {
           throw e;
         }
 
-        // Stuck guard: successful speculative iteration that consumed nothing.
-        if (this.exportLexerState() <= iterLexPos) {
-          this.importLexerState(iterLexPos);
+        if (this.currIdx <= iterPos) {
+          this.currIdx = iterPos;
           notStuck = false;
           break;
         }
