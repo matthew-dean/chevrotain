@@ -1506,10 +1506,6 @@ export class Parser {
     // instead of **every single** rule invocation.
     if (this.outputCst === true) {
       coreRuleFunction = function invokeRuleWithTry(...args: ARGS): R {
-        // Save _dslCounter as a local variable (register/stack) instead of
-        // a heap array slot. V8 can scalar-replace this entirely.
-        const savedDslCounter = this._dslCounter;
-        this._dslCounter = 0;
         try {
           this.ruleInvocationStateUpdate(shortName, ruleName, this.subruleIdx);
           impl.apply(this, args);
@@ -1519,23 +1515,17 @@ export class Parser {
         } catch (e) {
           return this.invokeRuleCatch(e, resyncEnabled, recoveryValueFunc) as R;
         } finally {
-          this._dslCounter = savedDslCounter;
           this.ruleFinallyStateUpdate();
         }
       };
     } else {
       coreRuleFunction = function invokeRuleWithTryCst(...args: ARGS): R {
-        // Save _dslCounter as a local variable (register/stack) instead of
-        // a heap array slot. V8 can scalar-replace this entirely.
-        const savedDslCounter = this._dslCounter;
-        this._dslCounter = 0;
         try {
           this.ruleInvocationStateUpdate(shortName, ruleName, this.subruleIdx);
           return impl.apply(this, args);
         } catch (e) {
           return this.invokeRuleCatch(e, resyncEnabled, recoveryValueFunc) as R;
         } finally {
-          this._dslCounter = savedDslCounter;
           this.ruleFinallyStateUpdate();
         }
       };
@@ -2722,7 +2712,10 @@ export class Parser {
   }
 
   ruleFinallyStateUpdate(): void {
-    // _dslCounter is restored by the local savedDslCounter in the invokeRule* finally.
+    // Restore the caller's _dslCounter from the stack slot saved in
+    // ruleInvocationStateUpdate.  We read before decrementing so that
+    // RULE_STACK_IDX still points at the slot where we stored the value.
+    this._dslCounter = this._dslCounterStack[this.RULE_STACK_IDX];
     this.RULE_STACK_IDX--;
     this.RULE_OCCURRENCE_STACK_IDX--;
 
@@ -2917,8 +2910,13 @@ export class Parser {
     const depth = ++this.RULE_STACK_IDX;
     this.RULE_STACK[depth] = shortName;
     this.currRuleShortName = shortName;
-    // _dslCounter is saved/restored as a local variable in invokeRuleWithTry/
-    // invokeRuleWithTryCst — no heap array needed here.
+    // Save the caller's _dslCounter in the stack slot for this depth, then
+    // reset to 0 for the new rule.  Doing this here (rather than as a local
+    // variable in invokeRuleWithTry*) keeps the try/catch body free of any
+    // live-across-try locals, letting V8 generate leaner code for the hot rule
+    // invocation path.
+    this._dslCounterStack[depth] = this._dslCounter;
+    this._dslCounter = 0;
     // NOOP when cst is disabled
     this.cstInvocationStateUpdate(fullName);
   }

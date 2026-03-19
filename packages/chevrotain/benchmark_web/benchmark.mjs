@@ -35,6 +35,9 @@ const mode = getArg("--mode", "warm"); // "warm" | "cold" | "first-parse" | "con
 const selectedParser = getArg("--parser", "all");
 const useCst = args.includes("--cst");
 const quiet = args.includes("--quiet");
+// --no-psa: construct parsers WITHOUT calling performSelfAnalysis().
+// Our fork supports this (lazy-build path). v12 requires performSelfAnalysis().
+const noPsa = args.includes("--no-psa");
 const ITERATIONS = parseInt(getArg("--iterations", "5000"), 10);
 const WARMUP = Math.max(100, Math.floor(ITERATIONS * 0.1));
 
@@ -152,7 +155,7 @@ function makeJsonParser() {
         );
       });
 
-      this.performSelfAnalysis();
+      if (!noPsa) this.performSelfAnalysis();
     }
   }
 
@@ -310,7 +313,7 @@ function makeCssParser() {
         });
       });
 
-      this.performSelfAnalysis();
+      if (!noPsa) this.performSelfAnalysis();
     }
   }
 
@@ -359,12 +362,22 @@ function timeMs(fn, reps = REPS) {
 }
 
 function bench(name, fn) {
+  // Warmup: give V8 time to JIT-compile all paths before measuring.
   for (let i = 0; i < WARMUP; i++) fn();
-  const start = performance.now();
-  for (let i = 0; i < ITERATIONS; i++) fn();
-  const elapsed = performance.now() - start;
-  const opsPerSec = Math.round((ITERATIONS / elapsed) * 1000);
-  const msPerOp = (elapsed / ITERATIONS).toFixed(3);
+  // Collect SAMPLES timed windows and take the median to suppress outliers
+  // caused by GC pauses, OS scheduling jitter, and CPU frequency scaling.
+  const SAMPLES = 7;
+  const SAMPLE_ITERS = Math.ceil(ITERATIONS / SAMPLES);
+  const rates = [];
+  for (let s = 0; s < SAMPLES; s++) {
+    const start = performance.now();
+    for (let i = 0; i < SAMPLE_ITERS; i++) fn();
+    rates.push((SAMPLE_ITERS / (performance.now() - start)) * 1000);
+  }
+  rates.sort((a, b) => a - b);
+  const median = rates[Math.floor(SAMPLES / 2)];
+  const opsPerSec = Math.round(median);
+  const msPerOp = (1000 / median).toFixed(3);
   console.log(
     `  ${name.padEnd(8)} ${opsPerSec.toLocaleString().padStart(10)} ops/sec   (${msPerOp} ms/op)`,
   );
@@ -390,7 +403,8 @@ if (!quiet) {
   console.log(
     `  iterations: ${ITERATIONS.toLocaleString()} (+ ${WARMUP.toLocaleString()} warmup)`,
   );
-  console.log(`  parsers:    ${factories.map((f) => f.name).join(", ")}\n`);
+  console.log(`  parsers:    ${factories.map((f) => f.name).join(", ")}`);
+  console.log(`  psa:        ${noPsa ? "SKIP (lazy-build path)" : "yes"}\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -423,43 +437,194 @@ if (mode === "all") {
 }
 
 // ---------------------------------------------------------------------------
+// "compare" mode: run all phases for v12, our+psa, our-psa side-by-side.
+//
+// Usage:
+//   node benchmark.mjs --mode compare --v12 /tmp/chevrotain-v12/package/lib/chevrotain.mjs
+// ---------------------------------------------------------------------------
+if (mode === "compare") {
+  const { execFileSync } = await import("node:child_process");
+  const selfPath = new URL(import.meta.url).pathname;
+  const ourLib = new URL("../lib/chevrotain.mjs", import.meta.url).href;
+  const v12Lib = getArg(
+    "--v12",
+    "/tmp/chevrotain-v12/package/lib/chevrotain.mjs",
+  );
+
+  function runPhase(phase, extraArgs) {
+    const childArgs = [
+      "--expose-gc",
+      selfPath,
+      "--mode",
+      phase,
+      "--json",
+      "--quiet",
+      ...extraArgs,
+    ];
+    try {
+      const out = execFileSync(process.execPath, childArgs, {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "inherit"],
+      });
+      // Find the JSON line (last non-empty line in case of warnings)
+      const lines = out
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      return JSON.parse(lines[lines.length - 1]);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  const phases = ["construction", "cold", "first-parse", "warm"];
+  const configs = [
+    { label: "v12 + psa", args: ["--lib", v12Lib] },
+    { label: "ours + psa", args: ["--lib", ourLib] },
+    { label: "ours - psa", args: ["--lib", ourLib, "--no-psa"] },
+  ];
+
+  // Collect results: results[phase][configLabel][parserName] = value
+  const results = {};
+  const parserNames = ["JSON", "CSS"];
+  for (const phase of phases) {
+    results[phase] = {};
+    process.stderr.write(`  running ${phase}...`);
+    for (const cfg of configs) {
+      const data = runPhase(phase, cfg.args);
+      results[phase][cfg.label] = data;
+    }
+    process.stderr.write(" done\n");
+  }
+
+  // Print table
+  const isWarm = (phase) => phase === "warm";
+  const fmt = (phase, val) =>
+    val == null
+      ? "  ERROR  "
+      : isWarm(phase)
+        ? `${Math.round(val).toLocaleString().padStart(8)}/s`
+        : `${val.toFixed(2).padStart(7)} ms`;
+
+  const ratio = (phase, ourVal, v12Val) => {
+    if (ourVal == null || v12Val == null) return "";
+    const r = isWarm(phase) ? ourVal / v12Val : v12Val / ourVal;
+    return `(${(r * 100).toFixed(0)}%)`;
+  };
+
+  console.log(
+    "\n╔══════════════════════════════════════════════════════════════════╗",
+  );
+  console.log(
+    "║             Chevrotain benchmark: ours vs v12                    ║",
+  );
+  console.log(
+    "╠══════════════════════════════════════════════════════════════════╣",
+  );
+
+  for (const parser of parserNames) {
+    console.log(
+      `║  ${parser}                                                               ║`.slice(
+        0,
+        69,
+      ) + "║",
+    );
+    console.log(
+      `║  Phase          v12 + psa    ours + psa    ours - psa           ║`,
+    );
+    console.log(
+      `║  ─────────────────────────────────────────────────────────────  ║`,
+    );
+    for (const phase of phases) {
+      const v12Val = results[phase][configs[0].label]?.[parser];
+      const psaVal = results[phase][configs[1].label]?.[parser];
+      const nopsaVal = results[phase][configs[2].label]?.[parser];
+      const r1 = ratio(phase, psaVal, v12Val);
+      const r2 = ratio(phase, nopsaVal, v12Val);
+      const phasePad = phase.padEnd(13);
+      console.log(
+        `║  ${phasePad}  ${fmt(phase, v12Val)}  ${fmt(phase, psaVal)} ${r1.padEnd(6)}  ${fmt(phase, nopsaVal)} ${r2.padEnd(6)}  ║`,
+      );
+    }
+    if (parser !== parserNames[parserNames.length - 1]) {
+      console.log(
+        "╠══════════════════════════════════════════════════════════════════╣",
+      );
+    }
+  }
+  console.log(
+    "╚══════════════════════════════════════════════════════════════════╝",
+  );
+  console.log(
+    "  ratios: higher = better for warm (ops/s), lower = better for ms phases",
+  );
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
 // Single-phase modes: each runs in its own V8 process (clean JIT state).
 // ---------------------------------------------------------------------------
+const jsonOutput = args.includes("--json");
+
 if (mode === "construction") {
-  console.log(`Construction only (${REPS} reps each):`);
+  const results = {};
   for (const f of factories) {
-    const ms = timeMs(() => f.make(), REPS);
-    console.log(`  ${f.name.padEnd(8)} ${ms.toFixed(2)} ms`);
+    results[f.name] = parseFloat(timeMs(() => f.make(), REPS).toFixed(2));
+  }
+  if (jsonOutput) {
+    console.log(JSON.stringify(results));
+  } else {
+    console.log(`Construction only (${REPS} reps each):`);
+    for (const [k, v] of Object.entries(results))
+      console.log(`  ${k.padEnd(8)} ${v.toFixed(2)} ms`);
   }
 }
 
 if (mode === "cold") {
-  console.log(`Cold (construction + first parse, ${REPS} reps):`);
+  const results = {};
   for (const f of factories) {
-    const ms = timeMs(() => {
-      const p = f.make();
-      p.run();
-    }, REPS);
-    console.log(`  ${f.name.padEnd(8)} ${ms.toFixed(2)} ms`);
+    results[f.name] = parseFloat(
+      timeMs(() => {
+        const p = f.make();
+        p.run();
+      }, REPS).toFixed(2),
+    );
+  }
+  if (jsonOutput) {
+    console.log(JSON.stringify(results));
+  } else {
+    console.log(`Cold (construction + first parse, ${REPS} reps):`);
+    for (const [k, v] of Object.entries(results))
+      console.log(`  ${k.padEnd(8)} ${v.toFixed(2)} ms`);
   }
 }
 
 if (mode === "first-parse") {
-  console.log(`First parse only (post-construction, ${REPS} reps):`);
+  const results = {};
   for (const f of factories) {
     const ms =
       timeMs(() => {
         const p = f.make();
         p.run();
       }, REPS) - timeMs(() => f.make(), REPS);
-    console.log(`  ${f.name.padEnd(8)} ${ms.toFixed(3)} ms`);
+    results[f.name] = parseFloat(ms.toFixed(3));
+  }
+  if (jsonOutput) {
+    console.log(JSON.stringify(results));
+  } else {
+    console.log(`First parse only (post-construction, ${REPS} reps):`);
+    for (const [k, v] of Object.entries(results))
+      console.log(`  ${k.padEnd(8)} ${v.toFixed(3)} ms`);
   }
 }
 
 if (mode === "warm") {
-  console.log("Warm (steady-state throughput):");
+  const results = {};
   for (const f of factories) {
     const p = f.make();
-    bench(f.name, () => p.run());
+    results[f.name] = bench(f.name, () => p.run());
+  }
+  if (jsonOutput && quiet) {
+    console.log(JSON.stringify(results));
   }
 }
