@@ -617,7 +617,8 @@ export class Parser {
       const alternations: InstanceType<typeof Alternation>[] = [];
       type RepInfo = {
         prod: IProduction & { idx: number; definition: IProduction[] };
-        typeIdx: number;
+        keyIdx: number; // for getKeyForAutomaticLookahead
+        prodType: PROD_TYPE; // for getLookaheadPathsForOptionalProd
       };
       const repetitions: RepInfo[] = [];
       const findProductions = (prods: IProduction[]) => {
@@ -626,11 +627,23 @@ export class Parser {
           if (prod instanceof Alternation) {
             alternations.push(prod);
           } else if (prod instanceof Repetition) {
-            repetitions.push({ prod, typeIdx: MANY_IDX });
+            repetitions.push({
+              prod,
+              keyIdx: MANY_IDX,
+              prodType: PROD_TYPE.REPETITION,
+            });
           } else if (prod instanceof RepetitionMandatory) {
-            repetitions.push({ prod, typeIdx: AT_LEAST_ONE_IDX });
+            repetitions.push({
+              prod,
+              keyIdx: AT_LEAST_ONE_IDX,
+              prodType: PROD_TYPE.REPETITION_MANDATORY,
+            });
           } else if (prod instanceof Option) {
-            repetitions.push({ prod, typeIdx: OPTION_IDX });
+            repetitions.push({
+              prod,
+              keyIdx: OPTION_IDX,
+              prodType: PROD_TYPE.OPTION,
+            });
           }
           if ("definition" in prod && Array.isArray(prod.definition)) {
             findProductions(prod.definition);
@@ -708,30 +721,47 @@ export class Parser {
       // body's first tokens AND the REST tokens (what follows), then
       // finds discriminating sequences. For LL(1), this is the body's
       // first tokens MINUS any tokens shared with REST.
-      for (const { prod, typeIdx } of repetitions) {
+      for (const { prod, keyIdx, prodType } of repetitions) {
         const laKey = getKeyForAutomaticLookahead(
           ruleShortName,
-          typeIdx,
+          keyIdx,
           prod.idx,
         );
         let paths;
         try {
+          // Use per-production maxLookahead if set (MAX_LOOKAHEAD option),
+          // otherwise fall back to the parser-level maxLookahead.
+          const prodMaxLA = (prod as any).maxLookahead ?? this.maxLookahead;
           paths = getLookaheadPathsForOptionalProd(
             prod.idx,
             rule,
-            typeIdx as PROD_TYPE,
-            this.maxLookahead,
+            prodType,
+            prodMaxLA,
           );
         } catch (_e) {
           // GAST walk failed (e.g., unresolved NonTerminal refs) — skip.
+          // GAST walk failed — skip this production.
           continue;
         }
         // paths[0] = inside paths (enter body), paths[1] = after paths (skip)
         const insidePaths = paths[0];
+        const afterPaths = paths[1];
         if (insidePaths === undefined || insidePaths.length === 0) continue;
         // Only use simple token set check when all inside paths are LL(1).
         const allSingleToken = insidePaths.every((p) => p.length === 1);
         if (!allSingleToken) continue;
+        // Verify inside and after paths don't overlap at k=1.
+        // If they do, LL(1) can't distinguish enter vs skip.
+        if (afterPaths !== undefined) {
+          const afterSingleToken = afterPaths.every((p) => p.length === 1);
+          if (afterSingleToken) {
+            const afterSet = new Set(afterPaths.map((p) => p[0]?.tokenTypeIdx));
+            const hasOverlap = insidePaths.some((p) =>
+              afterSet.has(p[0]?.tokenTypeIdx),
+            );
+            if (hasOverlap) continue; // ambiguous at k=1 → skip
+          }
+        }
         const set: Record<number, true> = Object.create(null);
         for (const path of insidePaths) {
           const tokType = path[0];
