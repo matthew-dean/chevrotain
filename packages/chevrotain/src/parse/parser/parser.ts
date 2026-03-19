@@ -2568,14 +2568,23 @@ export class Parser {
     idx: number,
     options: ConsumeMethodOpts | undefined,
   ): IToken {
-    const nextToken = this.LA_FAST(1);
+    // Inline LA_FAST(1) for minimal overhead.
+    const nextToken = this.tokVector[this.currIdx + 1];
     const label =
       options !== undefined && options.LABEL !== undefined
         ? options.LABEL
         : tokType.name;
 
-    if (this.tokenMatcher(nextToken, tokType) === true) {
-      this.consumeToken();
+    // Inline token match: exact type check + MATCH_SET bitset for categories.
+    // Eliminates this.tokenMatcher property lookup + function call dispatch.
+    const instanceType = nextToken.tokenTypeIdx;
+    if (
+      instanceType === tokType.tokenTypeIdx ||
+      (tokType.MATCH_SET != null &&
+        (tokType.MATCH_SET[instanceType >> 5] & (1 << (instanceType & 31))) !==
+          0)
+    ) {
+      this.currIdx++;
       if (this._earlyExitLookahead) throw FIRST_TOKEN_MATCH;
       this.cstPostTerminal(label, nextToken);
       return nextToken;
