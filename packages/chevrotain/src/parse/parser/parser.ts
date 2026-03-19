@@ -1,4 +1,4 @@
-import { toFastProperties } from "@chevrotain/utils";
+import { timer, toFastProperties } from "@chevrotain/utils";
 import { computeAllProdsFollows } from "../grammar/follow.js";
 import { createTokenInstance, EOF } from "../../scan/tokens_public.js";
 import {
@@ -19,16 +19,16 @@ import {
   TokenVocabulary,
 } from "@chevrotain/types";
 import { Recoverable } from "./traits/recoverable.js";
-import { LooksAhead } from "./traits/looksahead.js";
+import { ILookaheadStrategy } from "@chevrotain/types";
+import { LLkLookaheadStrategy } from "../grammar/llk_lookahead.js";
 import { TreeBuilder } from "./traits/tree_builder.js";
-import { LexerAdapter } from "./traits/lexer_adapter.js";
+// LexerAdapter absorbed into Parser (Stage 7)
 import { RecognizerApi } from "./traits/recognizer_api.js";
 import { RecognizerEngine } from "./traits/recognizer_engine.js";
 
 import { ErrorHandler } from "./traits/error_handler.js";
 import { MixedInParser } from "./traits/parser_traits.js";
 import { GastRecorder } from "./traits/gast_recorder.js";
-import { PerformanceTracer } from "./traits/perf_tracer.js";
 import { applyMixins } from "./utils/apply_mixins.js";
 import { IParserDefinitionError } from "../grammar/types.js";
 import { Rule } from "@chevrotain/gast";
@@ -343,6 +343,140 @@ export class Parser {
   selfAnalysisDone = false;
   protected skipValidations: boolean;
 
+  // --- PerformanceTracer (absorbed from trait) ---
+  traceInitPerf!: boolean | number;
+  traceInitMaxIdent!: number;
+  traceInitIndent!: number;
+
+  initPerformanceTracer(config: IParserConfig) {
+    if (Object.hasOwn(config, "traceInitPerf")) {
+      const userTraceInitPerf = config.traceInitPerf;
+      const traceIsNumber = typeof userTraceInitPerf === "number";
+      this.traceInitMaxIdent = traceIsNumber
+        ? <number>userTraceInitPerf
+        : Infinity;
+      this.traceInitPerf = traceIsNumber
+        ? userTraceInitPerf > 0
+        : (userTraceInitPerf as boolean);
+    } else {
+      this.traceInitMaxIdent = 0;
+      this.traceInitPerf = DEFAULT_PARSER_CONFIG.traceInitPerf;
+    }
+    this.traceInitIndent = -1;
+  }
+
+  // --- LooksAhead (absorbed from trait) ---
+  maxLookahead!: number;
+  dynamicTokensEnabled!: boolean;
+  lookaheadStrategy!: ILookaheadStrategy;
+
+  initLooksAhead(config: IParserConfig) {
+    this.dynamicTokensEnabled = Object.hasOwn(config, "dynamicTokensEnabled")
+      ? (config.dynamicTokensEnabled as boolean)
+      : DEFAULT_PARSER_CONFIG.dynamicTokensEnabled;
+
+    this.maxLookahead = Object.hasOwn(config, "maxLookahead")
+      ? (config.maxLookahead as number)
+      : DEFAULT_PARSER_CONFIG.maxLookahead;
+
+    this.lookaheadStrategy = Object.hasOwn(config, "lookaheadStrategy")
+      ? (config.lookaheadStrategy as ILookaheadStrategy)
+      : new LLkLookaheadStrategy({ maxLookahead: this.maxLookahead });
+  }
+
+  // --- LexerAdapter (absorbed from trait) ---
+  tokVector!: IToken[];
+  tokVectorLength!: number;
+  currIdx!: number;
+
+  initLexerAdapter() {
+    this.tokVector = [];
+    this.tokVectorLength = 0;
+    this.currIdx = -1;
+  }
+
+  set input(newInput: IToken[]) {
+    // @ts-ignore - `this parameter` not supported in setters/getters
+    const parser = this as unknown as MixedInParser;
+    if (!parser.selfAnalysisDone) {
+      parser.ensureGastProductionsCachePopulated();
+    }
+    parser.reset();
+    parser.tokVector = newInput;
+    parser.tokVectorLength = newInput.length;
+  }
+
+  get input(): IToken[] {
+    return this.tokVector;
+  }
+
+  SKIP_TOKEN(this: MixedInParser): IToken {
+    if (this.currIdx <= this.tokVectorLength - 2) {
+      this.consumeToken();
+      return this.LA_FAST(1);
+    } else {
+      return END_OF_FILE;
+    }
+  }
+
+  LA_FAST(this: MixedInParser, howMuch: number): IToken {
+    const soughtIdx = this.currIdx + howMuch;
+    return this.tokVector[soughtIdx];
+  }
+
+  LA(this: MixedInParser, howMuch: number): IToken {
+    const soughtIdx = this.currIdx + howMuch;
+    if (soughtIdx < 0 || this.tokVectorLength <= soughtIdx) {
+      return END_OF_FILE;
+    } else {
+      return this.tokVector[soughtIdx];
+    }
+  }
+
+  consumeToken(this: MixedInParser) {
+    this.currIdx++;
+  }
+
+  exportLexerState(this: MixedInParser): number {
+    return this.currIdx;
+  }
+
+  importLexerState(this: MixedInParser, newState: number) {
+    this.currIdx = newState;
+  }
+
+  resetLexerState(this: MixedInParser): void {
+    this.currIdx = -1;
+  }
+
+  moveToTerminatedState(this: MixedInParser): void {
+    this.currIdx = this.tokVectorLength - 1;
+  }
+
+  getLexerPosition(this: MixedInParser): number {
+    return this.exportLexerState();
+  }
+
+  TRACE_INIT<T>(this: MixedInParser, phaseDesc: string, phaseImpl: () => T): T {
+    if (this.traceInitPerf === true) {
+      this.traceInitIndent++;
+      const indent = new Array(this.traceInitIndent + 1).join("\t");
+      if (this.traceInitIndent < this.traceInitMaxIdent) {
+        console.log(`${indent}--> <${phaseDesc}>`);
+      }
+      const { time, value } = timer(phaseImpl);
+      /* istanbul ignore next - Difficult to reproduce specific performance behavior (>10ms) in tests */
+      const traceMethod = time > 10 ? console.warn : console.log;
+      if (this.traceInitIndent < this.traceInitMaxIdent) {
+        traceMethod(`${indent}<-- <${phaseDesc}> time: ${time}ms`);
+      }
+      this.traceInitIndent--;
+      return value;
+    } else {
+      return phaseImpl();
+    }
+  }
+
   constructor(tokenVocabulary: TokenVocabulary, config: IParserConfig) {
     const that: MixedInParser = this as any;
     that.initErrorHandler(config);
@@ -371,14 +505,11 @@ export class Parser {
 
 applyMixins(Parser, [
   Recoverable,
-  LooksAhead,
   TreeBuilder,
-  LexerAdapter,
   RecognizerEngine,
   RecognizerApi,
   ErrorHandler,
   GastRecorder,
-  PerformanceTracer,
 ]);
 
 export class CstParser extends Parser {
