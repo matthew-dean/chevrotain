@@ -1957,6 +1957,49 @@ export class Parser {
       ? undefined
       : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
     const wasSpeculating = this.IS_SPECULATING;
+    const mapKey = this.currRuleShortName | occurrence;
+    const la1 = this.LA_FAST(1);
+    const la1TypeIdx = la1.tokenTypeIdx;
+
+    // -----------------------------------------------------------------------
+    // Ultra-fast path: GAST-precomputed committed dispatch. No save/restore,
+    // no gated-prefix checks, no try/catch. Skips ~15 property accesses vs
+    // the general fast path. For gate-free LL(1) grammars (e.g. JSON) this
+    // is the hottest path.
+    // -----------------------------------------------------------------------
+    if (!wasSpeculating && !this.dynamicTokensEnabled) {
+      const fastMap = this._orFastMaps[mapKey];
+      if (fastMap !== undefined) {
+        const fastAltIdx = fastMap[la1TypeIdx];
+        if (
+          fastAltIdx !== undefined &&
+          fastAltIdx >= 0 &&
+          fastAltIdx < GATED_OFFSET
+        ) {
+          const cm = this._orCommittable[mapKey];
+          if (cm !== undefined && cm[la1TypeIdx] === true) {
+            if (
+              this._orGatedPrefixAlts[mapKey] === undefined &&
+              (this._orFastMapAltsRef[mapKey] === undefined ||
+                this._orFastMapAltsRef[mapKey] === alts)
+            ) {
+              const alt = alts[fastAltIdx];
+              if (alt.GATE === undefined || alt.GATE.call(this)) {
+                const savedDslCounter = this._dslCounter;
+                const altStarts = this._orAltCounterStarts[mapKey];
+                if (altStarts !== undefined)
+                  this._dslCounter = savedDslCounter + altStarts[fastAltIdx];
+                const r = alt.ALT.call(this) as T;
+                const d = this._orCounterDeltas[mapKey];
+                if (d !== undefined) this._dslCounter = savedDslCounter + d;
+                return r;
+              }
+            }
+          }
+        }
+      }
+    }
+
     // Save outer OR's gated-prefix tracking state so nested ORs (via
     // SUBRULEs) don't corrupt it.
     const savedAltStartLexPos = this._orAltStartLexPos;
@@ -1964,7 +2007,6 @@ export class Parser {
     const savedAltHasAnyPrefix = this._orAltHasAnyPrefix;
 
     const savedDslCounter = this._dslCounter;
-    const mapKey = this.currRuleShortName | occurrence;
     const altStarts = this._orAltCounterStarts[mapKey];
 
     // -----------------------------------------------------------------------
@@ -1978,8 +2020,6 @@ export class Parser {
     // Gated-prefix alts (gate-dependent first-token set) are checked
     // separately via `_orGatedPrefixAlts` — they must always be speculated.
     // -----------------------------------------------------------------------
-    const la1 = this.LA_FAST(1);
-    const la1TypeIdx = la1.tokenTypeIdx;
     const fastMap = this._orFastMaps[mapKey];
     const gatedPrefixAlts = this._orGatedPrefixAlts[mapKey];
     // Dynamic alternatives: if this OR site was cached with a different alts
