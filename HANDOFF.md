@@ -190,6 +190,149 @@ pnpm --filter @jesscss/css-parser test -- -t "nested pseudo"  # specific test
 node benchmark_web/benchmark.mjs --lib /tmp/package/lib/chevrotain.mjs --iterations 5000
 ```
 
+## @jesscss/parser Reference Implementation
+
+The entire RD engine rewrite is modeled on `@jesscss/parser` at
+`/Users/matthew/git/oss/jess/packages/parser/src/parser.ts`. This is the
+authoritative reference for how each DSL method should behave. **Always
+consult it before writing speculative parsing code.**
+
+### Method-by-method comparison
+
+**CONSUME(expected)** — Our fork matches @jesscss/parser:
+
+```
+if token matches → advance pos, return token
+if speculating   → throw SPEC_FAIL (Symbol, zero cost)
+if recovery      → attempt insert/delete recovery
+else             → throw MismatchedTokenError
+```
+
+Key: `IS_SPECULATING` propagates through ALL nested calls. No Error object
+is EVER created during speculation.
+
+**OR(alternatives)** — Our fork mostly matches, with fast-dispatch on top:
+
+```
+@jesscss/parser:                    Our fork:
+for each alt:                       Fast-dispatch check first (our addition):
+  GATE fails → skip                   _orFastMaps[mapKey][la1.tokenTypeIdx]
+  last alt → COMMIT                   → direct call with try/catch
+  GATE passed + recovery → COMMIT   Then slow path (matches @jesscss/parser):
+  else → SPECULATE:                   for each alt:
+    save state                          GATE fails → skip
+    speculating = true                  speculating = true
+    try alt                             try alt
+    success → return (first wins)       success → return (first wins)
+    SPEC_FAIL/ParseError → restore      SPEC_FAIL → restore, continue
+all failed:                           all failed:
+  speculating → throw SPEC_FAIL         speculating → throw SPEC_FAIL
+  else → NoViableAltError               else → raiseNoAltException
+```
+
+Differences from @jesscss/parser (intentional — KEEP these):
+
+- Fast-dispatch map layer before slow path (our optimization)
+- GATED_OFFSET encoding for adaptive gate checks
+- Auto-occurrence counter management (\_dslCounter, \_orCounterDeltas)
+
+Differences from @jesscss/parser (bugs/gaps — FIX these):
+
+- Our OR catches `SPEC_FAIL || isRecognitionException(e)` but @jesscss
+  catches `SPEC_FAIL || e instanceof ParseError`. Recognition exceptions
+  from committed sub-paths should be caught the same way.
+- @jesscss/parser commits the LAST alt (no speculation). Our fork speculates
+  ALL alts including the last. This breaks error recovery for
+  `recoveryEnabled: true` parsers (the 11 failing tests).
+
+**MANY(defOrOpts)** — Our fork now matches @jesscss/parser:
+
+```
+while true:
+  if GATE fails → break
+  save full state (pos + errors + CST)
+  try DEF()
+  on SPEC_FAIL → restore state, break
+  if pos didn't advance → restore state, break (stuck guard)
+```
+
+Key: saves state BEFORE each iteration. Catches SPEC_FAIL to enable deep
+backtracking — a MANY body that fails partway through a subrule chain is
+unwound cleanly.
+
+**AT_LEAST_ONE(defOrOpts)** — Matches @jesscss/parser:
+
+```
+First iteration: mandatory (let it throw/recover normally)
+Subsequent iterations: same as MANY (save/restore/catch)
+```
+
+**OPTION(def)** — Our fork matches @jesscss/parser:
+
+```
+save full state
+try DEF()
+if pos didn't advance or errors increased → restore, return undefined
+on SPEC_FAIL or recognition exception → restore, return undefined
+```
+
+**saveState / restoreState** — @jesscss/parser captures:
+
+```
+pos, errors.length, locationStack (slice), ruleStack (slice), usedSkippedMark
+```
+
+Our fork saves: `currIdx` (pos), `_errors.length`, `saveCstTop()` (watermark).
+We don't copy ruleStack — it's self-correcting via `ruleFinallyStateUpdate`.
+
+### What @jesscss/parser does that we should still port
+
+1. **Last alt committed in OR**: @jesscss/parser line 574-576 runs the last
+   alt WITHOUT setting `speculating = true`. This lets error recovery work
+   for the fallback case. Our fork speculates all alts — the 11 recovery
+   test failures are from this gap.
+
+2. **`tryConsume()` for separators**: @jesscss/parser has a `tryConsume()`
+   method that returns `undefined` on mismatch instead of throwing. Used in
+   MANY_SEP/AT_LEAST_ONE_SEP for zero-allocation separator checks. Our fork
+   still uses speculation for separator matching.
+
+3. **Content assist mode**: @jesscss/parser has `assistMode` + `assistOffset`
+   for IDE integration. Our fork doesn't have this yet.
+
+### How to test with the @jesscss/parser version
+
+A worktree at commit `036d5f42` has the working @jesscss/parser-based
+css-parser. To recreate:
+
+```bash
+cd /Users/matthew/git/oss/jess
+git worktree add /tmp/jess-pre-chev 036d5f42
+cd /tmp/jess-pre-chev
+pnpm install --frozen-lockfile
+pnpm --filter @jesscss/awaitable-pipe build
+pnpm --filter @jesscss/core compile
+pnpm --filter @jesscss/parser build
+pnpm --filter @jesscss/css-parser test  # 86 passing, 0 failing (excl. missing test data)
+```
+
+The nested-pseudo tests pass on this version (but return `value: undefined`
+with 0 errors — a false positive. The @jesscss/parser silently drops
+unparsed input when the outer MANY catches the error).
+
+### Key finding: CSS nesting disambiguation
+
+The `a:hover { }` vs `a: hover;` ambiguity is a GRAMMAR problem, not an
+engine problem. Both @jesscss/parser and our Chevrotain fork handle
+backtracking correctly — but the `declaration` rule consumes `a:hover` as
+`a: hover` successfully, and no amount of backtracking can undo a
+SUCCESSFUL alt.
+
+Fix (implemented in Jess css-parser): whitespace heuristic GATE on the
+declaration alt in `declarationList`. Space after `:` → declaration, no
+space → nested rule selector. The user also wants an "Option 1" greedy
+fallback for edge cases (no whitespace but is still a declaration).
+
 ## What NOT to Do
 
 - Don't use bestProgress heuristic — it's fundamentally wrong (partial match
