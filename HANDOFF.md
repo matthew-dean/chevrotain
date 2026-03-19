@@ -41,128 +41,106 @@ tracked in `RD_ENGINE_PLAN.md` (stages 0-8) and `BACKTRACKING_FIX.md`.
 ### Current test status:
 
 - **Chevrotain**: 796 passing, 0 failing (all 11 recovery tests fixed)
-- **Jess css-parser**: 78/97 passing (19 failures, down from 28 — CST
-  save/restore fix in OR slow path resolved 9 additional tests)
-- **Jess nested-pseudo**: 5/5 passing
+- **Jess css-parser**: in flux (Jess-side parser rewrite in progress)
 
-### Current benchmark:
+### Current benchmark (JSON EmbeddedActionsParser, isolated V8 per phase):
 
-- JSON EmbeddedActionsParser: ~8,800 ops/sec (vs 14,776 v12.0.0 baseline)
-- CSS EmbeddedActionsParser: ~2,100 ops/sec (vs 2,008 baseline — slight win)
-- Baseline comparison: `npm pack chevrotain@12.0.0` → extract to `/tmp/package/`
+| Phase            | v12.0.0 baseline | Our fork      | Ratio           |
+| ---------------- | ---------------- | ------------- | --------------- |
+| **Construction** | 1.29 ms          | **0.48 ms**   | **2.7x faster** |
+| **Cold parse**   | 1.69 ms          | **1.04 ms**   | **1.6x faster** |
+| **First parse**  | 0.56 ms          | 0.60 ms       | ~parity         |
+| **Warm**         | 14,347 ops/sec   | 9,874 ops/sec | **69%**         |
+
+Baseline: `npm pack chevrotain@12.0.0` → extract to `/tmp/package/`
 
 ## Key Files
 
-| File                                           | What it does                                                                               |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `src/parse/parser/traits/recognizer_engine.ts` | Core engine: orInternal, manyInternalLogic, consumeInternal, SPEC_FAIL, fast-dispatch maps |
-| `src/parse/parser/traits/recognizer_api.ts`    | Public DSL: OR, CONSUME, SUBRULE, MANY etc. Auto-counting via `_dslCounter`                |
-| `src/parse/parser/traits/gast_recorder.ts`     | GAST recording: topLevelRuleRecord, per-alt counter management                             |
-| `src/parse/parser/parser.ts`                   | Parser base class, performSelfAnalysis, ambiguity filtering                                |
-| `benchmark_web/benchmark.mjs`                  | CLI benchmark runner                                                                       |
-| `RD_ENGINE_PLAN.md`                            | Full stage plan with checkboxes                                                            |
-| `BACKTRACKING_FIX.md`                          | Deep backtracking analysis: what we keep, what we fixed, known limitations                 |
+| File                             | What it does                                                                                                                                                                                                                                                           |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/parse/parser/parser.ts`     | **THE parser** — all 9 traits absorbed (Stage 7). Contains orInternal, manyInternalLogic, consumeInternal, RULE, OR, MANY, OPTION, CONSUME, SUBRULE, CST building, recovery, GAST recording, performSelfAnalysis, prePopulateOrFastMaps, LL(k) lookahead. ~5000 lines. |
+| `src/parse/grammar/lookahead.ts` | LL(k) lookahead path computation: buildAlternativesLookAheadFunc, buildSingleAlternativeLookaheadFunction, getLookaheadPathsForOr/OptionalProd                                                                                                                         |
+| `src/parse/grammar/first.ts`     | GAST first-token set computation                                                                                                                                                                                                                                       |
+| `benchmark_web/benchmark.mjs`    | CLI benchmark runner (isolated V8 per phase in --mode all)                                                                                                                                                                                                             |
+| `RD_ENGINE_PLAN.md`              | Full stage plan with checkboxes                                                                                                                                                                                                                                        |
+| `BACKTRACKING_FIX.md`            | Deep backtracking analysis + recovery fix documentation                                                                                                                                                                                                                |
+
+## What's Done
+
+### ~~Committed dispatch for OR~~ — DONE
+
+Three-tier OR dispatch in `orInternal`:
+
+1. **Ultra-fast inline LL(1)**: direct hash map → committed call (JSON hot path)
+2. **LL(k) precomputed closure**: `buildAlternativesLookAheadFunc` from GAST
+3. **Speculative slow path**: try each alt with `IS_SPECULATING=true`
+
+### ~~Recovery tests~~ — DONE (796/796)
+
+OR committed re-run + MANY recognition exception handling + CST save/restore.
+
+### ~~Stage 7 — Mixin flattening~~ — DONE
+
+All 9 traits absorbed into Parser. `applyMixins` removed. `MixedInParser`
+type removed. ~196 `this: MixedInParser` annotations removed.
+
+### ~~Precomputed lookahead~~ — DONE
+
+During `performSelfAnalysis()`:
+
+- OR: `buildAlternativesLookAheadFunc` → LL(k) closures in `_orLookahead`
+- MANY/OPTION: `buildSingleAlternativeLookaheadFunction` → LL(k) closures in `_prodLookahead`
+- Fast-dispatch maps (`_orFastMaps`) pre-populated from GAST first-token sets
+
+### Bug fixes — DONE
+
+- tokenMatcher category selection moved after `augmentTokenTypes()`
+- Dynamic alts identity check (`_orFastMapAltsRef`) prevents fast-map corruption
+- Committed dispatch guarded by `_orCommittable` structural analysis
 
 ## What's Open
 
-### 1. Committed dispatch for OR (the big perf question)
+### 1. Zero-cost CST speculation
 
-**Goal**: Skip try/catch on the OR fast path for LL(1) grammars.
+During speculative execution, CST nodes are created then discarded on
+failure. Defer CST creation during speculation to eliminate allocation
+overhead. Use a stack/marker system to replay CST building when committing.
 
-**Why it matters**: V8 profile shows `orInternal` is ~5% of total parse time,
-`tokenizeInternal` (lexer) is ~19%. The try/catch in orInternal's fast path
-is a fraction of that 5%. So the max theoretical gain from committed dispatch
-is small (~2-3%). The bigger win may be elsewhere.
+### 2. Delete old trait files
 
-**The blocker we hit**: The fast-dispatch map (`_orFastMaps`) is built from
-runtime observations. An alt that succeeds for tokenTypeIdx X gets cached as
-`X → altIdx`. But a DIFFERENT alt might also succeed for X (when the first
-alt has an OPTION before its first CONSUME). Committed dispatch (no try/catch)
-calls the cached alt directly — if it fails, there's no recovery.
+The absorbed trait files still exist on disk with dead code:
+`perf_tracer.ts`, `looksahead.ts`, `lexer_adapter.ts`, `error_handler.ts`,
+`gast_recorder.ts`, `recognizer_engine.ts`, `recoverable.ts`,
+`recognizer_api.ts`, `tree_builder.ts`, `apply_mixins.ts`, `parser_traits.ts`.
 
-**The approach we converged on**: Use GAST to statically compute ALL possible
-first tokens per alt during recording (including tokens reachable after
-OPTION/MANY prefixes). Pre-populate the fast map with this complete picture.
-Mark any tokenTypeIdx reachable by multiple alts as ambiguous (-1). Then
-committed dispatch is immediately safe for any non-ambiguous entry.
+### 3. Remaining warm performance gap (~31%)
 
-**Key code**: `getOrFirstTokenInfo` in `src/parse/grammar/lookahead.ts` and
-`first()` in `src/parse/grammar/first.ts` already compute first-token sets
-from GAST. These need to be wired into the fast-map pre-population.
-
-**Critical insight from V8 profiling** (JSON benchmark, `--prof`):
+V8 profile (JSON warm):
 
 ```
-19%  tokenizeInternal (lexer)
- 9%  RegExp matching (part of lexer)
- 6%  invokeRuleWithTryCst (rule wrapper try/catch)
- 5%  orInternal
- 3%  consumeInternal
- 3%  SUBRULE2
- 2%  optionInternalLogic
-~8%  ALT callback functions
+18.4%  tokenizeInternal (lexer) — not in scope
+ 9.0%  RegExp matching (lexer)
+ 7.4%  invokeRuleWithTryCst — try/catch per rule call (structural, shared with upstream)
+ 6.1%  orInternal — counter management, map lookups
+ 3.3%  manyInternalLogic — committed path is slim; speculative path has overhead
+ 0.6%  optionInternalLogic — mostly committed via LL(k) closure
 ```
 
-The 35% gap vs baseline is NOT concentrated in orInternal's try/catch —
-it's spread across the entire call chain. Committed dispatch would save
-maybe 2-3% of total time at best. The GAST-based approach is still the
-RIGHT design, but the ROI is modest. Higher-impact targets:
+The `invokeRuleWithTryCst` try/catch (7.4%) is needed for correct error
+handling and can't be removed without breaking error semantics. The remaining
+gap is from auto-occurrence counter management (`_dslCounter` save/restore,
+`_orCounterDeltas` lookup) per DSL call.
 
-- Mixin flattening (reducing prototype chain depth for all method calls)
-- Rule wrapper overhead (invokeRuleWithTryCst at 6%)
-- Function call overhead (each DSL call is a prototype method lookup)
+### 4. Jess css-parser
 
-### 2. ~~11 Failing recovery tests~~ — FIXED
+The Jess css-parser is being rewritten separately. Key Chevrotain issues
+that affect it:
 
-All 11 recovery tests now pass. The fix uses three interconnected mechanisms:
-
-1. **OR committed re-run**: when all speculative alts fail but the
-   fast-dispatch map identifies which alt's first token matched (LL(1)),
-   re-run that alt with `IS_SPECULATING=false`. CONSUME then throws real
-   `MismatchedTokenException`, enabling single-token recovery. For
-   ambiguous entries (-1), raises `NoViableAltException` directly.
-
-2. **MANY recognition exception handling**: MANY catches recognition
-   exceptions (from OR's committed re-run) in addition to SPEC_FAIL.
-   No-progress exceptions stop the loop; progress exceptions propagate
-   for recovery or error reporting upstream.
-
-3. **CST/error save-restore in OR slow path**: speculative alts that
-   partially match add orphan CST nodes. These are now properly cleaned
-   up after each failed speculative alt, preventing CST corruption.
-   Also fixed 9 additional Jess css-parser tests (78/97 from 69/97).
-
-### 3. Jess css-parser — Option 1 greedy fallback
-
-The whitespace heuristic GATE handles 99% of cases (`color: red` vs
-`a:hover`). For edge cases without whitespace (`a:b;` vs `a:b { }`),
-the user wants a "greedy MANY with OR narrowing" approach:
-
-- Start parsing tokens that are valid in BOTH declarations and selectors
-- When an invalid-for-one token appears, narrow to the other interpretation
-- At `{`, `;`, or `}`, construct the appropriate node
-
-This is a **grammar-level change** in
-`/Users/matthew/git/oss/jess/packages/css-parser/src/productions/selectors.ts`
-(the `declarationList` function). The engine doesn't need changes.
-
-### 4. Stage 7 — Mixin flattening
-
-Replace `applyMixins` with a real class hierarchy:
-`PerformanceTracer → LexerAdapter → ... → RecognizerApi → Parser`
-
-Plan is in `RD_ENGINE_PLAN.md`. The architecture exploration agent
-recommended Option E (linear abstract class chain). The key steps:
-
-1. Extract constants from parser.ts to break import cycles
-2. Chain traits as `abstract class X extends Y`
-3. Remove `applyMixins`, simplify `MixedInParser` type
-4. Remove `this: MixedInParser` from ~192 method signatures
-
-### 5. Stage 8 — Benchmarks
-
-Run JSON, CSS, ECMA5 against v12.0.0 baseline with both EmbeddedActionsParser
-and CstParser modes.
+- Dynamic alternatives (same rule, different alt arrays) — fixed with
+  identity check
+- Token category matching — fixed with tokenMatcher ordering
+- LL(k) disambiguation for CSS nesting — now available via precomputed
+  lookahead
 
 ## Important Rules
 
