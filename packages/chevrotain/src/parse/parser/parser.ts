@@ -106,6 +106,7 @@ import {
   tokenStructuredMatcherNoCategories,
 } from "../../scan/tokens.js";
 import { IParserConfigInternal, ParserMethodInternal } from "./types.js";
+import { first as gastFirst } from "../grammar/first.js";
 import {
   AT_LEAST_ONE_IDX,
   AT_LEAST_ONE_SEP_IDX,
@@ -550,6 +551,13 @@ export class Parser {
             this.resyncFollows = allFollows;
           });
         }
+
+        // Pre-populate OR fast-dispatch maps from GAST first-token sets.
+        // This gives committed dispatch (no try/catch) from the very
+        // first parse — equivalent to upstream's preComputeLookaheadFunctions.
+        this.TRACE_INIT("prePopulateOrFastMaps", () => {
+          this.prePopulateOrFastMaps();
+        });
       }
 
       if (
@@ -576,6 +584,133 @@ export class Parser {
         }
       }
     });
+  }
+
+  /**
+   * Pre-populate `_orFastMaps` and `_orCommittable` from GAST first-token
+   * sets. This is the equivalent of upstream Chevrotain's
+   * `preComputeLookaheadFunctions` — it gives committed dispatch (no
+   * try/catch) from the very first parse call.
+   *
+   * For each OR (Alternation) in the grammar:
+   * - Compute first-token set per alt using `gastFirst()`
+   * - Map each `tokenTypeIdx` (including category matches) → alt index
+   * - Mark ambiguous entries (-1) when multiple alts share a first token
+   * - Mark entries as committable when the alt's first production is NOT
+   *   optional (no OPTION/MANY prefix → first token uniquely determines path)
+   */
+  prePopulateOrFastMaps(this: MixedInParser): void {
+    const rules = Object.values(this.gastProductionsCache);
+    for (const rule of rules) {
+      const ruleShortName = this.fullRuleNameToShort[rule.name];
+      if (ruleShortName === undefined) continue;
+
+      // Recursively find all Alternation nodes in this rule's GAST.
+      const alternations: InstanceType<typeof Alternation>[] = [];
+      const findAlternations = (prods: IProduction[]) => {
+        for (const prod of prods) {
+          // Don't follow NonTerminal references — they point to other
+          // rules whose Alternations have their own ruleShortName.
+          if (prod instanceof NonTerminal) continue;
+          if (prod instanceof Alternation) {
+            alternations.push(prod);
+          }
+          if ("definition" in prod && Array.isArray(prod.definition)) {
+            findAlternations(prod.definition);
+          }
+        }
+      };
+      findAlternations(rule.definition);
+
+      for (const node of alternations) {
+        const mapKey = ruleShortName | node.idx;
+        const alts = node.definition; // Alternative[]
+        let map = this._orFastMaps[mapKey];
+        if (map === undefined) {
+          map = Object.create(null);
+          this._orFastMaps[mapKey] = map;
+        }
+        let cm = this._orCommittable[mapKey];
+        if (cm === undefined) {
+          cm = Object.create(null);
+          this._orCommittable[mapKey] = cm;
+        }
+
+        // If any alt has predicates (GATE), skip GAST pre-population
+        // for this OR entirely — runtime gate evaluation must determine
+        // dispatch, not static first-token sets.
+        if (node.hasPredicates) continue;
+
+        for (let altIdx = 0; altIdx < alts.length; altIdx++) {
+          const alt = alts[altIdx];
+          const firstTokens = gastFirst(alt);
+
+          // Committable: the first production in the alt is NOT optional.
+          // If it's Option/Repetition, the first token could match the
+          // OPTION body OR skip it, so committed dispatch is unsafe.
+          const firstProd = alt.definition[0];
+          const isCommittable =
+            firstProd !== undefined &&
+            !(firstProd instanceof Option) &&
+            !(firstProd instanceof Repetition) &&
+            !(firstProd instanceof RepetitionWithSeparator);
+
+          const hasGate = false; // No gates if we passed the check above
+
+          for (const tokType of firstTokens) {
+            const tidx = tokType.tokenTypeIdx;
+            if (tidx === undefined) continue;
+            this.populateFastMapEntry(
+              map,
+              cm,
+              tidx,
+              altIdx,
+              isCommittable,
+              hasGate,
+            );
+
+            // Token categories: each categoryMatch idx is also valid.
+            if (tokType.categoryMatches) {
+              for (const catIdx of tokType.categoryMatches) {
+                this.populateFastMapEntry(
+                  map,
+                  cm,
+                  catIdx,
+                  altIdx,
+                  isCommittable,
+                  hasGate,
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /** Helper for prePopulateOrFastMaps — adds one tokenTypeIdx entry. */
+  private populateFastMapEntry(
+    map: Record<number, number>,
+    cm: Record<number, boolean>,
+    tidx: number,
+    altIdx: number,
+    isCommittable: boolean,
+    hasGate: boolean,
+  ): void {
+    const existing = map[tidx];
+    if (existing === undefined) {
+      map[tidx] = hasGate ? altIdx + GATED_OFFSET : altIdx;
+      if (isCommittable && !hasGate) {
+        cm[tidx] = true;
+      }
+    } else if (existing >= 0) {
+      const existingAlt =
+        existing >= GATED_OFFSET ? existing - GATED_OFFSET : existing;
+      if (existingAlt !== altIdx) {
+        map[tidx] = -1; // ambiguous
+        cm[tidx] = false;
+      }
+    }
   }
 
   /**
@@ -1800,9 +1935,11 @@ export class Parser {
           if (altStarts !== undefined)
             this._dslCounter = savedDslCounter + altStarts[realAltIdx];
 
-          // Check committability: if the alt had no OPTION/MANY prefix
-          // when it was observed during speculation, committed dispatch
-          // is safe — the first token uniquely determines the path.
+          // Check committability: if the alt had no OPTION/MANY prefix,
+          // committed dispatch is safe — the first token uniquely determines
+          // the path.
+          // TODO: remove try/catch safety net once all edge cases (e.g.,
+          // scannerless mode, dynamic token re-lex) are properly guarded.
           const cm = this._orCommittable[mapKey];
           if (
             !wasSpeculating &&
@@ -1810,9 +1947,7 @@ export class Parser {
             cm !== undefined &&
             cm[la1TypeIdx] === true
           ) {
-            // COMMITTED DISPATCH: no save/restore needed on success.
-            // If the alt unexpectedly fails (e.g., dynamic token re-lex),
-            // catch, revoke committability, and fall through to speculative.
+            // COMMITTED DISPATCH with safety net.
             const cmLexPos = this.currIdx;
             const cmErrors = this._errors.length;
             const cmCst = this.saveCstTop();
@@ -1827,12 +1962,11 @@ export class Parser {
               this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
               return r;
             } catch (_e) {
-              // Revoke committability — this entry is not safe.
+              // Revoke committability and fall through to speculative.
               cm[la1TypeIdx] = false;
               this.restoreCstTop(cmCst);
               this.currIdx = cmLexPos;
               this._errors.length = cmErrors;
-              // Fall through to speculative dispatch below.
             }
           }
 
