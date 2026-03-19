@@ -557,9 +557,14 @@ export class Parser {
         // Pre-populate OR fast-dispatch maps from GAST first-token sets.
         // This gives committed dispatch (no try/catch) from the very
         // first parse — equivalent to upstream's preComputeLookaheadFunctions.
-        this.TRACE_INIT("prePopulateOrFastMaps", () => {
-          this.prePopulateOrFastMaps();
-        });
+        // Skip when a custom lookahead strategy is used (e.g., scannerless
+        // mode) — the custom strategy may produce different results than
+        // our standard first-token analysis.
+        if (this.lookaheadStrategy instanceof LLkLookaheadStrategy) {
+          this.TRACE_INIT("prePopulateOrFastMaps", () => {
+            this.prePopulateOrFastMaps();
+          });
+        }
       }
 
       if (
@@ -1953,11 +1958,9 @@ export class Parser {
           if (altStarts !== undefined)
             this._dslCounter = savedDslCounter + altStarts[realAltIdx];
 
-          // Check committability: if the alt had no OPTION/MANY prefix,
-          // committed dispatch is safe — the first token uniquely determines
-          // the path.
-          // TODO: remove try/catch safety net once all edge cases (e.g.,
-          // scannerless mode, dynamic token re-lex) are properly guarded.
+          // Committed dispatch: if the alt had no OPTION/MANY prefix
+          // (verified from GAST or runtime structural observation), the
+          // first token uniquely determines the path. No try/catch needed.
           const cm = this._orCommittable[mapKey];
           if (
             !wasSpeculating &&
@@ -1965,27 +1968,17 @@ export class Parser {
             cm !== undefined &&
             cm[la1TypeIdx] === true
           ) {
-            // COMMITTED DISPATCH with safety net.
-            const cmLexPos = this.currIdx;
-            const cmErrors = this._errors.length;
-            const cmCst = this.saveCstTop();
-            try {
-              const r = alt.ALT.call(this) as T;
-              {
-                const d = this._orCounterDeltas[mapKey];
-                if (d !== undefined) this._dslCounter = savedDslCounter + d;
-              }
-              this._orAltStartLexPos = savedAltStartLexPos;
-              this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
-              this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
-              return r;
-            } catch (_e) {
-              // Revoke committability and fall through to speculative.
-              cm[la1TypeIdx] = false;
-              this.restoreCstTop(cmCst);
-              this.currIdx = cmLexPos;
-              this._errors.length = cmErrors;
+            // COMMITTED DISPATCH: zero overhead. If the alt fails, the
+            // exception propagates to invokeRuleCatch for recovery.
+            const r = alt.ALT.call(this) as T;
+            {
+              const d = this._orCounterDeltas[mapKey];
+              if (d !== undefined) this._dslCounter = savedDslCounter + d;
             }
+            this._orAltStartLexPos = savedAltStartLexPos;
+            this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+            this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
+            return r;
           }
 
           const fastLexPos = this.currIdx;
