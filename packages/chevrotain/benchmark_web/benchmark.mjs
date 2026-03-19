@@ -34,6 +34,7 @@ const libPath = getArg(
 const mode = getArg("--mode", "warm"); // "warm" | "cold" | "first-parse" | "construction" | "all"
 const selectedParser = getArg("--parser", "all");
 const useCst = args.includes("--cst");
+const quiet = args.includes("--quiet");
 const ITERATIONS = parseInt(getArg("--iterations", "5000"), 10);
 const WARMUP = Math.max(100, Math.floor(ITERATIONS * 0.1));
 
@@ -379,33 +380,60 @@ if (selectedParser === "all" || selectedParser === "json")
 if (selectedParser === "all" || selectedParser === "css")
   factories.push({ name: "CSS", make: makeCssParser });
 
-console.log(`\nChevrotain parser benchmark`);
-console.log(`  lib:        ${libUrl}`);
-console.log(`  parser type: ${useCst ? "CstParser" : "EmbeddedActionsParser"}`);
-console.log(`  mode:       ${mode}`);
-console.log(
-  `  iterations: ${ITERATIONS.toLocaleString()} (+ ${WARMUP.toLocaleString()} warmup)`,
-);
-console.log(`  parsers:    ${factories.map((f) => f.name).join(", ")}\n`);
+if (!quiet) {
+  console.log(`\nChevrotain parser benchmark`);
+  console.log(`  lib:        ${libUrl}`);
+  console.log(
+    `  parser type: ${useCst ? "CstParser" : "EmbeddedActionsParser"}`,
+  );
+  console.log(`  mode:       ${mode}`);
+  console.log(
+    `  iterations: ${ITERATIONS.toLocaleString()} (+ ${WARMUP.toLocaleString()} warmup)`,
+  );
+  console.log(`  parsers:    ${factories.map((f) => f.name).join(", ")}\n`);
+}
 
-// Each mode runs in its own Node process (via --mode flag) to prevent JIT
-// profile pollution between construction-heavy (cold) and parse-heavy (warm) runs.
-// The "all" mode shows all phases for a quick overview.
+// ---------------------------------------------------------------------------
+// "all" mode: spawn a fresh V8 process for each phase so JIT profiles from
+// construction-heavy phases don't pollute the warm steady-state measurement.
+// ---------------------------------------------------------------------------
+if (mode === "all") {
+  const { execFileSync } = await import("node:child_process");
+  const selfPath = new URL(import.meta.url).pathname;
+  // Forward CLI args, replacing --mode all with each specific mode.
+  const baseArgs = process.argv
+    .slice(2)
+    .filter((a, i, arr) => a !== "--mode" && arr[i - 1] !== "--mode");
+  for (const phase of ["construction", "cold", "first-parse", "warm"]) {
+    const childArgs = [selfPath, "--mode", phase, ...baseArgs, "--quiet"];
+    try {
+      const output = execFileSync(process.execPath, childArgs, {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "inherit"],
+      });
+      // Print only non-empty lines from the child.
+      for (const l of output.split("\n")) {
+        if (l.trim()) console.log(l);
+      }
+    } catch (e) {
+      console.error(`Phase "${phase}" failed:`, e.message);
+    }
+  }
+  process.exit(0);
+}
 
-if (mode === "construction" || mode === "all") {
-  // Time only parser construction (performSelfAnalysis included).
-  // Our engine skips lookahead precomputation; baseline pays that cost here.
+// ---------------------------------------------------------------------------
+// Single-phase modes: each runs in its own V8 process (clean JIT state).
+// ---------------------------------------------------------------------------
+if (mode === "construction") {
   console.log(`Construction only (${REPS} reps each):`);
   for (const f of factories) {
     const ms = timeMs(() => f.make(), REPS);
     console.log(`  ${f.name.padEnd(8)} ${ms.toFixed(2)} ms`);
   }
-  console.log();
 }
 
-if (mode === "cold" || mode === "all") {
-  // Time construction + first parse (JIT-cold body).
-  // Fair comparison: a user who creates a parser and immediately parses once.
+if (mode === "cold") {
   console.log(`Cold (construction + first parse, ${REPS} reps):`);
   for (const f of factories) {
     const ms = timeMs(() => {
@@ -414,13 +442,9 @@ if (mode === "cold" || mode === "all") {
     }, REPS);
     console.log(`  ${f.name.padEnd(8)} ${ms.toFixed(2)} ms`);
   }
-  console.log();
 }
 
-if (mode === "first-parse" || mode === "all") {
-  // Time only the first parse after construction (JIT-cold parse body).
-  // Isolates parse cost from construction cost — our engine pays zero
-  // lookahead-precomputation overhead here; baseline already paid it during construction.
+if (mode === "first-parse") {
   console.log(`First parse only (post-construction, ${REPS} reps):`);
   for (const f of factories) {
     const ms =
@@ -430,16 +454,12 @@ if (mode === "first-parse" || mode === "all") {
       }, REPS) - timeMs(() => f.make(), REPS);
     console.log(`  ${f.name.padEnd(8)} ${ms.toFixed(3)} ms`);
   }
-  console.log();
 }
 
-if (mode === "warm" || mode === "all") {
-  // Steady-state throughput. Parser constructed once, then run ITERATIONS times.
-  // JIT-warm via the WARMUP phase in bench().
+if (mode === "warm") {
   console.log("Warm (steady-state throughput):");
   for (const f of factories) {
     const p = f.make();
     bench(f.name, () => p.run());
   }
-  console.log();
 }
