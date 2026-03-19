@@ -437,14 +437,26 @@ export class RecognizerApi {
     return this.optionInternal(actionORMethodDef, idx);
   }
 
+  /**
+   * Committed LL(1) fast dispatch — shared by OR, OR1-OR9, and lowercase or.
+   *
+   * For gate-free, non-speculating, unambiguous LL(1) grammars (JSON, CSS),
+   * the fast-dispatch map gives us the exact alt for this LA(1) token.
+   * Call it directly — no try/catch, no save/restore. V8 can inline this.
+   *
+   * Returns undefined when the fast path doesn't apply, signalling the
+   * caller to fall through to orInternal (with try/catch + speculation).
+   */
+
   // ──── OR family ────
   OR<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
     const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
+    if (this.RECORDING_PHASE) {
       return this.orInternalRecord(altsOrOpts, idx) as T;
+    }
     return this.orInternal(altsOrOpts, idx);
   }
 
@@ -452,90 +464,63 @@ export class RecognizerApi {
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.orInternalRecord(altsOrOpts, idx) as T;
-    return this.orInternal(altsOrOpts, idx);
+    return this.OR(altsOrOpts);
   }
 
   OR2<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.orInternalRecord(altsOrOpts, idx) as T;
-    return this.orInternal(altsOrOpts, idx);
+    return this.OR(altsOrOpts);
   }
 
   OR3<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.orInternalRecord(altsOrOpts, idx) as T;
-    return this.orInternal(altsOrOpts, idx);
+    return this.OR(altsOrOpts);
   }
 
   OR4<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.orInternalRecord(altsOrOpts, idx) as T;
-    return this.orInternal(altsOrOpts, idx);
+    return this.OR(altsOrOpts);
   }
 
   OR5<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.orInternalRecord(altsOrOpts, idx) as T;
-    return this.orInternal(altsOrOpts, idx);
+    return this.OR(altsOrOpts);
   }
 
   OR6<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.orInternalRecord(altsOrOpts, idx) as T;
-    return this.orInternal(altsOrOpts, idx);
+    return this.OR(altsOrOpts);
   }
 
   OR7<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.orInternalRecord(altsOrOpts, idx) as T;
-    return this.orInternal(altsOrOpts, idx);
+    return this.OR(altsOrOpts);
   }
 
   OR8<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.orInternalRecord(altsOrOpts, idx) as T;
-    return this.orInternal(altsOrOpts, idx);
+    return this.OR(altsOrOpts);
   }
 
   OR9<T>(
     this: MixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
   ): T {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.orInternalRecord(altsOrOpts, idx) as T;
-    return this.orInternal(altsOrOpts, idx);
+    return this.OR(altsOrOpts);
   }
 
   // ──── MANY family ────

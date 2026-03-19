@@ -1261,8 +1261,7 @@ export class RecognizerEngine {
       } catch (e) {
         this.IS_SPECULATING = wasSpeculating;
         if (e === SPEC_FAIL || isRecognitionException(e)) {
-          // Record failed alt with progress for fast-dispatch cache.
-          const progress = this.exportLexerState() - startLexPos;
+          // Record gated-prefix tracking for failed alts.
           if (this._orAltHasGatedPrefix) {
             let gpa = this._orGatedPrefixAlts[mapKey];
             if (gpa === undefined) {
@@ -1273,10 +1272,14 @@ export class RecognizerEngine {
               gpa.push(i);
               if (gpa.length > 1) gpa.sort((a, b) => a - b);
             }
-          } else if (progress > 0) {
+          }
+          // Record failed alt with progress for fast-dispatch ambiguity
+          // detection. If a different alt later succeeds for the same
+          // tokenTypeIdx, the entry becomes -1 (ambiguous).
+          const progress = this.exportLexerState() - startLexPos;
+          if (!this._orAltHasGatedPrefix && progress > 0) {
             addOrFastMapEntry(this._orFastMaps, mapKey, la1TypeIdx, i, alts);
           }
-          // Restore state for next alt.
           this.importLexerState(startLexPos);
           continue;
         }
