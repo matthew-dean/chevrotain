@@ -222,22 +222,23 @@ export function buildAlternativesLookAheadFunc(
       return currAlt.flat();
     });
 
-    const choiceToAlt = singleTokenAlts.reduce(
-      (result, currAlt, idx) => {
-        currAlt.forEach((currTokType) => {
-          if (!(currTokType.tokenTypeIdx! in result)) {
-            result[currTokType.tokenTypeIdx!] = idx;
+    // Use an Array instead of a plain object so V8 uses fast indexed element
+    // storage (direct slot load ~1-2 ns) rather than hash-table property
+    // lookup. tokenTypeIdx values are small sequential integers assigned by
+    // augmentTokenTypes, so the array stays compact.
+    const choiceToAlt: number[] = [];
+    singleTokenAlts.forEach((currAlt, idx) => {
+      currAlt.forEach((currTokType) => {
+        if (choiceToAlt[currTokType.tokenTypeIdx!] === undefined) {
+          choiceToAlt[currTokType.tokenTypeIdx!] = idx;
+        }
+        currTokType.categoryMatches!.forEach((currExtendingType) => {
+          if (choiceToAlt[currExtendingType] === undefined) {
+            choiceToAlt[currExtendingType] = idx;
           }
-          currTokType.categoryMatches!.forEach((currExtendingType) => {
-            if (!Object.hasOwn(result, currExtendingType)) {
-              result[currExtendingType] = idx;
-            }
-          });
         });
-        return result;
-      },
-      {} as Record<number, number>,
-    );
+      });
+    });
 
     /**
      * @returns {number} - The chosen alternative index
