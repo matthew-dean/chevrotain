@@ -1773,9 +1773,9 @@ export class Parser {
         // Dispatch to the mapped fallback alt.
         const alt = alts[realAltIdx];
         if (alt.GATE === undefined || alt.GATE.call(this)) {
-          const fastLexPos = this.currIdx;
           if (altStarts !== undefined)
             this._dslCounter = savedDslCounter + altStarts[realAltIdx];
+          const fastLexPos = this.currIdx;
           if (wasSpeculating) {
             try {
               const r = alt.ALT.call(this) as T;
