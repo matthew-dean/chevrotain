@@ -70,11 +70,6 @@ export function createToken(config: ITokenConfig): TokenType {
 
 export const EOF = createToken({ name: "EOF", pattern: Lexer.NA });
 
-/**
- * Produces an IToken with every field declared upfront so all IToken objects
- * share a single V8 hidden class. payload and isInsertedInRecovery are always
- * present as sentinels rather than added post-hoc during recovery.
- */
 export function createTokenInstance(
   tokType: TokenType,
   image: string,
@@ -95,8 +90,6 @@ export function createTokenInstance(
     endColumn,
     tokenTypeIdx: (<any>tokType).tokenTypeIdx,
     tokenType: tokType,
-    payload: undefined,
-    isInsertedInRecovery: false,
   };
 }
 
