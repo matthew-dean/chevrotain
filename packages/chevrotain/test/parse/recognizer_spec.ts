@@ -739,19 +739,17 @@ function defineRecognizerSpecs(
 
             this.RULE("goodRule", () => {
               this.CONSUME(IntTok);
-              // With auto-counting, two CONSUME calls get unique idx values
-              // so no duplicate error occurs.
+              // Duplicate CONSUME Idx error
               this.CONSUME(IntTok);
             });
             this.performSelfAnalysis();
           }
         }
 
-        // With auto-occurrence counting, duplicate CONSUME calls no longer
-        // produce definition errors — both skipValidations=true and false
-        // succeed.
         expect(() => new SkipValidationsParser(true)).to.not.throw();
-        expect(() => new SkipValidationsParser(false)).to.not.throw();
+        expect(() => new SkipValidationsParser(false)).to.throw(
+          "Parser Definition Errors detected:",
+        );
       });
 
       it("can only SAVE_ERROR for recognition exceptions", () => {
@@ -850,84 +848,24 @@ function defineRecognizerSpecs(
     });
 
     describe("The BaseRecognizer", () => {
-      it("Will lazily run grammar analysis when performSelfAnalysis never called", () => {
-        class ParserWithoutPerformSelfAnalysis extends EmbeddedActionsParser {
+      it("Will throw an error if performSelfAnalysis never called", () => {
+        class WrongOrderOfSelfAnalysisParser extends EmbeddedActionsParser {
           constructor() {
             super(ALL_TOKENS);
             this.RULE("goodRule", () => {
               this.CONSUME(IntTok);
             });
-          }
-        }
-
-        const parser: any = new ParserWithoutPerformSelfAnalysis();
-        parser.input = [createTokenInstance(IntTok, "1")];
-        expect(parser.goodRule()).to.be.undefined;
-        expect(parser.errors).to.be.empty;
-      });
-
-      it("getGAstProductions works without performSelfAnalysis", () => {
-        class ParserWithoutPerformSelfAnalysis extends EmbeddedActionsParser {
-          constructor() {
-            super(ALL_TOKENS);
-            this.RULE("goodRule", () => {
+            this.RULE("badRule", () => {
               this.CONSUME(IntTok);
             });
           }
         }
 
-        const parser: any = new ParserWithoutPerformSelfAnalysis();
-        const gast = parser.getGAstProductions();
-        expect(gast).to.be.an("object");
-        expect(gast.goodRule).to.exist;
-      });
-
-      it("getSerializedGastProductions works without performSelfAnalysis", () => {
-        class ParserWithoutPerformSelfAnalysis extends EmbeddedActionsParser {
-          constructor() {
-            super(ALL_TOKENS);
-            this.RULE("goodRule", () => {
-              this.CONSUME(IntTok);
-            });
-          }
-        }
-
-        const parser: any = new ParserWithoutPerformSelfAnalysis();
-        const serialized = parser.getSerializedGastProductions();
-        expect(serialized).to.be.an("array");
-        expect(serialized.length).to.be.greaterThan(0);
-      });
-
-      it("can parse OR and MANY without performSelfAnalysis", () => {
-        class ParserWithoutPerformSelfAnalysis extends EmbeddedActionsParser {
-          constructor() {
-            super(ALL_TOKENS);
-            this.RULE("list", () => {
-              const items: string[] = [];
-              this.MANY({
-                DEF: () => {
-                  items.push(
-                    this.OR([
-                      { ALT: () => this.CONSUME1(IntTok).image },
-                      { ALT: () => this.CONSUME1(PlusTok).image },
-                    ]) as string,
-                  );
-                },
-              });
-              return items;
-            });
-          }
-        }
-
-        const parser: any = new ParserWithoutPerformSelfAnalysis();
-        parser.input = [
-          createTokenInstance(IntTok, "1"),
-          createTokenInstance(PlusTok, "+"),
-          createTokenInstance(IntTok, "2"),
-        ];
-        const result = parser.list();
-        expect(result).to.deep.equal(["1", "+", "2"]);
-        expect(parser.errors).to.be.empty;
+        expect(() => {
+          new WrongOrderOfSelfAnalysisParser().input = [];
+        }).to.throw(
+          `Missing <performSelfAnalysis> invocation at the end of the Parser's constructor.`,
+        );
       });
 
       it("Will throw an error if performSelfAnalysis is called before all the rules have been defined", () => {
@@ -1367,12 +1305,15 @@ function defineRecognizerSpecs(
           createTokenInstance(MinusTok),
         ]);
         parser.rule();
-        // The speculative engine correctly avoids committing to a nested OPTION
-        // path that will fail mid-way. Both OPTIONs exit without consuming tokens,
-        // leaving [MinusTok, MinusTok] unmatched → NotAllInputParsedException.
-        expect(parser.errors[0]).to.be.an.instanceof(
-          NotAllInputParsedException,
-        );
+        expect(parser.errors[0]).to.be.an.instanceof(MismatchedTokenException);
+        expect(parser.errors[0].context.ruleStack).to.deep.equal([
+          "rule",
+          "rule2",
+          "rule3",
+        ]);
+        expect(parser.errors[0].context.ruleOccurrenceStack).to.deep.equal([
+          0, 1, 5,
+        ]);
       });
 
       it("Will build an error message for AT_LEAST_ONE automatically", () => {

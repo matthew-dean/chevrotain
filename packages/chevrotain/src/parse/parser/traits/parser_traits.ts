@@ -1,12 +1,16 @@
 import {
   CstParser as CstParserConstructorImpel,
   EmbeddedActionsParser as EmbeddedActionsParserConstructorImpl,
+  ForgivingParser as ForgivingParserConstructorImpl,
+  StrictParser as StrictParserConstructorImpl,
+  SmartParser as SmartParserConstructorImpl,
+  SimpleParser as SimpleParserConstructorImpl,
   Parser as ParserConstructorImpel,
 } from "../parser.js";
 import * as defs from "@chevrotain/types";
 /**
- * All traits have been absorbed into Parser (Stage 7).
- * MixedInParser is now just Parser itself.
+ * All traits have been absorbed into the strict parser implementation (Stage 7).
+ * MixedInParser is now just StrictParser itself.
  */
 export type MixedInParser = ParserConstructorImpel;
 
@@ -31,3 +35,47 @@ interface MixedInEmbeddedActionsParserConstructor {
 export const EmbeddedActionsParser: MixedInEmbeddedActionsParserConstructor = <
   any
 >EmbeddedActionsParserConstructorImpl;
+
+interface MixedInStrictParserConstructor {
+  new (
+    tokenVocabulary: defs.TokenVocabulary,
+    config?: defs.IParserConfig,
+  ): defs.StrictParser;
+}
+
+export const StrictParser: MixedInStrictParserConstructor = <any>(
+  StrictParserConstructorImpl
+);
+
+interface MixedInForgivingParserConstructor {
+  new (
+    tokenVocabulary: defs.TokenVocabulary,
+    config?: defs.IParserConfig,
+  ): defs.ForgivingParser;
+}
+
+export const ForgivingParser: MixedInForgivingParserConstructor = <any>(
+  ForgivingParserConstructorImpl
+);
+
+interface MixedInSimpleParserConstructor {
+  new (
+    tokenVocabulary: defs.TokenVocabulary,
+    config?: defs.IParserConfig,
+  ): defs.SimpleParser;
+}
+
+export const SimpleParser: MixedInSimpleParserConstructor = <any>(
+  SimpleParserConstructorImpl
+);
+
+interface MixedInSmartParserConstructor {
+  new (
+    tokenVocabulary: defs.TokenVocabulary,
+    config?: defs.IParserConfig,
+  ): defs.SmartParser;
+}
+
+export const SmartParser: MixedInSmartParserConstructor = <any>(
+  SmartParserConstructorImpl
+);

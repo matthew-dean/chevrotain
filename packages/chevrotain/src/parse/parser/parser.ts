@@ -117,6 +117,7 @@ import {
   MANY_IDX,
   MANY_SEP_IDX,
   OPTION_IDX,
+  OR_IDX,
 } from "../grammar/keys.js";
 import {
   validateLookahead,
@@ -415,6 +416,56 @@ function addOrFastMapEntry(
   }
 }
 
+function cloneNullProtoRecord<T>(
+  src: Record<number, T> | undefined,
+): Record<number, T> | undefined {
+  if (src === undefined) return undefined;
+  const clone: Record<number, T> = Object.create(null);
+  for (const key of Object.keys(src)) {
+    clone[key as any] = src[key as any];
+  }
+  return clone;
+}
+
+function cloneSparseRecordTable<T>(
+  src: Record<number, Record<number, T>>,
+): Record<number, Record<number, T>> {
+  const clone: Record<number, Record<number, T>> = [];
+  for (const key of Object.keys(src)) {
+    clone[key as any] = cloneNullProtoRecord(src[key as any]) as Record<
+      number,
+      T
+    >;
+  }
+  return clone;
+}
+
+function cloneSparseNumberArrayTable(
+  src: Record<number, number[]>,
+): Record<number, number[]> {
+  const clone: Record<number, number[]> = [];
+  for (const key of Object.keys(src)) {
+    clone[key as any] = src[key as any].slice();
+  }
+  return clone;
+}
+
+function cloneSparseValueTable<T>(src: Record<number, T>): Record<number, T> {
+  const clone: Record<number, T> = [];
+  for (const key of Object.keys(src)) {
+    clone[key as any] = src[key as any];
+  }
+  return clone;
+}
+
+function cloneSparseArray<T>(src: T[]): T[] {
+  const clone: T[] = [];
+  for (const key of Object.keys(src)) {
+    clone[key as any] = src[key as any];
+  }
+  return clone;
+}
+
 /**
  * Thrown by `consumeInternal` when `_earlyExitLookahead` is true and a token
  * successfully matches. This aborts the action immediately after the first
@@ -456,6 +507,36 @@ const RECORDING_PHASE_CSTNODE: CstNode = {
     "See: https://chevrotain.io/docs/guide/internals.html#grammar-recording for details",
   children: {},
 };
+
+const RECORDING_API_METHOD_NAMES: readonly string[] = (() => {
+  const names = [
+    "consume",
+    "subrule",
+    "option",
+    "or",
+    "many",
+    "manySep",
+    "atLeastOne",
+    "atLeastOneSep",
+    "ACTION",
+    "BACKTRACK",
+    "LA",
+  ];
+  for (let i = 0; i < 10; i++) {
+    const idx = i > 0 ? String(i) : "";
+    names.push(
+      `CONSUME${idx}`,
+      `SUBRULE${idx}`,
+      `OPTION${idx}`,
+      `OR${idx}`,
+      `MANY${idx}`,
+      `MANY_SEP${idx}`,
+      `AT_LEAST_ONE${idx}`,
+      `AT_LEAST_ONE_SEP${idx}`,
+    );
+  }
+  return names;
+})();
 
 // --- TreeBuilder module-level helpers (absorbed from trait) ---
 
@@ -500,7 +581,7 @@ export interface CstTopSave {
   location: Record<string, number> | undefined;
 }
 
-export class Parser {
+class ParserBase {
   // Set this flag to true if you don't want the Parser to throw error when problems in it's definition are detected.
   // (normally during the parser's constructor).
   // This is a design time flag, it will not affect the runtime error handling of the parser, just design time errors,
@@ -512,7 +593,7 @@ export class Parser {
   /**
    *  @deprecated use the **instance** method with the same name instead
    */
-  static performSelfAnalysis(parserInstance: Parser): void {
+  static performSelfAnalysis(parserInstance: ParserBase): void {
     throw Error(
       "The **static** `performSelfAnalysis` method has been deprecated." +
         "\t\nUse the **instance** method with the same name instead.",
@@ -601,44 +682,45 @@ export class Parser {
           });
         }
 
-        // Pre-populate OR fast-dispatch maps from GAST first-token sets.
-        // This gives committed dispatch (no try/catch) from the very
-        // first parse — equivalent to upstream's preComputeLookaheadFunctions.
-        // Skip when a custom lookahead strategy is used (e.g., scannerless
-        // mode) — the custom strategy may produce different results than
-        // our standard first-token analysis.
+        this.TRACE_INIT("preComputeProdLookaheadCaches", () => {
+          this.preComputeLookaheadCaches(false);
+        });
+
         if (this.lookaheadStrategy instanceof LLkLookaheadStrategy) {
+          // Pre-populate OR fast-dispatch maps from GAST first-token sets.
+          // This gives committed dispatch (no try/catch) from the very
+          // first parse — equivalent to upstream's preComputeLookaheadFunctions.
           this.TRACE_INIT("prePopulateOrFastMaps", () => {
             this.prePopulateOrFastMaps();
+          });
+        } else {
+          this.TRACE_INIT("preComputeAlternationLookaheadCaches", () => {
+            this.preComputeLookaheadCaches(true);
           });
         }
       }
 
       if (
-        !Parser.DEFER_DEFINITION_ERRORS_HANDLING &&
+        !(this.constructor as typeof ParserBase)
+          .DEFER_DEFINITION_ERRORS_HANDLING &&
         this.definitionErrors.length !== 0
       ) {
-        // Ambiguity errors are non-fatal — the speculative engine handles
-        // them at runtime by trying alternatives in declaration order.
-        // Ambiguity errors are non-fatal — our speculative engine resolves
-        // them at runtime by trying alternatives in declaration order.
-        // Other errors (empty non-last alts, infinite loops) are real bugs.
-        const fatalErrors = this.definitionErrors.filter(
-          (e) =>
-            e.type !== ParserDefinitionErrorType.AMBIGUOUS_ALTS &&
-            e.type !== ParserDefinitionErrorType.AMBIGUOUS_PREFIX_ALTS,
+        defErrorsMsgs = this.definitionErrors.map(
+          (defError) => defError.message,
         );
-        if (fatalErrors.length !== 0) {
-          defErrorsMsgs = fatalErrors.map((defError) => defError.message);
-          throw new Error(
-            `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
-              "\n-------------------------------\n",
-            )}`,
-          );
-        }
+        throw new Error(
+          `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
+            "\n-------------------------------\n",
+          )}`,
+        );
       }
+      this.captureLookaheadCacheBaseline();
     });
   }
+
+  protected captureLookaheadCacheBaseline(): void {}
+
+  protected markRuntimeLookaheadCachesDirty(): void {}
 
   /**
    * Pre-populate `_orFastMaps` and `_orCommittable` from GAST first-token
@@ -796,7 +878,7 @@ export class Parser {
               counterDelta !== undefined
             ) {
               this._orLookahead[mapKey] = function orDispatchLL1(
-                this: Parser,
+                this: ParserBase,
                 alts: IOrAlt<any>[],
               ): any {
                 const altIdx =
@@ -815,7 +897,7 @@ export class Parser {
               // OR() calls alts[altIdx].ALT.call(this) directly, making this
               // closure small enough for V8 to inline at the call site.
               this._orLookaheadLL1[mapKey] = function orDispatchLL1Simple(
-                this: Parser,
+                this: ParserBase,
               ): number | undefined {
                 return choiceToAlt[
                   this.tokVector[this.currIdx + 1].tokenTypeIdx!
@@ -837,7 +919,7 @@ export class Parser {
               counterDelta !== undefined
             ) {
               this._orLookahead[mapKey] = function orDispatch(
-                this: Parser,
+                this: ParserBase,
                 alts: IOrAlt<any>[],
               ): any {
                 const altIdx = laFunc.call(this, alts);
@@ -852,7 +934,7 @@ export class Parser {
               };
             } else {
               this._orLookahead[mapKey] = function orDispatchSimple(
-                this: Parser,
+                this: ParserBase,
                 alts: IOrAlt<any>[],
               ): any {
                 const altIdx = laFunc.call(this, alts);
@@ -920,6 +1002,108 @@ export class Parser {
           tmatcher,
           this.dynamicTokensEnabled,
         );
+      }
+    }
+  }
+
+  preComputeLookaheadCaches(includeAlternations: boolean): void {
+    const rules = Object.values(this.gastProductionsCache);
+    for (const rule of rules) {
+      const ruleShortName = this.fullRuleNameToShort[rule.name];
+      if (ruleShortName === undefined) continue;
+
+      const alternations: InstanceType<typeof Alternation>[] = [];
+      type RepInfo = {
+        prod: IProduction & { idx: number };
+        keyIdx: number;
+        prodType:
+          | "Option"
+          | "RepetitionMandatory"
+          | "RepetitionMandatoryWithSeparator"
+          | "Repetition"
+          | "RepetitionWithSeparator";
+      };
+      const repetitions: RepInfo[] = [];
+      const findProductions = (prods: IProduction[]) => {
+        for (const prod of prods) {
+          if (prod instanceof NonTerminal) continue;
+          if (prod instanceof Alternation) {
+            alternations.push(prod);
+          } else if (prod instanceof Repetition) {
+            repetitions.push({
+              prod,
+              keyIdx: MANY_IDX,
+              prodType: "Repetition",
+            });
+          } else if (prod instanceof RepetitionMandatory) {
+            repetitions.push({
+              prod,
+              keyIdx: AT_LEAST_ONE_IDX,
+              prodType: "RepetitionMandatory",
+            });
+          } else if (prod instanceof RepetitionWithSeparator) {
+            repetitions.push({
+              prod,
+              keyIdx: MANY_SEP_IDX,
+              prodType: "RepetitionWithSeparator",
+            });
+          } else if (prod instanceof RepetitionMandatoryWithSeparator) {
+            repetitions.push({
+              prod,
+              keyIdx: AT_LEAST_ONE_SEP_IDX,
+              prodType: "RepetitionMandatoryWithSeparator",
+            });
+          } else if (prod instanceof Option) {
+            repetitions.push({
+              prod,
+              keyIdx: OPTION_IDX,
+              prodType: "Option",
+            });
+          }
+          if ("definition" in prod && isArray(prod.definition)) {
+            findProductions(prod.definition);
+          }
+        }
+      };
+      findProductions(rule.definition);
+
+      if (includeAlternations) {
+        for (const node of alternations) {
+          const mapKey = ruleShortName | node.idx;
+          const laFunc = this.lookaheadStrategy.buildLookaheadForAlternation({
+            prodOccurrence: node.idx,
+            rule,
+            maxLookahead: (node as any).maxLookahead ?? this.maxLookahead,
+            hasPredicates: node.hasPredicates,
+            dynamicTokensEnabled: this.dynamicTokensEnabled,
+          });
+          this._orLookahead[mapKey] = function orDispatchStrategy(
+            this: ParserBase,
+            orAlts: IOrAlt<any>[],
+          ): any {
+            const altIdx = laFunc.call(this, orAlts);
+            if (altIdx !== undefined) {
+              return orAlts[altIdx].ALT.call(this);
+            }
+            return OR_NO_MATCH;
+          };
+        }
+      }
+
+      for (const { prod, keyIdx, prodType } of repetitions) {
+        const laKey = getKeyForAutomaticLookahead(
+          ruleShortName,
+          keyIdx,
+          prod.idx,
+        );
+        this._prodLookahead[laKey] =
+          this.lookaheadStrategy.buildLookaheadForOptional({
+            prodOccurrence: prod.idx,
+            rule,
+            maxLookahead: (prod as any).maxLookahead ?? this.maxLookahead,
+            dynamicTokensEnabled: this.dynamicTokensEnabled,
+            prodType,
+          }) as () => boolean;
       }
     }
   }
@@ -1003,7 +1187,7 @@ export class Parser {
           counterDelta !== undefined
         ) {
           this._orLookahead[mapKey] = function orDispatchLL1(
-            this: Parser,
+            this: ParserBase,
             orAlts: IOrAlt<any>[],
           ): any {
             const altIdx =
@@ -1017,12 +1201,14 @@ export class Parser {
             }
             return OR_NO_MATCH;
           };
+          this.markRuntimeLookaheadCachesDirty();
         } else {
           this._orLookaheadLL1[mapKey] = function orDispatchLL1Simple(
-            this: Parser,
+            this: ParserBase,
           ): number | undefined {
             return choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
           };
+          this.markRuntimeLookaheadCachesDirty();
         }
       } else {
         const tmatcher = this.tokenMatcher;
@@ -1038,7 +1224,7 @@ export class Parser {
           counterDelta !== undefined
         ) {
           this._orLookahead[mapKey] = function orDispatch(
-            this: Parser,
+            this: ParserBase,
             orAlts: IOrAlt<any>[],
           ): any {
             const altIdx = laFunc.call(this, orAlts);
@@ -1051,9 +1237,10 @@ export class Parser {
             }
             return OR_NO_MATCH;
           };
+          this.markRuntimeLookaheadCachesDirty();
         } else {
           this._orLookahead[mapKey] = function orDispatchSimple(
-            this: Parser,
+            this: ParserBase,
             orAlts: IOrAlt<any>[],
           ): any {
             const altIdx = laFunc.call(this, orAlts);
@@ -1062,6 +1249,7 @@ export class Parser {
             }
             return OR_NO_MATCH;
           };
+          this.markRuntimeLookaheadCachesDirty();
         }
       }
     } catch (_e) {
@@ -1073,7 +1261,7 @@ export class Parser {
    * Lazily build a MANY/OPTION/AT_LEAST_ONE lookahead closure after the
    * first speculative pass succeeds. Same pattern as lazyBuildOrClosure.
    */
-  private lazyBuildProdClosure(
+  protected lazyBuildProdClosure(
     laKey: number,
     occurrence: number,
     _keyIdx: number,
@@ -1113,6 +1301,7 @@ export class Parser {
         tmatcher,
         this.dynamicTokensEnabled,
       );
+      this.markRuntimeLookaheadCachesDirty();
     } catch (_e) {
       // GAST walk failed — stay on speculative path.
     }
@@ -1171,22 +1360,18 @@ export class Parser {
       );
     }
     if (
-      !Parser.DEFER_DEFINITION_ERRORS_HANDLING &&
+      !(this.constructor as typeof ParserBase)
+        .DEFER_DEFINITION_ERRORS_HANDLING &&
       this.definitionErrors.length !== 0
     ) {
-      const fatalErrors = this.definitionErrors.filter(
-        (e) =>
-          e.type !== ParserDefinitionErrorType.AMBIGUOUS_ALTS &&
-          e.type !== ParserDefinitionErrorType.AMBIGUOUS_PREFIX_ALTS,
+      const defErrorsMsgs = this.definitionErrors.map(
+        (defError) => defError.message,
       );
-      if (fatalErrors.length !== 0) {
-        const defErrorsMsgs = fatalErrors.map((defError) => defError.message);
-        throw new Error(
-          `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
-            "\n-------------------------------\n",
-          )}`,
-        );
-      }
+      throw new Error(
+        `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
+          "\n-------------------------------\n",
+        )}`,
+      );
     }
     if (this.definitionErrors.length === 0 && this.recoveryEnabled) {
       const allFollows = computeAllProdsFollows(
@@ -1329,7 +1514,7 @@ export class Parser {
    * tiny (returns altIdx only, no ALT call) and V8 can inline it. OR() calls
    * alts[altIdx].ALT.call(this) directly after getting the index.
    */
-  _orLookaheadLL1!: ((this: Parser) => number | undefined)[];
+  _orLookaheadLL1!: ((this: ParserBase) => number | undefined)[];
   /**
    * Precomputed first-token sets for MANY/OPTION/AT_LEAST_ONE bodies.
    * Keyed by `getKeyForAutomaticLookahead(ruleShortName, prodTypeIdx, occurrence)`.
@@ -1344,7 +1529,6 @@ export class Parser {
    * Returns true if the body should be entered, false to skip.
    */
   _prodLookahead!: Record<number, () => boolean>;
-
   initRecognizerEngine(
     tokenVocabulary: TokenVocabulary,
     config: IParserConfig,
@@ -1372,7 +1556,6 @@ export class Parser {
     this._orLookahead = [];
     this._orLookaheadLL1 = [];
     this._prodLookahead = [];
-
     this.definedRulesNames = [];
     this.tokensMap = {};
     this.RULE_STACK = [];
@@ -1631,113 +1814,34 @@ export class Parser {
     return this.optionInternalLogic(actionORMethodDef, occurrence);
   }
 
-  /**
-   * Optionally executes the OPTION body, returning its result or undefined.
-   *
-   * Does NOT set IS_SPECULATING — the outer speculating state (if any, set by
-   * OR) propagates naturally so CONSUME throws the cheapest failure path.
-   *
-   * If a GATE is present: gate-false → skip; gate-true → commit directly
-   * (gate is a reliable lookahead, no speculation needed).
-   *
-   * Without a GATE: save state + CST watermark, run body, restore on failure.
-   * Two additional abort conditions:
-   *   1. Body did not advance the token position (stuck / epsilon body).
-   *   2. Recovery mode added errors — the optional content wasn't really there.
-   */
   optionInternalLogic<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
     occurrence?: number,
   ): OUT | undefined {
+    const lookAheadFunc =
+      occurrence !== undefined
+        ? this.getStrictProdLookahead(occurrence, OPTION_IDX, "Option")
+        : undefined;
     let action: GrammarAction<OUT>;
-    let gate: (() => boolean) | undefined;
     if (typeof actionORMethodDef !== "function") {
       action = actionORMethodDef.DEF;
-      gate = actionORMethodDef.GATE;
+      const predicate = actionORMethodDef.GATE;
+      if (predicate !== undefined && lookAheadFunc !== undefined) {
+        const orgLookaheadFunction = lookAheadFunc;
+        return (() => {
+          if (!predicate.call(this)) return undefined;
+          if (orgLookaheadFunction.call(this) !== true) return undefined;
+          return action.call(this);
+        })();
+      }
     } else {
       action = actionORMethodDef;
-      gate = undefined;
     }
 
-    const errors = this._errors;
-
-    // Track prefix: if ANY OPTION fires before the first CONSUME in an OR alt,
-    // the alt's first-token is not sufficient for committed dispatch (the
-    // OPTION path could change the outcome for the same first token).
-    if (this.IS_SPECULATING) {
-      if (this.exportLexerState() === this._orAltStartLexPos) {
-        this._orAltHasAnyPrefix = true;
-        // Track gated prefix separately for fast-map cache policy.
-        if (gate !== undefined) {
-          this._orAltHasGatedPrefix = true;
-        }
-      }
+    if (lookAheadFunc?.call(this) === true) {
+      return action.call(this);
     }
-    if (gate !== undefined && !gate.call(this)) {
-      return undefined;
-    }
-
-    // Committed OPTION: precomputed LL(k) lookahead closure available.
-    if (occurrence !== undefined && !this.IS_SPECULATING) {
-      const optLaKey = this.currRuleShortName | OPTION_IDX | occurrence;
-      const laFunc = this._prodLookahead[optLaKey];
-      if (laFunc !== undefined) {
-        if (!laFunc.call(this)) {
-          return undefined;
-        }
-        // Committed OPTION body. If it fails (e.g., body needs more
-        // tokens than lookahead checked), treat as "skip OPTION".
-        const optPos = this.currIdx;
-        const optErrors = errors.length;
-        const optCst = this.saveCheckpoint();
-        try {
-          return action.call(this);
-        } catch (e) {
-          if (e === SPEC_FAIL || isRecognitionException(e)) {
-            this.restoreCheckpoint(optCst);
-            this.currIdx = optPos;
-            errors.length = optErrors;
-            return undefined;
-          }
-          throw e;
-        }
-      }
-    }
-
-    // Speculative OPTION: save state, try body, restore on failure.
-    const startPos = this.currIdx;
-    const startErrors = errors.length;
-    const cstSave = this.saveCheckpoint();
-    try {
-      const result = action.call(this);
-      if (this.currIdx === startPos || errors.length > startErrors) {
-        this.restoreCheckpoint(cstSave);
-        this.currIdx = startPos;
-        errors.length = startErrors;
-        return undefined;
-      }
-      // Lazy closure building for OPTION.
-      if (occurrence !== undefined) {
-        const optLaKey = this.currRuleShortName | OPTION_IDX | occurrence;
-        if (this._prodLookahead[optLaKey] === undefined) {
-          this.lazyBuildProdClosure(
-            optLaKey,
-            occurrence,
-            OPTION_IDX,
-            PROD_TYPE.OPTION,
-          );
-        }
-      }
-      return result;
-    } catch (e) {
-      if (e === SPEC_FAIL || isRecognitionException(e)) {
-        this.restoreCheckpoint(cstSave);
-        this.currIdx = startPos;
-        errors.length = startErrors;
-        return undefined;
-      }
-      throw e;
-    }
+    return undefined;
   }
 
   atLeastOneInternal<OUT>(
@@ -1747,128 +1851,72 @@ export class Parser {
     return this.atLeastOneInternalLogic(prodOccurrence, actionORMethodDef);
   }
 
-  /**
-   * One-or-more loop. The first iteration is mandatory: a speculative probe
-   * checks whether the action can start at all, and if so the body runs
-   * committed so that nested invokeRuleCatch performs normal error recovery.
-   * Subsequent iterations use the same probe + commit pattern — the lookahead
-   * guard prevents spurious in-repetition-recovery errors that would arise from
-   * speculatively running the full body and exiting via SPEC_FAIL.
-   */
   atLeastOneInternalLogic<OUT>(
     prodOccurrence: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    let action: GrammarAction<OUT>;
-    let gate: (() => boolean) | undefined;
-    let errMsg: string | undefined;
+    const lookAheadFunc = this.getStrictProdLookahead(
+      prodOccurrence,
+      AT_LEAST_ONE_IDX,
+      "RepetitionMandatory",
+    );
+    let action;
     if (typeof actionORMethodDef !== "function") {
       action = actionORMethodDef.DEF;
-      gate = actionORMethodDef.GATE;
-      errMsg = actionORMethodDef.ERR_MSG;
+      const predicate = actionORMethodDef.GATE;
+      if (predicate !== undefined && lookAheadFunc !== undefined) {
+        const orgLookaheadFunction = lookAheadFunc;
+        if (
+          (() => predicate.call(this) && orgLookaheadFunction.call(this))() ===
+          true
+        ) {
+          let notStuck = this.doSingleRepetition(action);
+          while (
+            (() =>
+              predicate.call(this) && orgLookaheadFunction.call(this))() ===
+              true &&
+            notStuck
+          ) {
+            notStuck = this.doSingleRepetition(action);
+          }
+          this.attemptInRepetitionRecovery(
+            this.atLeastOneInternal,
+            [prodOccurrence, actionORMethodDef],
+            (() =>
+              predicate.call(this) && orgLookaheadFunction.call(this)) as any,
+            AT_LEAST_ONE_IDX,
+            prodOccurrence,
+            NextTerminalAfterAtLeastOneWalker,
+          );
+          return;
+        }
+        throw this.raiseEarlyExitException(
+          prodOccurrence,
+          PROD_TYPE.REPETITION_MANDATORY,
+          actionORMethodDef.ERR_MSG,
+        );
+      }
     } else {
       action = actionORMethodDef;
-      gate = undefined;
-      errMsg = undefined;
     }
 
-    const errors = this._errors;
-
-    // Track prefix for OR fast-path cache.
-    if (this.IS_SPECULATING) {
-      if (this.exportLexerState() === this._orAltStartLexPos) {
-        this._orAltHasAnyPrefix = true;
-        if (gate !== undefined) {
-          this._orAltHasGatedPrefix = true;
-        }
+    if (lookAheadFunc?.call(this) === true) {
+      let notStuck = this.doSingleRepetition(action);
+      while (lookAheadFunc.call(this) === true && notStuck) {
+        notStuck = this.doSingleRepetition(action);
       }
-    }
-    if (gate !== undefined && !gate.call(this)) {
+    } else {
       throw this.raiseEarlyExitException(
         prodOccurrence,
         PROD_TYPE.REPETITION_MANDATORY,
-        errMsg,
+        (actionORMethodDef as DSLMethodOptsWithErr<OUT>).ERR_MSG,
       );
     }
 
-    // Save _dslCounter so each iteration starts from the same value.
-    const savedRepDslCounter = this._dslCounter;
-
-    // Speculative lookahead: check whether the action can start before running
-    // it committed. This prevents invokeRuleCatch inside the action from silently
-    // recovering (advancing to the follow token) and making AT_LEAST_ONE think
-    // the first iteration succeeded when no matching tokens were consumed.
-    const lookaheadFunc = this.makeSpecLookahead(action);
-    if (!lookaheadFunc()) {
-      throw this.raiseEarlyExitException(
-        prodOccurrence,
-        PROD_TYPE.REPETITION_MANDATORY,
-        errMsg,
-      );
-    }
-
-    // First iteration: mandatory — run committed.
-    {
-      this._dslCounter = savedRepDslCounter;
-      const firstLexPos = this.exportLexerState();
-      const firstErrors = errors.length;
-      const firstCstSave = this.saveCheckpoint();
-      try {
-        action.call(this);
-      } catch (e) {
-        if (e === SPEC_FAIL || isRecognitionException(e)) {
-          this.restoreCheckpoint(firstCstSave);
-          this.importLexerState(firstLexPos);
-          errors.length = firstErrors;
-          throw this.raiseEarlyExitException(
-            prodOccurrence,
-            PROD_TYPE.REPETITION_MANDATORY,
-            errMsg,
-          );
-        }
-        throw e;
-      }
-    }
-
-    // Subsequent iterations: probe with a quick speculative lookahead (exits
-    // after the first successful CONSUME), then execute the body committed so
-    // that nested invokeRuleCatch can perform normal error recovery. This
-    // matches the original LL(k) engine's behaviour where each iteration was
-    // fully committed once the lookahead said "yes".
-    while (lookaheadFunc()) {
-      if (gate !== undefined && !gate.call(this)) break;
-      this._dslCounter = savedRepDslCounter;
-      const iterLexPos = this.exportLexerState();
-      const iterErrors = errors.length;
-      const cstSave = this.saveCheckpoint();
-      try {
-        // Run committed — any recovery happens inside the subrule's invokeRuleCatch.
-        action.call(this);
-      } catch (e) {
-        // The committed body failed (e.g. a CONSUME mismatch with no wrapping
-        // SUBRULE to do resync recovery). Restore state and exit the loop so
-        // the tokens can be consumed by whatever follows AT_LEAST_ONE.
-        if (e === SPEC_FAIL || isRecognitionException(e)) {
-          this.restoreCheckpoint(cstSave);
-          this.importLexerState(iterLexPos);
-          errors.length = iterErrors;
-          break;
-        }
-        throw e;
-      }
-      // Stuck guard: body consumed no tokens → restore and stop.
-      if (this.exportLexerState() <= iterLexPos) {
-        this.restoreCheckpoint(cstSave);
-        this.importLexerState(iterLexPos);
-        errors.length = iterErrors;
-        break;
-      }
-    }
-    // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
     this.attemptInRepetitionRecovery(
       this.atLeastOneInternal,
       [prodOccurrence, actionORMethodDef],
-      lookaheadFunc,
+      lookAheadFunc as any,
       AT_LEAST_ONE_IDX,
       prodOccurrence,
       NextTerminalAfterAtLeastOneWalker,
@@ -1882,77 +1930,51 @@ export class Parser {
     this.atLeastOneSepFirstInternalLogic(prodOccurrence, options);
   }
 
-  /**
-   * One-or-more separated list. The first iteration is mandatory (no
-   * IS_SPECULATING set); subsequent iterations are separator-driven
-   * (tokenMatcher check — reliable lookahead, no speculation needed).
-   *
-   * We do NOT set IS_SPECULATING for the first iteration for the same reason as
-   * atLeastOneInternalLogic: nested OR last alts inside the body must retain their
-   * "committed" semantics. The separator provides a deterministic guard for all
-   * subsequent iterations, so those also need no speculation.
-   */
   atLeastOneSepFirstInternalLogic<OUT>(
     prodOccurrence: number,
     options: AtLeastOneSepMethodOpts<OUT>,
   ): void {
     const action = options.DEF;
     const separator = options.SEP;
-    const errors = this._errors;
-    const tokenMatcher = this.tokenMatcher;
-
-    // Save _dslCounter so each iteration starts from the same value.
-    const savedRepDslCounter = this._dslCounter;
-
-    // First iteration: mandatory — no IS_SPECULATING, let it throw/recover normally.
-    {
-      this._dslCounter = savedRepDslCounter;
-      const firstLexPos = this.exportLexerState();
-      const firstErrors = errors.length;
-      const firstCstSave = this.saveCheckpoint();
-      try {
-        action.call(this);
-      } catch (e) {
-        if (e === SPEC_FAIL || isRecognitionException(e)) {
-          this.restoreCheckpoint(firstCstSave);
-          this.importLexerState(firstLexPos);
-          errors.length = firstErrors;
-          throw this.raiseEarlyExitException(
-            prodOccurrence,
-            PROD_TYPE.REPETITION_MANDATORY_WITH_SEPARATOR,
-            options.ERR_MSG,
-          );
-        }
-        throw e;
-      }
-    }
-
-    // Subsequent iterations: separator-driven, no speculation needed.
-    // Save _dslCounter before each iteration so occurrence numbering inside
-    // the repeated body stays identical across iterations.
-    const separatorLookAheadFunc = () =>
-      tokenMatcher(this.LA_FAST(1), separator);
-    while (tokenMatcher(this.LA_FAST(1), separator) === true) {
-      this.CONSUME(separator);
-      this._dslCounter = savedRepDslCounter;
-      action.call(this);
-    }
-
-    // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
-    this.attemptInRepetitionRecovery(
-      this.repetitionSepSecondInternal,
-      [
-        prodOccurrence,
-        separator,
-        separatorLookAheadFunc,
-        action,
-        NextTerminalAfterAtLeastOneSepWalker,
-      ],
-      separatorLookAheadFunc,
-      AT_LEAST_ONE_SEP_IDX,
+    const firstIterationLookaheadFunc = this.getStrictProdLookahead(
       prodOccurrence,
-      NextTerminalAfterAtLeastOneSepWalker,
+      AT_LEAST_ONE_SEP_IDX,
+      "RepetitionMandatoryWithSeparator",
     );
+
+    if (firstIterationLookaheadFunc?.call(this) === true) {
+      (action as GrammarAction<OUT>).call(this);
+
+      const separatorLookAheadFunc = () => {
+        return this.tokenMatcher(this.LA_FAST(1), separator);
+      };
+
+      while (this.tokenMatcher(this.LA_FAST(1), separator) === true) {
+        this.CONSUME(separator);
+        (action as GrammarAction<OUT>).call(this);
+      }
+
+      this.attemptInRepetitionRecovery(
+        this.repetitionSepSecondInternal,
+        [
+          prodOccurrence,
+          separator,
+          separatorLookAheadFunc,
+          action,
+          NextTerminalAfterAtLeastOneSepWalker,
+        ],
+        separatorLookAheadFunc,
+        AT_LEAST_ONE_SEP_IDX,
+        prodOccurrence,
+        NextTerminalAfterAtLeastOneSepWalker,
+      );
+    } else {
+      throw this.raiseEarlyExitException(
+        prodOccurrence,
+        PROD_TYPE.REPETITION_MANDATORY_WITH_SEPARATOR,
+        options.ERR_MSG,
+      );
+    }
   }
 
   manyInternal<OUT>(
@@ -1962,156 +1984,56 @@ export class Parser {
     return this.manyInternalLogic(prodOccurrence, actionORMethodDef);
   }
 
-  /**
-   * Core MANY loop: runs the body speculatively until it fails.
-   * Modelled after @jesscss/parser's MANY with additional error handling.
-   *
-   * Each iteration: save state → `IS_SPECULATING=true` → try body →
-   * on `SPEC_FAIL` → restore and break. On success → check stuck guard.
-   *
-   * ## Recognition exception handling (for error recovery)
-   *
-   * OR's committed re-run (see `orInternal`) temporarily clears
-   * `IS_SPECULATING`, so `CONSUME` failures throw real
-   * `MismatchedTokenException` instead of `SPEC_FAIL`. These propagate
-   * as recognition exceptions rather than `SPEC_FAIL`:
-   *
-   * - **With progress** (lexer advanced past iteration start): the body
-   *   partially matched → real error → re-throw for recovery in
-   *   `invokeRuleCatch` or error reporting upstream.
-   * - **No progress**: body couldn't start → stop iterating. Errors from
-   *   the recognition exception (e.g., `NoViableAltException` from
-   *   ambiguous OR) are preserved in `_errors` for diagnostics.
-   */
   manyInternalLogic<OUT>(
     prodOccurrence: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
-    let action: GrammarAction<OUT>;
-    let gate: (() => boolean) | undefined;
+    const lookaheadFunction = this.getStrictProdLookahead(
+      prodOccurrence,
+      MANY_IDX,
+      "Repetition",
+    );
+    let action;
     if (typeof actionORMethodDef !== "function") {
       action = actionORMethodDef.DEF;
-      gate = actionORMethodDef.GATE;
+      const predicate = actionORMethodDef.GATE;
+      if (predicate !== undefined && lookaheadFunction !== undefined) {
+        const orgLookaheadFunction = lookaheadFunction;
+        let notStuck = true;
+        const wrappedLookahead = () =>
+          predicate.call(this) && orgLookaheadFunction.call(this);
+        while (wrappedLookahead() === true && notStuck === true) {
+          notStuck = this.doSingleRepetition(action);
+        }
+        this.attemptInRepetitionRecovery(
+          this.manyInternal,
+          [prodOccurrence, actionORMethodDef],
+          wrappedLookahead as any,
+          MANY_IDX,
+          prodOccurrence,
+          NextTerminalAfterManyWalker,
+          notStuck,
+        );
+        return;
+      }
     } else {
       action = actionORMethodDef;
-      gate = undefined;
     }
-
-    const errors = this._errors;
-    const wasSpeculating = this.IS_SPECULATING;
-    const savedRepDslCounter = this._dslCounter;
-    const laKey = getKeyForAutomaticLookahead(
-      this.currRuleShortName,
-      MANY_IDX,
-      prodOccurrence,
-    );
-    const laSet = this._prodLookahead[laKey];
 
     let notStuck = true;
-    let ranAtLeastOnce = false;
-    let lookaheadFunc: (() => boolean) | undefined;
-
-    // Fast committed path: precomputed first-token set says whether the MANY
-    // body may start. No speculation, no try/catch, minimal property access.
-    if (!wasSpeculating && laSet !== undefined) {
-      while (notStuck) {
-        if (gate !== undefined && !gate.call(this)) break;
-        if (!laSet.call(this)) break;
-
-        this._dslCounter = savedRepDslCounter;
-        const iterPos = this.currIdx;
-
-        action.call(this);
-
-        if (this.currIdx <= iterPos) {
-          notStuck = false;
-          break;
-        }
-
-        ranAtLeastOnce = true;
-      }
-    }
-    if (wasSpeculating || laSet === undefined) {
-      // Slow speculative path: try the body under IS_SPECULATING=true,
-      // rollback on SPEC_FAIL or on recognition exceptions with no progress.
-      while (notStuck) {
-        if (this.IS_SPECULATING && !ranAtLeastOnce) {
-          if (this.currIdx === this._orAltStartLexPos) {
-            this._orAltHasAnyPrefix = true;
-            if (gate !== undefined) {
-              this._orAltHasGatedPrefix = true;
-            }
-          }
-        }
-
-        if (gate !== undefined && !gate.call(this)) break;
-
-        this._dslCounter = savedRepDslCounter;
-        const iterPos = this.currIdx;
-        const iterErrors = errors.length;
-        const cstSave = this.saveCheckpoint();
-
-        this.IS_SPECULATING = true;
-        try {
-          action.call(this);
-          this.IS_SPECULATING = wasSpeculating;
-        } catch (e) {
-          this.IS_SPECULATING = wasSpeculating;
-
-          if (e === SPEC_FAIL) {
-            this.currIdx = iterPos;
-            this.restoreCheckpoint(cstSave);
-            errors.length = iterErrors;
-            break;
-          }
-
-          if (isRecognitionException(e)) {
-            if (this.currIdx > iterPos) {
-              throw e;
-            }
-            this.currIdx = iterPos;
-            this.restoreCheckpoint(cstSave);
-            errors.length = iterErrors;
-            break;
-          }
-
-          throw e;
-        }
-
-        if (this.currIdx <= iterPos) {
-          this.currIdx = iterPos;
-          notStuck = false;
-          break;
-        }
-
-        ranAtLeastOnce = true;
-      }
+    while (lookaheadFunction?.call(this) === true && notStuck === true) {
+      notStuck = this.doSingleRepetition(action);
     }
 
-    // Lazy closure building: after the first speculative MANY succeeds,
-    // build the LL(k) lookahead closure for future committed dispatch.
-    if (ranAtLeastOnce && laSet === undefined) {
-      this.lazyBuildProdClosure(
-        laKey,
-        prodOccurrence,
-        MANY_IDX,
-        PROD_TYPE.REPETITION,
-      );
-    }
-
-    // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
-    if (ranAtLeastOnce) {
-      lookaheadFunc ??= this.makeSpecLookahead(action);
-      this.attemptInRepetitionRecovery(
-        this.manyInternal,
-        [prodOccurrence, actionORMethodDef],
-        lookaheadFunc,
-        MANY_IDX,
-        prodOccurrence,
-        NextTerminalAfterManyWalker,
-        notStuck,
-      );
-    }
+    this.attemptInRepetitionRecovery(
+      this.manyInternal,
+      [prodOccurrence, actionORMethodDef],
+      lookaheadFunction as any,
+      MANY_IDX,
+      prodOccurrence,
+      NextTerminalAfterManyWalker,
+      notStuck,
+    );
   }
 
   manySepFirstInternal<OUT>(
@@ -2121,74 +2043,44 @@ export class Parser {
     this.manySepFirstInternalLogic(prodOccurrence, options);
   }
 
-  /**
-   * Zero-or-more separated list. The first iteration is optional but tried
-   * directly (no IS_SPECULATING set); subsequent iterations are
-   * separator-driven (reliable tokenMatcher guard).
-   *
-   * The first element uses the same try/catch + stuck guard as OPTION — no
-   * IS_SPECULATING, so nested OR last alts retain committed semantics inside
-   * the body. The separator makes subsequent iterations deterministic.
-   */
   manySepFirstInternalLogic<OUT>(
     prodOccurrence: number,
     options: ManySepMethodOpts<OUT>,
   ): void {
     const action = options.DEF;
     const separator = options.SEP;
-    const errors = this._errors;
-    const tokenMatcher = this.tokenMatcher;
-
-    // Save _dslCounter so each iteration starts from the same value.
-    const savedRepDslCounter = this._dslCounter;
-
-    // Optional first iteration — try without IS_SPECULATING.
-    const firstLexPos = this.exportLexerState();
-    const firstErrors = errors.length;
-    const firstCstSave = this.saveCheckpoint();
-    try {
-      action.call(this);
-    } catch (e) {
-      if (e === SPEC_FAIL || isRecognitionException(e)) {
-        this.restoreCheckpoint(firstCstSave);
-        this.importLexerState(firstLexPos);
-        errors.length = firstErrors;
-        return;
-      }
-      throw e;
-    }
-    // Stuck guard: body consumed nothing → treat as "not present".
-    if (this.exportLexerState() <= firstLexPos) {
-      this.restoreCheckpoint(firstCstSave);
-      this.importLexerState(firstLexPos);
-      errors.length = firstErrors;
-      return;
-    }
-
-    // Subsequent iterations: separator-driven, no speculation needed.
-    const separatorLookAheadFunc = () =>
-      tokenMatcher(this.LA_FAST(1), separator);
-    while (tokenMatcher(this.LA_FAST(1), separator) === true) {
-      this.CONSUME(separator);
-      this._dslCounter = savedRepDslCounter;
-      action.call(this);
-    }
-
-    // Performance optimization: "attemptInRepetitionRecovery" will be defined as NOOP unless recovery is enabled
-    this.attemptInRepetitionRecovery(
-      this.repetitionSepSecondInternal,
-      [
-        prodOccurrence,
-        separator,
-        separatorLookAheadFunc,
-        action,
-        NextTerminalAfterManySepWalker,
-      ],
-      separatorLookAheadFunc,
-      MANY_SEP_IDX,
+    const firstIterationLaFunc = this.getStrictProdLookahead(
       prodOccurrence,
-      NextTerminalAfterManySepWalker,
+      MANY_SEP_IDX,
+      "RepetitionWithSeparator",
     );
+
+    if (firstIterationLaFunc?.call(this) === true) {
+      action.call(this);
+
+      const separatorLookAheadFunc = () => {
+        return this.tokenMatcher(this.LA_FAST(1), separator);
+      };
+      while (this.tokenMatcher(this.LA_FAST(1), separator) === true) {
+        this.CONSUME(separator);
+        action.call(this);
+      }
+
+      this.attemptInRepetitionRecovery(
+        this.repetitionSepSecondInternal,
+        [
+          prodOccurrence,
+          separator,
+          separatorLookAheadFunc,
+          action,
+          NextTerminalAfterManySepWalker,
+        ],
+        separatorLookAheadFunc,
+        MANY_SEP_IDX,
+        prodOccurrence,
+        NextTerminalAfterManySepWalker,
+      );
+    }
   }
 
   /**
@@ -2271,6 +2163,55 @@ export class Parser {
     return afterIteration > beforeIteration;
   }
 
+  protected strictOrInternal<T>(
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+    occurrence: number,
+  ): T {
+    const mapKey = this.currRuleShortName | occurrence;
+    const alts = isArray(altsOrOpts)
+      ? (altsOrOpts as IOrAlt<any>[])
+      : (altsOrOpts as OrMethodOpts<unknown>).DEF;
+    const ll1Dispatch = this._orLookaheadLL1[mapKey];
+
+    if (ll1Dispatch !== undefined) {
+      const altIdx = ll1Dispatch.call(this);
+      if (altIdx !== undefined) {
+        return alts[altIdx].ALT.call(this) as T;
+      }
+    } else {
+      const orDispatch = this._orLookahead[mapKey];
+      if (orDispatch !== undefined) {
+        const result = orDispatch.call(this, alts);
+        if (result !== OR_NO_MATCH) {
+          return result as T;
+        }
+      }
+    }
+
+    const em = isArray(altsOrOpts)
+      ? undefined
+      : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
+    this.raiseNoAltException(occurrence, em);
+  }
+
+  protected getStrictProdLookahead(
+    prodOccurrence: number,
+    keyIdx: number,
+    prodType:
+      | "Option"
+      | "RepetitionMandatory"
+      | "RepetitionMandatoryWithSeparator"
+      | "Repetition"
+      | "RepetitionWithSeparator",
+  ): (() => boolean) | undefined {
+    const laKey = getKeyForAutomaticLookahead(
+      this.currRuleShortName,
+      keyIdx,
+      prodOccurrence,
+    );
+    return this._prodLookahead[laKey];
+  }
+
   /**
    * Iterates alternatives using zero-cost speculative backtracking.
    * Modelled after @jesscss/parser's OR().
@@ -2304,422 +2245,10 @@ export class Parser {
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
     occurrence: number,
   ): T {
-    const isAltsArray = isArray(altsOrOpts);
-    const alts = isAltsArray
-      ? (altsOrOpts as IOrAlt<any>[])
-      : (altsOrOpts as OrMethodOpts<unknown>).DEF;
-    const wasSpeculating = this.IS_SPECULATING;
-    const mapKey = this.currRuleShortName | occurrence;
-
-    // -----------------------------------------------------------------------
-    // Primary path: single precomputed LL(k) closure. Built from GAST
-    // during performSelfAnalysis, or lazily from the first speculative pass.
-    // One function call → committed dispatch. ~5 property reads total.
-    // -----------------------------------------------------------------------
-    const orDispatch = this._orLookahead[mapKey];
-    if (orDispatch !== undefined && !wasSpeculating) {
-      const result = orDispatch.call(this, alts);
-      if (result !== OR_NO_MATCH) {
-        return result as T;
-      }
-      // No alt matched — fall through to slow path for error handling.
-    }
-
-    // LA(1) needed by the slow path and fast-map dispatch below.
-    const la1 = this.LA_FAST(1);
-    const la1TypeIdx = la1.tokenTypeIdx;
-
-    // Save outer OR's gated-prefix tracking state so nested ORs (via
-    // SUBRULEs) don't corrupt it.
-    const savedAltStartLexPos = this._orAltStartLexPos;
-    const savedAltHasGatedPrefix = this._orAltHasGatedPrefix;
-    const savedAltHasAnyPrefix = this._orAltHasAnyPrefix;
-
-    const savedDslCounter = this._dslCounter;
-    const altStarts = this._orAltCounterStarts[mapKey];
-
-    // -----------------------------------------------------------------------
-    // Fast-dispatch path — direct tokenTypeIdx→altIdx map, zero allocation.
-    //
-    // `_orFastMaps[mapKey][la1.tokenTypeIdx]` gives the alt index observed to
-    // match this LA(1) token. Built lazily from slow-path observations.
-    // For gate-free, unambiguous LL(1) grammars (e.g. JSON) this is the
-    // hottest path: one property lookup → committed ALT call.
-    //
-    // Gated-prefix alts (gate-dependent first-token set) are checked
-    // separately via `_orGatedPrefixAlts` — they must always be speculated.
-    // -----------------------------------------------------------------------
-    const fastMap = this._orFastMaps[mapKey];
-    const gatedPrefixAlts = this._orGatedPrefixAlts[mapKey];
-    // Dynamic alternatives: if this OR site was cached with a different alts
-    // array (e.g., CSS `main` called from different contexts), the cached
-    // altIdx may point to wrong/nonexistent alts. Skip the fast path.
-    const cachedAltsRef = this._orFastMapAltsRef[mapKey];
-    if (
-      (fastMap !== undefined || gatedPrefixAlts !== undefined) &&
-      (cachedAltsRef === undefined || cachedAltsRef === alts)
-    ) {
-      // Gated-prefix alts have higher priority than fast-map entries.
-      // They must ALWAYS be tried first because their first-token set is
-      // gate-dependent — the gate may open/close between calls.
-      if (gatedPrefixAlts !== undefined) {
-        for (let gIdx = 0; gIdx < gatedPrefixAlts.length; gIdx++) {
-          const altIdx = gatedPrefixAlts[gIdx];
-          const alt = alts[altIdx];
-          if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
-          const fastLexPos = this.currIdx;
-          if (altStarts !== undefined)
-            this._dslCounter = savedDslCounter + altStarts[altIdx];
-          if (wasSpeculating) {
-            try {
-              const r = alt.ALT.call(this) as T;
-              {
-                const d = this._orCounterDeltas[mapKey];
-                if (d !== undefined) this._dslCounter = savedDslCounter + d;
-              }
-              return r;
-            } catch (_e) {
-              this.currIdx = fastLexPos;
-            }
-          } else {
-            const fastErrors = this._errors.length;
-            const fastCstSave = this.saveCheckpoint();
-            try {
-              const r = alt.ALT.call(this) as T;
-              {
-                const d = this._orCounterDeltas[mapKey];
-                if (d !== undefined) this._dslCounter = savedDslCounter + d;
-              }
-              return r;
-            } catch (_e) {
-              this.restoreCheckpoint(fastCstSave);
-              this.currIdx = fastLexPos;
-              this._errors.length = fastErrors;
-            }
-          }
-        }
-      }
-
-      const fastAltIdx =
-        fastMap !== undefined ? fastMap[la1TypeIdx] : undefined;
-
-      // Direct dispatch: single candidate for this tokenTypeIdx.
-      if (fastAltIdx !== undefined && fastAltIdx >= 0) {
-        // Decode: entries >= GATED_OFFSET have preceding gated alts with
-        // an explicit GATE property on the alt itself. Check those first.
-        let realAltIdx = fastAltIdx;
-        if (fastAltIdx >= GATED_OFFSET) {
-          realAltIdx = fastAltIdx - GATED_OFFSET;
-          for (let g = 0; g < realAltIdx; g++) {
-            const galt = alts[g];
-            if (galt.GATE !== undefined && galt.GATE.call(this)) {
-              const gPos = this.currIdx;
-              if (altStarts !== undefined)
-                this._dslCounter = savedDslCounter + altStarts[g];
-              if (wasSpeculating) {
-                try {
-                  const r = galt.ALT.call(this) as T;
-                  {
-                    const d = this._orCounterDeltas[mapKey];
-                    if (d !== undefined) this._dslCounter = savedDslCounter + d;
-                  }
-                  return r;
-                } catch (_e) {
-                  this.currIdx = gPos;
-                }
-              } else {
-                const gErr = this._errors.length;
-                const gCst = this.saveCheckpoint();
-                try {
-                  const r = galt.ALT.call(this) as T;
-                  {
-                    const d = this._orCounterDeltas[mapKey];
-                    if (d !== undefined) this._dslCounter = savedDslCounter + d;
-                  }
-                  return r;
-                } catch (_e) {
-                  this.restoreCheckpoint(gCst);
-                  this.currIdx = gPos;
-                  this._errors.length = gErr;
-                }
-              }
-            }
-          }
-        }
-
-        // Dispatch to the mapped fallback alt.
-        const alt = alts[realAltIdx];
-        if (alt.GATE === undefined || alt.GATE.call(this)) {
-          if (altStarts !== undefined)
-            this._dslCounter = savedDslCounter + altStarts[realAltIdx];
-
-          // Committed dispatch: if the alt had no OPTION/MANY prefix
-          // (verified from GAST or runtime structural observation), the
-          // first token uniquely determines the path. No try/catch needed.
-          const cm = this._orCommittable[mapKey];
-          if (
-            !wasSpeculating &&
-            !this.dynamicTokensEnabled &&
-            cm !== undefined &&
-            cm[la1TypeIdx] === true &&
-            // Dynamic alts guard: committable entry must match the current
-            // alts array. GAST-populated entries have no altsRef, so they're
-            // safe (GAST analysis is independent of runtime alts). Runtime-
-            // populated entries have an altsRef that must match.
-            (cachedAltsRef === undefined || cachedAltsRef === alts)
-          ) {
-            // COMMITTED DISPATCH: zero overhead. If the alt fails, the
-            // exception propagates to invokeRuleCatch for recovery.
-            const r = alt.ALT.call(this) as T;
-            {
-              const d = this._orCounterDeltas[mapKey];
-              if (d !== undefined) this._dslCounter = savedDslCounter + d;
-            }
-            this._orAltStartLexPos = savedAltStartLexPos;
-            this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
-            this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
-            return r;
-          }
-
-          const fastLexPos = this.currIdx;
-          if (wasSpeculating) {
-            try {
-              const r = alt.ALT.call(this) as T;
-              {
-                const d = this._orCounterDeltas[mapKey];
-                if (d !== undefined) this._dslCounter = savedDslCounter + d;
-              }
-              return r;
-            } catch (_e) {
-              this.currIdx = fastLexPos;
-            }
-          } else {
-            const fastErrors = this._errors.length;
-            const fastCstSave = this.saveCheckpoint();
-            try {
-              const r = alt.ALT.call(this) as T;
-              {
-                const d = this._orCounterDeltas[mapKey];
-                if (d !== undefined) this._dslCounter = savedDslCounter + d;
-              }
-              return r;
-            } catch (_e) {
-              this.restoreCheckpoint(fastCstSave);
-              this.currIdx = fastLexPos;
-              this._errors.length = fastErrors;
-            }
-          }
-        }
-      }
-      // Fast path exhausted — fall through to full speculative loop.
-    }
-
-    // -----------------------------------------------------------------------
-    // Slow path: try each alt speculatively. First success wins.
-    // No bestProgress tracking — first success is final.
-    //
-    // Committed re-run: when all speculative alts fail but the fast-dispatch
-    // map identified which alt's first token matched (LL(1)), re-run that
-    // alt with IS_SPECULATING=false. This lets CONSUME throw real
-    // MismatchedTokenException for recovery (if enabled) or error
-    // propagation (if disabled). MANY catches the exception and checks
-    // progress to decide whether to stop or re-throw.
-    // -----------------------------------------------------------------------
-    const startLexPos = this.exportLexerState();
-    // Save CST/errors for clean state restoration. During speculation,
-    // successful CONSUMEs add CST nodes that aren't cleaned up on
-    // SPEC_FAIL (only lexer pos is restored).
-    const savedErrors = this._errors.length;
-    const savedCst = this.saveCheckpoint();
-
-    for (let i = 0; i < alts.length; i++) {
-      const alt = alts[i];
-      if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
-      this.IS_SPECULATING = true;
-      if (altStarts !== undefined)
-        this._dslCounter = savedDslCounter + altStarts[i];
-      this._orAltStartLexPos = startLexPos;
-      this._orAltHasGatedPrefix = false;
-      this._orAltHasAnyPrefix = false;
-      try {
-        const result = alt.ALT.call(this) as T;
-        this.IS_SPECULATING = wasSpeculating;
-        // Record for fast-dispatch cache.
-        if (this._orAltHasGatedPrefix) {
-          let gpa = this._orGatedPrefixAlts[mapKey];
-          if (gpa === undefined) {
-            gpa = [];
-            this._orGatedPrefixAlts[mapKey] = gpa;
-          }
-          if (!gpa.includes(i)) {
-            gpa.push(i);
-            if (gpa.length > 1) gpa.sort((a, b) => a - b);
-          }
-        } else {
-          addOrFastMapEntry(
-            this._orFastMaps,
-            this._orFastMapAltsRef,
-            mapKey,
-            la1TypeIdx,
-            i,
-            alts,
-          );
-          // Record committability: if no OPTION/MANY/AT_LEAST_ONE fired
-          // before the first CONSUME, committed dispatch is safe.
-          if (!this._orAltHasAnyPrefix) {
-            let cm = this._orCommittable[mapKey];
-            if (cm === undefined) {
-              cm = Object.create(null);
-              this._orCommittable[mapKey] = cm;
-            }
-            cm[la1TypeIdx] = true;
-          }
-        }
-        this._orAltStartLexPos = savedAltStartLexPos;
-        this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
-        this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
-        {
-          const d = this._orCounterDeltas[mapKey];
-          if (d !== undefined) this._dslCounter = savedDslCounter + d;
-        }
-        // Lazy closure building: if no precomputed closure exists yet,
-        // try to build one from GAST for future calls. One-time cost.
-        if (
-          this._orLookahead[mapKey] === undefined &&
-          this._orLookaheadLL1[mapKey] === undefined
-        ) {
-          this.lazyBuildOrClosure(mapKey);
-        }
-        return result;
-      } catch (e) {
-        this.IS_SPECULATING = wasSpeculating;
-        if (e === SPEC_FAIL || isRecognitionException(e)) {
-          // Record gated-prefix tracking for failed alts.
-          if (this._orAltHasGatedPrefix) {
-            let gpa = this._orGatedPrefixAlts[mapKey];
-            if (gpa === undefined) {
-              gpa = [];
-              this._orGatedPrefixAlts[mapKey] = gpa;
-            }
-            if (!gpa.includes(i)) {
-              gpa.push(i);
-              if (gpa.length > 1) gpa.sort((a, b) => a - b);
-            }
-          }
-          // Record failed alt with progress for fast-dispatch ambiguity
-          // detection. If a different alt later succeeds for the same
-          // tokenTypeIdx, the entry becomes -1 (ambiguous).
-          const progress = this.exportLexerState() - startLexPos;
-          if (!this._orAltHasGatedPrefix && progress > 0) {
-            addOrFastMapEntry(
-              this._orFastMaps,
-              this._orFastMapAltsRef,
-              mapKey,
-              la1TypeIdx,
-              i,
-              alts,
-            );
-          }
-          this.importLexerState(startLexPos);
-          // Restore CST/errors so next alt starts with clean state.
-          this._errors.length = savedErrors;
-          this.restoreCheckpoint(savedCst);
-          continue;
-        }
-        throw e;
-      }
-    }
-
-    // -----------------------------------------------------------------
-    // Committed re-run: all speculative alts failed, but the fast-dispatch
-    // map identified which alt's first token matched (LL(1) lookahead).
-    // Re-run that alt with IS_SPECULATING=false so CONSUME throws real
-    // MismatchedTokenException. This enables:
-    //   - Recovery (if recoveryEnabled): single-token insertion/deletion
-    //   - Error propagation (if recovery disabled): exception bubbles to
-    //     enclosing rule's invokeRuleCatch for error reporting
-    // MANY catches the propagating exception and uses progress to decide
-    // whether to stop iterating or re-throw for higher-level handling.
-    // -----------------------------------------------------------------
-    {
-      const recoveryMap = this._orFastMaps[mapKey];
-      if (recoveryMap !== undefined) {
-        let recoveryAltIdx = recoveryMap[la1TypeIdx];
-        if (recoveryAltIdx !== undefined && recoveryAltIdx >= 0) {
-          if (recoveryAltIdx >= GATED_OFFSET) recoveryAltIdx -= GATED_OFFSET;
-          // Restore clean state before committed re-run.
-          this.restoreCheckpoint(savedCst);
-          this._errors.length = savedErrors;
-          if (altStarts !== undefined)
-            this._dslCounter = savedDslCounter + altStarts[recoveryAltIdx];
-          this._orAltStartLexPos = startLexPos;
-          this._orAltHasGatedPrefix = false;
-          // Clear IS_SPECULATING so CONSUME throws real errors.
-          this.IS_SPECULATING = false;
-          try {
-            const result = alts[recoveryAltIdx].ALT.call(this) as T;
-            this.IS_SPECULATING = wasSpeculating;
-            this._orAltStartLexPos = savedAltStartLexPos;
-            this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
-            this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
-            {
-              const d = this._orCounterDeltas[mapKey];
-              if (d !== undefined) this._dslCounter = savedDslCounter + d;
-            }
-            return result;
-          } catch (e) {
-            // Recovery in invokeRuleCatch may have handled it (subrule
-            // returns normally). If the error propagates here, it means
-            // recovery couldn't fix it — let it bubble up.
-            this.IS_SPECULATING = wasSpeculating;
-            this._orAltStartLexPos = savedAltStartLexPos;
-            this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
-            this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
-            throw e;
-          }
-        }
-      }
-    }
-
-    // All alts failed. Restore tracking state.
-    this._orAltStartLexPos = savedAltStartLexPos;
-    this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
-    {
-      const d = this._orCounterDeltas[mapKey];
-      if (d !== undefined) this._dslCounter = savedDslCounter + d;
-    }
-
-    // If the fast map has ANY entry for this token (including ambiguous -1),
-    // the token matched at least one alt's first CONSUME during speculation.
-    // Raise a real NoViableAltException so the error propagates through MANY
-    // for proper error reporting, rather than being silently swallowed as
-    // SPEC_FAIL. MANY's catch handler uses progress to decide whether to
-    // stop iterating (no progress) or re-throw (progress made).
-    if (this.IS_SPECULATING) {
-      const failMap = this._orFastMaps[mapKey];
-      if (failMap !== undefined && failMap[la1TypeIdx] !== undefined) {
-        this.IS_SPECULATING = false;
-        this.restoreCheckpoint(savedCst);
-        this._errors.length = savedErrors;
-        const em = isAltsArray
-          ? undefined
-          : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
-        this.raiseNoAltException(occurrence, em);
-        // raiseNoAltException throws — unreachable.
-      }
-      throw SPEC_FAIL;
-    }
-    const em = isAltsArray
-      ? undefined
-      : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
-    this.raiseNoAltException(occurrence, em);
+    return this.strictOrInternal(altsOrOpts, occurrence);
   }
 
   ruleFinallyStateUpdate(): void {
-    // Restore the caller's _dslCounter from the stack slot saved in
-    // ruleInvocationStateUpdate.  We read before decrementing so that
-    // RULE_STACK_IDX still points at the slot where we stored the value.
-    this._dslCounter = this._dslCounterStack[this.RULE_STACK_IDX];
     this.RULE_STACK_IDX--;
 
     // Restore the cached short name to the parent rule.
@@ -2912,13 +2441,6 @@ export class Parser {
     this.RULE_OCCURRENCE_STACK[depth] = idxInCallingRule;
     this.RULE_STACK[depth] = shortName;
     this.currRuleShortName = shortName;
-    // Save the caller's _dslCounter in the stack slot for this depth, then
-    // reset to 0 for the new rule.  Doing this here (rather than as a local
-    // variable in invokeRuleWithTry*) keeps the try/catch body free of any
-    // live-across-try locals, letting V8 generate leaner code for the hot rule
-    // invocation path.
-    this._dslCounterStack[depth] = this._dslCounter;
-    this._dslCounter = 0;
     // NOOP when cst is disabled
     this.cstInvocationStateUpdate(fullName);
   }
@@ -3413,1019 +2935,489 @@ export class Parser {
 
   // --- RecognizerApi (absorbed from trait) ---
   ACTION<T>(impl: () => T): T {
-    if (this.RECORDING_PHASE) return this.ACTION_RECORD(impl);
     return impl.call(this);
   }
 
-  // ──── lowercase consume ────
   consume(
-    _idx: number,
+    idx: number,
     tokType: TokenType,
     options?: ConsumeMethodOpts,
   ): IToken {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.consumeInternalRecord(tokType, idx, options);
     return this.consumeInternal(tokType, idx, options);
   }
 
-  // ──── lowercase subrule ────
   subrule<ARGS extends unknown[], R>(
-    _idx: number,
+    idx: number,
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
-    // functions with try/catch are not inlined by V8 across call sites.
-    if (options === undefined) {
-      this.subruleIdx = idx;
-      try {
-        const ruleResult = ruleToCall.coreRule.call(this);
-        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
-        return ruleResult;
-      } catch (e) {
-        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
-      }
-    }
     return this.subruleInternal(ruleToCall, idx, options);
   }
 
-  // ──── lowercase option ────
   option<OUT>(
-    _idx: number,
+    idx: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    // Fast committed path (same as OPTION below — see comment there).
-    if (!this.IS_SPECULATING) {
-      const laFunc =
-        this._prodLookahead[this.currRuleShortName | OPTION_IDX | idx];
-      if (laFunc !== undefined) {
-        let action: GrammarAction<OUT>;
-        let gate: (() => boolean) | undefined;
-        if (typeof actionORMethodDef === "function") {
-          action = actionORMethodDef;
-          gate = undefined;
-        } else {
-          action = actionORMethodDef.DEF;
-          gate = actionORMethodDef.GATE;
-        }
-        if (gate !== undefined && !gate.call(this)) return undefined;
-        if (!laFunc.call(this)) return undefined;
-        const optPos = this.currIdx;
-        const optErrors = this._errors.length;
-        const optCst = this.saveCheckpoint();
-        try {
-          return action.call(this);
-        } catch (e) {
-          if (e === SPEC_FAIL || isRecognitionException(e)) {
-            this.restoreCheckpoint(optCst);
-            this.currIdx = optPos;
-            this._errors.length = optErrors;
-            return undefined;
-          }
-          throw e;
-        }
-      }
-    }
     return this.optionInternal(actionORMethodDef, idx);
   }
 
-  // ──── lowercase or ────
-  or(_idx: number, altsOrOpts: IOrAlt<any>[] | OrMethodOpts<any>): any {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) return this.orInternalRecord(altsOrOpts, idx);
-    // Primary path: precomputed LL(k) dispatch closure (same as OR below).
-    if (!this.IS_SPECULATING) {
-      const mapKey = this.currRuleShortName | idx;
-      const ll1Dispatch = this._orLookaheadLL1[mapKey];
-      if (ll1Dispatch !== undefined) {
-        const altIdx = ll1Dispatch.call(this);
-        if (altIdx !== undefined) {
-          const alts = isArray(altsOrOpts)
-            ? (altsOrOpts as IOrAlt<any>[])
-            : (altsOrOpts as OrMethodOpts<unknown>).DEF;
-          return alts[altIdx].ALT.call(this);
-        }
-        return this.orInternal(altsOrOpts, idx);
-      }
-      const orDispatch = this._orLookahead[mapKey];
-      if (orDispatch !== undefined) {
-        const alts = isArray(altsOrOpts)
-          ? (altsOrOpts as IOrAlt<any>[])
-          : (altsOrOpts as OrMethodOpts<unknown>).DEF;
-        const result = orDispatch.call(this, alts);
-        if (result !== OR_NO_MATCH) return result;
-      }
-    }
-    return this.orInternal(altsOrOpts, idx);
+  or<T = unknown>(idx: number, altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.strictOrInternal(altsOrOpts, idx);
   }
 
-  // ──── lowercase many ────
   many(
-    _idx: number,
+    idx: number,
     actionORMethodDef: GrammarAction<any> | DSLMethodOpts<any>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manyInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    return this.manyInternal(idx, actionORMethodDef);
+    this.manyInternal(idx, actionORMethodDef);
   }
 
-  // ──── lowercase atLeastOne ────
+  protected manySep(idx: number, options: ManySepMethodOpts<any>): void {
+    this.manySepFirstInternal(idx, options);
+  }
+
   atLeastOne(
-    _idx: number,
+    idx: number,
     actionORMethodDef: GrammarAction<any> | DSLMethodOptsWithErr<any>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    return this.atLeastOneInternal(idx, actionORMethodDef);
+    this.atLeastOneInternal(idx, actionORMethodDef);
   }
 
-  // ──── CONSUME family ────
+  protected atLeastOneSep(
+    idx: number,
+    options: AtLeastOneSepMethodOpts<any>,
+  ): void {
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
   CONSUME(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.consumeInternalRecord(tokType, idx, options);
-    return this.consumeInternal(tokType, idx, options);
+    return this.consumeInternal(tokType, 0, options);
   }
 
   CONSUME1(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.consumeInternalRecord(tokType, idx, options);
-    return this.consumeInternal(tokType, idx, options);
+    return this.consumeInternal(tokType, 1, options);
   }
 
   CONSUME2(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.consumeInternalRecord(tokType, idx, options);
-    return this.consumeInternal(tokType, idx, options);
+    return this.consumeInternal(tokType, 2, options);
   }
 
   CONSUME3(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.consumeInternalRecord(tokType, idx, options);
-    return this.consumeInternal(tokType, idx, options);
+    return this.consumeInternal(tokType, 3, options);
   }
 
   CONSUME4(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.consumeInternalRecord(tokType, idx, options);
-    return this.consumeInternal(tokType, idx, options);
+    return this.consumeInternal(tokType, 4, options);
   }
 
   CONSUME5(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.consumeInternalRecord(tokType, idx, options);
-    return this.consumeInternal(tokType, idx, options);
+    return this.consumeInternal(tokType, 5, options);
   }
 
   CONSUME6(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.consumeInternalRecord(tokType, idx, options);
-    return this.consumeInternal(tokType, idx, options);
+    return this.consumeInternal(tokType, 6, options);
   }
 
   CONSUME7(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.consumeInternalRecord(tokType, idx, options);
-    return this.consumeInternal(tokType, idx, options);
+    return this.consumeInternal(tokType, 7, options);
   }
 
   CONSUME8(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.consumeInternalRecord(tokType, idx, options);
-    return this.consumeInternal(tokType, idx, options);
+    return this.consumeInternal(tokType, 8, options);
   }
 
   CONSUME9(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.consumeInternalRecord(tokType, idx, options);
-    return this.consumeInternal(tokType, idx, options);
+    return this.consumeInternal(tokType, 9, options);
   }
 
-  // ──── SUBRULE family ────
+  SUBRULE<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
   SUBRULE<ARGS extends unknown[], R>(
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
-    // functions with try/catch are not inlined by V8 across call sites.
-    if (options === undefined) {
-      this.subruleIdx = idx;
-      try {
-        const ruleResult = ruleToCall.coreRule.call(this);
-        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
-        return ruleResult;
-      } catch (e) {
-        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
-      }
-    }
-    return this.subruleInternal(ruleToCall, idx, options);
+    return this.subruleInternal(ruleToCall, 0, options);
   }
 
+  SUBRULE1<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
   SUBRULE1<ARGS extends unknown[], R>(
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
-    // functions with try/catch are not inlined by V8 across call sites.
-    if (options === undefined) {
-      this.subruleIdx = idx;
-      try {
-        const ruleResult = ruleToCall.coreRule.call(this);
-        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
-        return ruleResult;
-      } catch (e) {
-        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
-      }
-    }
-    return this.subruleInternal(ruleToCall, idx, options);
+    return this.subruleInternal(ruleToCall, 1, options);
   }
 
+  SUBRULE2<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
   SUBRULE2<ARGS extends unknown[], R>(
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
-    // functions with try/catch are not inlined by V8 across call sites.
-    if (options === undefined) {
-      this.subruleIdx = idx;
-      try {
-        const ruleResult = ruleToCall.coreRule.call(this);
-        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
-        return ruleResult;
-      } catch (e) {
-        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
-      }
-    }
-    return this.subruleInternal(ruleToCall, idx, options);
+    return this.subruleInternal(ruleToCall, 2, options);
   }
 
+  SUBRULE3<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
   SUBRULE3<ARGS extends unknown[], R>(
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
-    // functions with try/catch are not inlined by V8 across call sites.
-    if (options === undefined) {
-      this.subruleIdx = idx;
-      try {
-        const ruleResult = ruleToCall.coreRule.call(this);
-        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
-        return ruleResult;
-      } catch (e) {
-        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
-      }
-    }
-    return this.subruleInternal(ruleToCall, idx, options);
+    return this.subruleInternal(ruleToCall, 3, options);
   }
 
+  SUBRULE4<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
   SUBRULE4<ARGS extends unknown[], R>(
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
-    // functions with try/catch are not inlined by V8 across call sites.
-    if (options === undefined) {
-      this.subruleIdx = idx;
-      try {
-        const ruleResult = ruleToCall.coreRule.call(this);
-        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
-        return ruleResult;
-      } catch (e) {
-        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
-      }
-    }
-    return this.subruleInternal(ruleToCall, idx, options);
+    return this.subruleInternal(ruleToCall, 4, options);
   }
 
+  SUBRULE5<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
   SUBRULE5<ARGS extends unknown[], R>(
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
-    // functions with try/catch are not inlined by V8 across call sites.
-    if (options === undefined) {
-      this.subruleIdx = idx;
-      try {
-        const ruleResult = ruleToCall.coreRule.call(this);
-        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
-        return ruleResult;
-      } catch (e) {
-        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
-      }
-    }
-    return this.subruleInternal(ruleToCall, idx, options);
+    return this.subruleInternal(ruleToCall, 5, options);
   }
 
+  SUBRULE6<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
   SUBRULE6<ARGS extends unknown[], R>(
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
-    // functions with try/catch are not inlined by V8 across call sites.
-    if (options === undefined) {
-      this.subruleIdx = idx;
-      try {
-        const ruleResult = ruleToCall.coreRule.call(this);
-        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
-        return ruleResult;
-      } catch (e) {
-        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
-      }
-    }
-    return this.subruleInternal(ruleToCall, idx, options);
+    return this.subruleInternal(ruleToCall, 6, options);
   }
 
+  SUBRULE7<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
   SUBRULE7<ARGS extends unknown[], R>(
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
-    // functions with try/catch are not inlined by V8 across call sites.
-    if (options === undefined) {
-      this.subruleIdx = idx;
-      try {
-        const ruleResult = ruleToCall.coreRule.call(this);
-        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
-        return ruleResult;
-      } catch (e) {
-        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
-      }
-    }
-    return this.subruleInternal(ruleToCall, idx, options);
+    return this.subruleInternal(ruleToCall, 7, options);
   }
 
+  SUBRULE8<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
   SUBRULE8<ARGS extends unknown[], R>(
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
-    // functions with try/catch are not inlined by V8 across call sites.
-    if (options === undefined) {
-      this.subruleIdx = idx;
-      try {
-        const ruleResult = ruleToCall.coreRule.call(this);
-        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
-        return ruleResult;
-      } catch (e) {
-        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
-      }
-    }
-    return this.subruleInternal(ruleToCall, idx, options);
+    return this.subruleInternal(ruleToCall, 8, options);
   }
 
+  SUBRULE9<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
   SUBRULE9<ARGS extends unknown[], R>(
     ruleToCall: ParserMethodInternal<ARGS, R>,
     options?: SubruleMethodOpts<ARGS>,
   ): R {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.subruleInternalRecord(ruleToCall, idx, options) as R;
-    // Fast path: no options (no LABEL / no ARGS). Avoids subruleInternal call —
-    // functions with try/catch are not inlined by V8 across call sites.
-    if (options === undefined) {
-      this.subruleIdx = idx;
-      try {
-        const ruleResult = ruleToCall.coreRule.call(this);
-        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
-        return ruleResult;
-      } catch (e) {
-        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
-      }
-    }
-    return this.subruleInternal(ruleToCall, idx, options);
+    return this.subruleInternal(ruleToCall, 9, options);
   }
 
-  // ──── OPTION family ────
   OPTION<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    // Fast committed path: precomputed OPTION lookahead exists and not
-    // speculating. Keeps optionInternal (too large to inline) off the hot
-    // call stack. Try/catch is required — body can still fail internally.
-    if (!this.IS_SPECULATING) {
-      const laFunc =
-        this._prodLookahead[this.currRuleShortName | OPTION_IDX | idx];
-      if (laFunc !== undefined) {
-        let action: GrammarAction<OUT>;
-        let gate: (() => boolean) | undefined;
-        if (typeof actionORMethodDef === "function") {
-          action = actionORMethodDef;
-          gate = undefined;
-        } else {
-          action = actionORMethodDef.DEF;
-          gate = actionORMethodDef.GATE;
-        }
-        if (gate !== undefined && !gate.call(this)) return undefined;
-        if (!laFunc.call(this)) return undefined;
-        const optPos = this.currIdx;
-        const optErrors = this._errors.length;
-        const optCst = this.saveCheckpoint();
-        try {
-          return action.call(this);
-        } catch (e) {
-          if (e === SPEC_FAIL || isRecognitionException(e)) {
-            this.restoreCheckpoint(optCst);
-            this.currIdx = optPos;
-            this._errors.length = optErrors;
-            return undefined;
-          }
-          throw e;
-        }
-      }
-    }
-    return this.optionInternal(actionORMethodDef, idx);
+    return this.optionInternal(actionORMethodDef, 0);
   }
 
   OPTION1<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    return this.optionInternal(actionORMethodDef, idx);
+    return this.optionInternal(actionORMethodDef, 1);
   }
 
   OPTION2<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    return this.optionInternal(actionORMethodDef, idx);
+    return this.optionInternal(actionORMethodDef, 2);
   }
 
   OPTION3<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    return this.optionInternal(actionORMethodDef, idx);
+    return this.optionInternal(actionORMethodDef, 3);
   }
 
   OPTION4<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    return this.optionInternal(actionORMethodDef, idx);
+    return this.optionInternal(actionORMethodDef, 4);
   }
 
   OPTION5<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    return this.optionInternal(actionORMethodDef, idx);
+    return this.optionInternal(actionORMethodDef, 5);
   }
 
   OPTION6<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    return this.optionInternal(actionORMethodDef, idx);
+    return this.optionInternal(actionORMethodDef, 6);
   }
 
   OPTION7<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    return this.optionInternal(actionORMethodDef, idx);
+    return this.optionInternal(actionORMethodDef, 7);
   }
 
   OPTION8<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    return this.optionInternal(actionORMethodDef, idx);
+    return this.optionInternal(actionORMethodDef, 8);
   }
 
   OPTION9<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.optionInternalRecord(actionORMethodDef, idx) as OUT;
-    return this.optionInternal(actionORMethodDef, idx);
+    return this.optionInternal(actionORMethodDef, 9);
   }
 
-  /**
-   * Committed LL(1) fast dispatch -- shared by OR, OR1-OR9, and lowercase or.
-   */
-
-  // ──── OR family ────
-  OR<T>(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>): T {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE)
-      return this.orInternalRecord(altsOrOpts, idx) as T;
-    // Primary path: precomputed LL(k) dispatch closure. Built during
-    // performSelfAnalysis. In the warm steady-state this always hits,
-    // keeping orInternal (too large to inline) off the hot call stack.
-    if (!this.IS_SPECULATING) {
-      const mapKey = this.currRuleShortName | idx;
-      // LL(1) no-counter fast path: tiny closure returns altIdx only.
-      // Closure is small enough for V8 to inline; OR() calls ALT directly.
-      const ll1Dispatch = this._orLookaheadLL1[mapKey];
-      if (ll1Dispatch !== undefined) {
-        const altIdx = ll1Dispatch.call(this);
-        if (altIdx !== undefined) {
-          const alts = isArray(altsOrOpts)
-            ? (altsOrOpts as IOrAlt<any>[])
-            : (altsOrOpts as OrMethodOpts<unknown>).DEF;
-          return alts[altIdx].ALT.call(this) as T;
-        }
-        return this.orInternal(altsOrOpts, idx);
-      }
-      const orDispatch = this._orLookahead[mapKey];
-      if (orDispatch !== undefined) {
-        const alts = isArray(altsOrOpts)
-          ? (altsOrOpts as IOrAlt<any>[])
-          : (altsOrOpts as OrMethodOpts<unknown>).DEF;
-        const result = orDispatch.call(this, alts);
-        if (result !== OR_NO_MATCH) return result as T;
-      }
-    }
-    return this.orInternal(altsOrOpts, idx);
+  OR<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.strictOrInternal(altsOrOpts, 0);
   }
 
-  OR1<T>(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>): T {
-    return this.OR(altsOrOpts);
+  OR1<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.strictOrInternal(altsOrOpts, 1);
   }
 
-  OR2<T>(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>): T {
-    return this.OR(altsOrOpts);
+  OR2<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.strictOrInternal(altsOrOpts, 2);
   }
 
-  OR3<T>(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>): T {
-    return this.OR(altsOrOpts);
+  OR3<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.strictOrInternal(altsOrOpts, 3);
   }
 
-  OR4<T>(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>): T {
-    return this.OR(altsOrOpts);
+  OR4<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.strictOrInternal(altsOrOpts, 4);
   }
 
-  OR5<T>(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>): T {
-    return this.OR(altsOrOpts);
+  OR5<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.strictOrInternal(altsOrOpts, 5);
   }
 
-  OR6<T>(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>): T {
-    return this.OR(altsOrOpts);
+  OR6<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.strictOrInternal(altsOrOpts, 6);
   }
 
-  OR7<T>(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>): T {
-    return this.OR(altsOrOpts);
+  OR7<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.strictOrInternal(altsOrOpts, 7);
   }
 
-  OR8<T>(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>): T {
-    return this.OR(altsOrOpts);
+  OR8<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.strictOrInternal(altsOrOpts, 8);
   }
 
-  OR9<T>(altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>): T {
-    return this.OR(altsOrOpts);
+  OR9<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.strictOrInternal(altsOrOpts, 9);
   }
 
-  // ──── MANY family ────
   MANY<OUT>(actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manyInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.manyInternal(idx, actionORMethodDef);
+    this.manyInternal(0, actionORMethodDef);
   }
 
   MANY1<OUT>(actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manyInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.manyInternal(idx, actionORMethodDef);
+    this.manyInternal(1, actionORMethodDef);
   }
 
   MANY2<OUT>(actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manyInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.manyInternal(idx, actionORMethodDef);
+    this.manyInternal(2, actionORMethodDef);
   }
 
   MANY3<OUT>(actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manyInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.manyInternal(idx, actionORMethodDef);
+    this.manyInternal(3, actionORMethodDef);
   }
 
   MANY4<OUT>(actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manyInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.manyInternal(idx, actionORMethodDef);
+    this.manyInternal(4, actionORMethodDef);
   }
 
   MANY5<OUT>(actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manyInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.manyInternal(idx, actionORMethodDef);
+    this.manyInternal(5, actionORMethodDef);
   }
 
   MANY6<OUT>(actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manyInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.manyInternal(idx, actionORMethodDef);
+    this.manyInternal(6, actionORMethodDef);
   }
 
   MANY7<OUT>(actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manyInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.manyInternal(idx, actionORMethodDef);
+    this.manyInternal(7, actionORMethodDef);
   }
 
   MANY8<OUT>(actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manyInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.manyInternal(idx, actionORMethodDef);
+    this.manyInternal(8, actionORMethodDef);
   }
 
   MANY9<OUT>(actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manyInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.manyInternal(idx, actionORMethodDef);
+    this.manyInternal(9, actionORMethodDef);
   }
 
-  // ──── MANY_SEP family ────
   MANY_SEP<OUT>(options: ManySepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manySepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.manySepFirstInternal(idx, options);
+    this.manySepFirstInternal(0, options);
   }
 
   MANY_SEP1<OUT>(options: ManySepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manySepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.manySepFirstInternal(idx, options);
+    this.manySepFirstInternal(1, options);
   }
 
   MANY_SEP2<OUT>(options: ManySepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manySepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.manySepFirstInternal(idx, options);
+    this.manySepFirstInternal(2, options);
   }
 
   MANY_SEP3<OUT>(options: ManySepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manySepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.manySepFirstInternal(idx, options);
+    this.manySepFirstInternal(3, options);
   }
 
   MANY_SEP4<OUT>(options: ManySepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manySepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.manySepFirstInternal(idx, options);
+    this.manySepFirstInternal(4, options);
   }
 
   MANY_SEP5<OUT>(options: ManySepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manySepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.manySepFirstInternal(idx, options);
+    this.manySepFirstInternal(5, options);
   }
 
   MANY_SEP6<OUT>(options: ManySepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manySepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.manySepFirstInternal(idx, options);
+    this.manySepFirstInternal(6, options);
   }
 
   MANY_SEP7<OUT>(options: ManySepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manySepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.manySepFirstInternal(idx, options);
+    this.manySepFirstInternal(7, options);
   }
 
   MANY_SEP8<OUT>(options: ManySepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manySepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.manySepFirstInternal(idx, options);
+    this.manySepFirstInternal(8, options);
   }
 
   MANY_SEP9<OUT>(options: ManySepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.manySepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.manySepFirstInternal(idx, options);
+    this.manySepFirstInternal(9, options);
   }
 
-  // ──── AT_LEAST_ONE family ────
   AT_LEAST_ONE<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.atLeastOneInternal(idx, actionORMethodDef);
+    this.atLeastOneInternal(0, actionORMethodDef);
   }
 
   AT_LEAST_ONE1<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.atLeastOneInternal(idx, actionORMethodDef);
+    this.atLeastOneInternal(1, actionORMethodDef);
   }
 
   AT_LEAST_ONE2<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.atLeastOneInternal(idx, actionORMethodDef);
+    this.atLeastOneInternal(2, actionORMethodDef);
   }
 
   AT_LEAST_ONE3<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.atLeastOneInternal(idx, actionORMethodDef);
+    this.atLeastOneInternal(3, actionORMethodDef);
   }
 
   AT_LEAST_ONE4<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.atLeastOneInternal(idx, actionORMethodDef);
+    this.atLeastOneInternal(4, actionORMethodDef);
   }
 
   AT_LEAST_ONE5<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.atLeastOneInternal(idx, actionORMethodDef);
+    this.atLeastOneInternal(5, actionORMethodDef);
   }
 
   AT_LEAST_ONE6<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.atLeastOneInternal(idx, actionORMethodDef);
+    this.atLeastOneInternal(6, actionORMethodDef);
   }
 
   AT_LEAST_ONE7<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.atLeastOneInternal(idx, actionORMethodDef);
+    this.atLeastOneInternal(7, actionORMethodDef);
   }
 
   AT_LEAST_ONE8<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.atLeastOneInternal(idx, actionORMethodDef);
+    this.atLeastOneInternal(8, actionORMethodDef);
   }
 
   AT_LEAST_ONE9<OUT>(
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneInternalRecord(idx, actionORMethodDef);
-      return;
-    }
-    this.atLeastOneInternal(idx, actionORMethodDef);
+    this.atLeastOneInternal(9, actionORMethodDef);
   }
 
-  // ──── AT_LEAST_ONE_SEP family ────
   AT_LEAST_ONE_SEP<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneSepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.atLeastOneSepFirstInternal(idx, options);
+    this.atLeastOneSepFirstInternal(0, options);
   }
 
   AT_LEAST_ONE_SEP1<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneSepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.atLeastOneSepFirstInternal(idx, options);
+    this.atLeastOneSepFirstInternal(1, options);
   }
 
   AT_LEAST_ONE_SEP2<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneSepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.atLeastOneSepFirstInternal(idx, options);
+    this.atLeastOneSepFirstInternal(2, options);
   }
 
   AT_LEAST_ONE_SEP3<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneSepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.atLeastOneSepFirstInternal(idx, options);
+    this.atLeastOneSepFirstInternal(3, options);
   }
 
   AT_LEAST_ONE_SEP4<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneSepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.atLeastOneSepFirstInternal(idx, options);
+    this.atLeastOneSepFirstInternal(4, options);
   }
 
   AT_LEAST_ONE_SEP5<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneSepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.atLeastOneSepFirstInternal(idx, options);
+    this.atLeastOneSepFirstInternal(5, options);
   }
 
   AT_LEAST_ONE_SEP6<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneSepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.atLeastOneSepFirstInternal(idx, options);
+    this.atLeastOneSepFirstInternal(6, options);
   }
 
   AT_LEAST_ONE_SEP7<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneSepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.atLeastOneSepFirstInternal(idx, options);
+    this.atLeastOneSepFirstInternal(7, options);
   }
 
   AT_LEAST_ONE_SEP8<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneSepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.atLeastOneSepFirstInternal(idx, options);
+    this.atLeastOneSepFirstInternal(8, options);
   }
 
   AT_LEAST_ONE_SEP9<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
-    const idx = this._dslCounter++;
-    if (this.RECORDING_PHASE) {
-      this.atLeastOneSepFirstInternalRecord(idx, options);
-      return;
-    }
-    this.atLeastOneSepFirstInternal(idx, options);
+    this.atLeastOneSepFirstInternal(9, options);
   }
 
   RULE<T>(
@@ -4482,7 +3474,6 @@ export class Parser {
     grammarRule: (...args: any[]) => T,
     args?: any[],
   ): () => boolean {
-    if (this.RECORDING_PHASE) return this.BACKTRACK_RECORD(grammarRule, args);
     // Use coreRule to bypass root-level hooks (onBeforeParse/onAfterParse).
     // Backtracking is speculative and should not trigger parse lifecycle hooks.
     const ruleToCall = (grammarRule as any).coreRule ?? grammarRule;
@@ -4515,12 +3506,10 @@ export class Parser {
 
   // GAST export APIs
   public getGAstProductions(): Record<string, Rule> {
-    this.ensureGastProductionsCachePopulated();
     return this.gastProductionsCache;
   }
 
   public getSerializedGastProductions(): ISerializedGast[] {
-    this.ensureGastProductionsCachePopulated();
     return serializeGrammar(Object.values(this.gastProductionsCache));
   }
 
@@ -4780,18 +3769,137 @@ export class Parser {
   // --- GastRecorder (absorbed from trait) ---
   recordingProdStack!: ProdWithDef[];
   RECORDING_PHASE!: boolean;
+  protected _recordingApiBackup?: Record<string, unknown> | undefined;
 
   initGastRecorder(config: IParserConfig): void {
     this.recordingProdStack = [];
     this.RECORDING_PHASE = false;
+    this._recordingApiBackup = undefined;
+  }
+
+  protected captureRecordingApiBackup(): void {
+    const backup: Record<string, unknown> = {};
+    for (const methodName of RECORDING_API_METHOD_NAMES) {
+      backup[methodName] = (this as any)[methodName];
+    }
+    this._recordingApiBackup = backup;
+  }
+
+  protected restoreRecordingApiBackup(): void {
+    const backup = this._recordingApiBackup;
+    if (backup === undefined) return;
+    for (const methodName of RECORDING_API_METHOD_NAMES) {
+      (this as any)[methodName] = backup[methodName];
+    }
+    this._recordingApiBackup = undefined;
   }
 
   enableRecording(): void {
     this.RECORDING_PHASE = true;
+    this.TRACE_INIT("Enable Recording", () => {
+      this.captureRecordingApiBackup();
+      const that: any = this;
+      for (let i = 0; i < 10; i++) {
+        const idx = i > 0 ? i : "";
+        that[`CONSUME${idx}`] = function (
+          arg1: TokenType,
+          arg2?: ConsumeMethodOpts,
+        ) {
+          return this.consumeInternalRecord(arg1, i, arg2);
+        };
+        that[`SUBRULE${idx}`] = function (
+          arg1: ParserMethodInternal<unknown[], unknown>,
+          arg2?: SubruleMethodOpts<unknown[]>,
+        ) {
+          return this.subruleInternalRecord(arg1, i, arg2);
+        };
+        that[`OPTION${idx}`] = function (
+          arg1: GrammarAction<unknown> | DSLMethodOpts<unknown>,
+        ) {
+          return this.optionInternalRecord(arg1, i);
+        };
+        that[`OR${idx}`] = function (
+          arg1: IOrAlt<unknown>[] | OrMethodOpts<unknown>,
+        ) {
+          return this.orInternalRecord(arg1, i);
+        };
+        that[`MANY${idx}`] = function (
+          arg1: GrammarAction<unknown> | DSLMethodOpts<unknown>,
+        ) {
+          this.manyInternalRecord(i, arg1);
+        };
+        that[`MANY_SEP${idx}`] = function (arg1: ManySepMethodOpts<unknown>) {
+          this.manySepFirstInternalRecord(i, arg1);
+        };
+        that[`AT_LEAST_ONE${idx}`] = function (
+          arg1: GrammarAction<unknown> | DSLMethodOptsWithErr<unknown>,
+        ) {
+          this.atLeastOneInternalRecord(i, arg1);
+        };
+        that[`AT_LEAST_ONE_SEP${idx}`] = function (
+          arg1: AtLeastOneSepMethodOpts<unknown>,
+        ) {
+          this.atLeastOneSepFirstInternalRecord(i, arg1);
+        };
+      }
+      that.consume = function (
+        idx: number,
+        arg1: TokenType,
+        arg2?: ConsumeMethodOpts,
+      ) {
+        return this.consumeInternalRecord(arg1, idx, arg2);
+      };
+      that.subrule = function (
+        idx: number,
+        arg1: ParserMethodInternal<unknown[], unknown>,
+        arg2?: SubruleMethodOpts<unknown[]>,
+      ) {
+        return this.subruleInternalRecord(arg1, idx, arg2);
+      };
+      that.option = function (
+        idx: number,
+        arg1: GrammarAction<unknown> | DSLMethodOpts<unknown>,
+      ) {
+        return this.optionInternalRecord(arg1, idx);
+      };
+      that.or = function (
+        idx: number,
+        arg1: IOrAlt<unknown>[] | OrMethodOpts<unknown>,
+      ) {
+        return this.orInternalRecord(arg1, idx);
+      };
+      that.many = function (
+        idx: number,
+        arg1: GrammarAction<unknown> | DSLMethodOpts<unknown>,
+      ) {
+        this.manyInternalRecord(idx, arg1);
+      };
+      that.manySep = function (idx: number, arg1: ManySepMethodOpts<unknown>) {
+        this.manySepFirstInternalRecord(idx, arg1);
+      };
+      that.atLeastOne = function (
+        idx: number,
+        arg1: GrammarAction<unknown> | DSLMethodOptsWithErr<unknown>,
+      ) {
+        this.atLeastOneInternalRecord(idx, arg1);
+      };
+      that.atLeastOneSep = function (
+        idx: number,
+        arg1: AtLeastOneSepMethodOpts<unknown>,
+      ) {
+        this.atLeastOneSepFirstInternalRecord(idx, arg1);
+      };
+      that.ACTION = this.ACTION_RECORD;
+      that.BACKTRACK = this.BACKTRACK_RECORD;
+      that.LA = this.LA_RECORD;
+    });
   }
 
   disableRecording() {
     this.RECORDING_PHASE = false;
+    this.TRACE_INIT("Restore Recording methods", () => {
+      this.restoreRecordingApiBackup();
+    });
   }
 
   // @ts-expect-error -- noop place holder
@@ -5105,7 +4213,9 @@ export class Parser {
     // @ts-ignore - `this parameter` not supported in setters/getters
     const parser = this as any;
     if (!parser.selfAnalysisDone) {
-      parser.ensureGastProductionsCachePopulated();
+      throw Error(
+        `Missing <performSelfAnalysis> invocation at the end of the Parser's constructor.`,
+      );
     }
     parser.reset();
     parser.tokVector = newInput;
@@ -5209,7 +4319,11 @@ export class Parser {
   }
 }
 
-applyMixins(Parser, []);
+applyMixins(ParserBase, []);
+
+export class StrictParser extends ParserBase {}
+
+export { StrictParser as Parser };
 
 // --- OR counter-management analysis helpers ---
 
@@ -5247,6 +4361,64 @@ function findParentDef(
     }
   }
   return null;
+}
+
+function findAlternationByIdx(
+  defs: IProduction[],
+  occurrence: number,
+): Alternation | undefined {
+  for (const node of defs) {
+    if (node instanceof Alternation && node.idx === occurrence) {
+      return node;
+    }
+    const subDef = (node as any).definition;
+    if (isArray(subDef)) {
+      const found = findAlternationByIdx(subDef as IProduction[], occurrence);
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
+}
+
+function findOptionalProdByIdx(
+  defs: IProduction[],
+  keyIdx: number,
+  occurrence: number,
+):
+  | Option
+  | Repetition
+  | RepetitionMandatory
+  | RepetitionWithSeparator
+  | RepetitionMandatoryWithSeparator
+  | undefined {
+  for (const node of defs) {
+    const matches =
+      ((keyIdx === OPTION_IDX && node instanceof Option) ||
+        (keyIdx === MANY_IDX && node instanceof Repetition) ||
+        (keyIdx === MANY_SEP_IDX && node instanceof RepetitionWithSeparator) ||
+        (keyIdx === AT_LEAST_ONE_IDX && node instanceof RepetitionMandatory) ||
+        (keyIdx === AT_LEAST_ONE_SEP_IDX &&
+          node instanceof RepetitionMandatoryWithSeparator)) &&
+      node.idx === occurrence;
+    if (matches) {
+      return node as
+        | Option
+        | Repetition
+        | RepetitionMandatory
+        | RepetitionWithSeparator
+        | RepetitionMandatoryWithSeparator;
+    }
+    const subDef = (node as any).definition;
+    if (isArray(subDef)) {
+      const found = findOptionalProdByIdx(
+        subDef as IProduction[],
+        keyIdx,
+        occurrence,
+      );
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -5288,6 +4460,343 @@ function orNeedsCounterManagement(
     }
   }
   return false;
+}
+
+function forgivingOrInternal<T>(
+  this: any,
+  altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+  occurrence: number,
+): T {
+  const isAltsArray = isArray(altsOrOpts);
+  const alts = isAltsArray
+    ? (altsOrOpts as IOrAlt<any>[])
+    : (altsOrOpts as OrMethodOpts<unknown>).DEF;
+  const wasSpeculating = this.IS_SPECULATING;
+  const mapKey = this.currRuleShortName | occurrence;
+
+  const orDispatch = this._orLookahead[mapKey];
+  if (orDispatch !== undefined && !wasSpeculating) {
+    const result = orDispatch.call(this, alts);
+    if (result !== OR_NO_MATCH) {
+      return result as T;
+    }
+  }
+
+  const la1 = this.LA_FAST(1);
+  const la1TypeIdx = la1.tokenTypeIdx;
+
+  const savedAltStartLexPos = this._orAltStartLexPos;
+  const savedAltHasGatedPrefix = this._orAltHasGatedPrefix;
+  const savedAltHasAnyPrefix = this._orAltHasAnyPrefix;
+
+  const savedDslCounter = this._dslCounter;
+  const altStarts = this._orAltCounterStarts[mapKey];
+
+  const fastMap = this._orFastMaps[mapKey];
+  const gatedPrefixAlts = this._orGatedPrefixAlts[mapKey];
+  const cachedAltsRef = this._orFastMapAltsRef[mapKey];
+  if (
+    (fastMap !== undefined || gatedPrefixAlts !== undefined) &&
+    (cachedAltsRef === undefined || cachedAltsRef === alts)
+  ) {
+    if (gatedPrefixAlts !== undefined) {
+      for (let gIdx = 0; gIdx < gatedPrefixAlts.length; gIdx++) {
+        const altIdx = gatedPrefixAlts[gIdx];
+        const alt = alts[altIdx];
+        if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
+        const fastLexPos = this.currIdx;
+        if (altStarts !== undefined)
+          this._dslCounter = savedDslCounter + altStarts[altIdx];
+        if (wasSpeculating) {
+          try {
+            const r = alt.ALT.call(this) as T;
+            {
+              const d = this._orCounterDeltas[mapKey];
+              if (d !== undefined) this._dslCounter = savedDslCounter + d;
+            }
+            return r;
+          } catch (_e) {
+            this.currIdx = fastLexPos;
+          }
+        } else {
+          const fastErrors = this._errors.length;
+          const fastCstSave = this.saveCheckpoint();
+          try {
+            const r = alt.ALT.call(this) as T;
+            {
+              const d = this._orCounterDeltas[mapKey];
+              if (d !== undefined) this._dslCounter = savedDslCounter + d;
+            }
+            return r;
+          } catch (_e) {
+            this.restoreCheckpoint(fastCstSave);
+            this.currIdx = fastLexPos;
+            this._errors.length = fastErrors;
+          }
+        }
+      }
+    }
+
+    const fastAltIdx = fastMap !== undefined ? fastMap[la1TypeIdx] : undefined;
+
+    if (fastAltIdx !== undefined && fastAltIdx >= 0) {
+      let realAltIdx = fastAltIdx;
+      if (fastAltIdx >= GATED_OFFSET) {
+        realAltIdx = fastAltIdx - GATED_OFFSET;
+        for (let g = 0; g < realAltIdx; g++) {
+          const galt = alts[g];
+          if (galt.GATE !== undefined && galt.GATE.call(this)) {
+            const gPos = this.currIdx;
+            if (altStarts !== undefined)
+              this._dslCounter = savedDslCounter + altStarts[g];
+            if (wasSpeculating) {
+              try {
+                const r = galt.ALT.call(this) as T;
+                {
+                  const d = this._orCounterDeltas[mapKey];
+                  if (d !== undefined) this._dslCounter = savedDslCounter + d;
+                }
+                return r;
+              } catch (_e) {
+                this.currIdx = gPos;
+              }
+            } else {
+              const gErr = this._errors.length;
+              const gCst = this.saveCheckpoint();
+              try {
+                const r = galt.ALT.call(this) as T;
+                {
+                  const d = this._orCounterDeltas[mapKey];
+                  if (d !== undefined) this._dslCounter = savedDslCounter + d;
+                }
+                return r;
+              } catch (_e) {
+                this.restoreCheckpoint(gCst);
+                this.currIdx = gPos;
+                this._errors.length = gErr;
+              }
+            }
+          }
+        }
+      }
+
+      const alt = alts[realAltIdx];
+      if (alt.GATE === undefined || alt.GATE.call(this)) {
+        if (altStarts !== undefined)
+          this._dslCounter = savedDslCounter + altStarts[realAltIdx];
+
+        const cm = this._orCommittable[mapKey];
+        if (
+          !wasSpeculating &&
+          !this.dynamicTokensEnabled &&
+          cm !== undefined &&
+          cm[la1TypeIdx] === true &&
+          (cachedAltsRef === undefined || cachedAltsRef === alts)
+        ) {
+          const r = alt.ALT.call(this) as T;
+          {
+            const d = this._orCounterDeltas[mapKey];
+            if (d !== undefined) this._dslCounter = savedDslCounter + d;
+          }
+          this._orAltStartLexPos = savedAltStartLexPos;
+          this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+          this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
+          return r;
+        }
+
+        const fastLexPos = this.currIdx;
+        if (wasSpeculating) {
+          try {
+            const r = alt.ALT.call(this) as T;
+            {
+              const d = this._orCounterDeltas[mapKey];
+              if (d !== undefined) this._dslCounter = savedDslCounter + d;
+            }
+            return r;
+          } catch (_e) {
+            this.currIdx = fastLexPos;
+          }
+        } else {
+          const fastErrors = this._errors.length;
+          const fastCstSave = this.saveCheckpoint();
+          try {
+            const r = alt.ALT.call(this) as T;
+            {
+              const d = this._orCounterDeltas[mapKey];
+              if (d !== undefined) this._dslCounter = savedDslCounter + d;
+            }
+            return r;
+          } catch (_e) {
+            this.restoreCheckpoint(fastCstSave);
+            this.currIdx = fastLexPos;
+            this._errors.length = fastErrors;
+          }
+        }
+      }
+    }
+  }
+
+  const startLexPos = this.exportLexerState();
+  const savedErrors = this._errors.length;
+  const savedCst = this.saveCheckpoint();
+
+  for (let i = 0; i < alts.length; i++) {
+    const alt = alts[i];
+    if (alt.GATE !== undefined && !alt.GATE.call(this)) continue;
+    this.IS_SPECULATING = true;
+    if (altStarts !== undefined)
+      this._dslCounter = savedDslCounter + altStarts[i];
+    this._orAltStartLexPos = startLexPos;
+    this._orAltHasGatedPrefix = false;
+    this._orAltHasAnyPrefix = false;
+    try {
+      const result = alt.ALT.call(this) as T;
+      this.IS_SPECULATING = wasSpeculating;
+      if (this._orAltHasGatedPrefix) {
+        let gpa = this._orGatedPrefixAlts[mapKey];
+        if (gpa === undefined) {
+          gpa = [];
+          this._orGatedPrefixAlts[mapKey] = gpa;
+          this._runtimeLookaheadCachesDirty = true;
+        }
+        if (!gpa.includes(i)) {
+          gpa.push(i);
+          if (gpa.length > 1) gpa.sort((a: number, b: number) => a - b);
+          this._runtimeLookaheadCachesDirty = true;
+        }
+      } else {
+        this._runtimeLookaheadCachesDirty = true;
+        addOrFastMapEntry(
+          this._orFastMaps,
+          this._orFastMapAltsRef,
+          mapKey,
+          la1TypeIdx,
+          i,
+          alts,
+        );
+        if (!this._orAltHasAnyPrefix) {
+          let cm = this._orCommittable[mapKey];
+          if (cm === undefined) {
+            cm = Object.create(null);
+            this._orCommittable[mapKey] = cm;
+            this._runtimeLookaheadCachesDirty = true;
+          }
+          cm[la1TypeIdx] = true;
+          this._runtimeLookaheadCachesDirty = true;
+        }
+      }
+      this._orAltStartLexPos = savedAltStartLexPos;
+      this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+      this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
+      {
+        const d = this._orCounterDeltas[mapKey];
+        if (d !== undefined) this._dslCounter = savedDslCounter + d;
+      }
+      if (
+        this._orLookahead[mapKey] === undefined &&
+        this._orLookaheadLL1[mapKey] === undefined
+      ) {
+        this.lazyBuildOrClosure(mapKey);
+      }
+      return result;
+    } catch (e) {
+      this.IS_SPECULATING = wasSpeculating;
+      if (e === SPEC_FAIL || isRecognitionException(e)) {
+        if (this._orAltHasGatedPrefix) {
+          let gpa = this._orGatedPrefixAlts[mapKey];
+          if (gpa === undefined) {
+            gpa = [];
+            this._orGatedPrefixAlts[mapKey] = gpa;
+            this._runtimeLookaheadCachesDirty = true;
+          }
+          if (!gpa.includes(i)) {
+            gpa.push(i);
+            if (gpa.length > 1) gpa.sort((a: number, b: number) => a - b);
+            this._runtimeLookaheadCachesDirty = true;
+          }
+        }
+        const progress = this.exportLexerState() - startLexPos;
+        if (!this._orAltHasGatedPrefix && progress > 0) {
+          this._runtimeLookaheadCachesDirty = true;
+          addOrFastMapEntry(
+            this._orFastMaps,
+            this._orFastMapAltsRef,
+            mapKey,
+            la1TypeIdx,
+            i,
+            alts,
+          );
+        }
+        this.importLexerState(startLexPos);
+        this._errors.length = savedErrors;
+        this.restoreCheckpoint(savedCst);
+        continue;
+      }
+      throw e;
+    }
+  }
+
+  {
+    const recoveryMap = this._orFastMaps[mapKey];
+    if (recoveryMap !== undefined) {
+      let recoveryAltIdx = recoveryMap[la1TypeIdx];
+      if (recoveryAltIdx !== undefined && recoveryAltIdx >= 0) {
+        if (recoveryAltIdx >= GATED_OFFSET) recoveryAltIdx -= GATED_OFFSET;
+        this.restoreCheckpoint(savedCst);
+        this._errors.length = savedErrors;
+        if (altStarts !== undefined)
+          this._dslCounter = savedDslCounter + altStarts[recoveryAltIdx];
+        this._orAltStartLexPos = startLexPos;
+        this._orAltHasGatedPrefix = false;
+        this.IS_SPECULATING = false;
+        try {
+          const result = alts[recoveryAltIdx].ALT.call(this) as T;
+          this.IS_SPECULATING = wasSpeculating;
+          this._orAltStartLexPos = savedAltStartLexPos;
+          this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+          this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
+          {
+            const d = this._orCounterDeltas[mapKey];
+            if (d !== undefined) this._dslCounter = savedDslCounter + d;
+          }
+          return result;
+        } catch (e) {
+          this.IS_SPECULATING = wasSpeculating;
+          this._orAltStartLexPos = savedAltStartLexPos;
+          this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+          this._orAltHasAnyPrefix = savedAltHasAnyPrefix;
+          throw e;
+        }
+      }
+    }
+  }
+
+  this._orAltStartLexPos = savedAltStartLexPos;
+  this._orAltHasGatedPrefix = savedAltHasGatedPrefix;
+  {
+    const d = this._orCounterDeltas[mapKey];
+    if (d !== undefined) this._dslCounter = savedDslCounter + d;
+  }
+
+  if (this.IS_SPECULATING) {
+    const failMap = this._orFastMaps[mapKey];
+    if (failMap !== undefined && failMap[la1TypeIdx] !== undefined) {
+      this.IS_SPECULATING = false;
+      this.restoreCheckpoint(savedCst);
+      this._errors.length = savedErrors;
+      const em = isAltsArray
+        ? undefined
+        : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
+      this.raiseNoAltException(occurrence, em);
+      throw new Error("unreachable");
+    }
+    throw SPEC_FAIL;
+  }
+  const em = isAltsArray
+    ? undefined
+    : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
+  this.raiseNoAltException(occurrence, em);
+  throw new Error("unreachable");
 }
 
 // --- GastRecorder module-level helpers (absorbed from trait) ---
@@ -5369,8 +4878,8 @@ function gastRecordOrProd(mainProdArg: any, occurrence: number): any {
   return RECORDING_NULL_OBJECT;
 }
 
-function gastGetIdxSuffix(_idx: number): string {
-  return "";
+function gastGetIdxSuffix(idx: number): string {
+  return idx === 0 ? "" : idx.toString();
 }
 
 function gastAssertMethodIdxIsValid(idx: number): void {
@@ -5386,24 +4895,1493 @@ function gastAssertMethodIdxIsValid(idx: number): void {
   }
 }
 
-export class CstParser extends Parser {
+export class CstParser extends StrictParser {
   constructor(
     tokenVocabulary: TokenVocabulary,
-    config: IParserConfigInternal = DEFAULT_PARSER_CONFIG,
+    config: IParserConfig = DEFAULT_PARSER_CONFIG,
   ) {
-    const configClone = { ...config };
+    const configClone = { ...config } as IParserConfigInternal;
     configClone.outputCst = true;
     super(tokenVocabulary, configClone);
   }
 }
 
-export class EmbeddedActionsParser extends Parser {
+export class EmbeddedActionsParser extends StrictParser {
   constructor(
     tokenVocabulary: TokenVocabulary,
-    config: IParserConfigInternal = DEFAULT_PARSER_CONFIG,
+    config: IParserConfig = DEFAULT_PARSER_CONFIG,
   ) {
-    const configClone = { ...config };
+    const configClone = { ...config } as IParserConfigInternal;
     configClone.outputCst = false;
     super(tokenVocabulary, configClone);
   }
 }
+
+export class ForgivingParser extends ParserBase {
+  _lookaheadCacheBaselineCaptured!: boolean;
+  _runtimeLookaheadCachesDirty!: boolean;
+  _baselineOrFastMaps!: Record<number, Record<number, number>>;
+  _baselineOrFastMapAltsRef!: Record<number, IOrAlt<any>[]>;
+  _baselineOrGatedPrefixAlts!: Record<number, number[]>;
+  _baselineOrCommittable!: Record<number, Record<number, boolean>>;
+  _baselineOrLookahead!: Record<
+    number,
+    (orAlts: IOrAlt<any>[]) => number | undefined
+  >;
+  _baselineOrLookaheadLL1!: ((this: ParserBase) => number | undefined)[];
+  _baselineProdLookahead!: Record<number, () => boolean>;
+
+  constructor(
+    tokenVocabulary: TokenVocabulary,
+    config: IParserConfig = DEFAULT_PARSER_CONFIG,
+  ) {
+    const configClone = { ...config } as IParserConfigInternal;
+    configClone.outputCst = false;
+    super(tokenVocabulary, configClone);
+    this._lookaheadCacheBaselineCaptured = false;
+    this._runtimeLookaheadCachesDirty = false;
+    this._baselineOrFastMaps = [];
+    this._baselineOrFastMapAltsRef = [];
+    this._baselineOrGatedPrefixAlts = [];
+    this._baselineOrCommittable = [];
+    this._baselineOrLookahead = [];
+    this._baselineOrLookaheadLL1 = [];
+    this._baselineProdLookahead = [];
+  }
+
+  protected captureLookaheadCacheBaseline(): void {
+    this._baselineOrFastMaps = cloneSparseRecordTable(this._orFastMaps);
+    this._baselineOrFastMapAltsRef = cloneSparseValueTable(
+      this._orFastMapAltsRef,
+    );
+    this._baselineOrGatedPrefixAlts = cloneSparseNumberArrayTable(
+      this._orGatedPrefixAlts,
+    );
+    this._baselineOrCommittable = cloneSparseRecordTable(this._orCommittable);
+    this._baselineOrLookahead = cloneSparseValueTable(this._orLookahead);
+    this._baselineOrLookaheadLL1 = cloneSparseArray(this._orLookaheadLL1);
+    this._baselineProdLookahead = cloneSparseValueTable(this._prodLookahead);
+    this._lookaheadCacheBaselineCaptured = true;
+    this._runtimeLookaheadCachesDirty = false;
+  }
+
+  protected restoreLookaheadCacheBaseline(): void {
+    if (!this._lookaheadCacheBaselineCaptured) return;
+    this._orFastMaps = cloneSparseRecordTable(this._baselineOrFastMaps);
+    this._orFastMapAltsRef = cloneSparseValueTable(
+      this._baselineOrFastMapAltsRef,
+    );
+    this._orGatedPrefixAlts = cloneSparseNumberArrayTable(
+      this._baselineOrGatedPrefixAlts,
+    );
+    this._orCommittable = cloneSparseRecordTable(this._baselineOrCommittable);
+    this._orLookahead = cloneSparseValueTable(this._baselineOrLookahead);
+    this._orLookaheadLL1 = cloneSparseArray(this._baselineOrLookaheadLL1);
+    this._prodLookahead = cloneSparseValueTable(this._baselineProdLookahead);
+    this._runtimeLookaheadCachesDirty = false;
+  }
+
+  public override reset(): void {
+    if (this._runtimeLookaheadCachesDirty) {
+      this.restoreLookaheadCacheBaseline();
+    }
+    super.reset();
+  }
+
+  override CONSUME(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
+    return this.consume(0, tokType, options);
+  }
+
+  override CONSUME1(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
+    return this.consume(1, tokType, options);
+  }
+
+  override CONSUME2(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
+    return this.consume(2, tokType, options);
+  }
+
+  override CONSUME3(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
+    return this.consume(3, tokType, options);
+  }
+
+  override CONSUME4(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
+    return this.consume(4, tokType, options);
+  }
+
+  override CONSUME5(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
+    return this.consume(5, tokType, options);
+  }
+
+  override CONSUME6(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
+    return this.consume(6, tokType, options);
+  }
+
+  override CONSUME7(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
+    return this.consume(7, tokType, options);
+  }
+
+  override CONSUME8(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
+    return this.consume(8, tokType, options);
+  }
+
+  override CONSUME9(tokType: TokenType, options?: ConsumeMethodOpts): IToken {
+    return this.consume(9, tokType, options);
+  }
+
+  override SUBRULE<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  override SUBRULE<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethodInternal<ARGS, R> | ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    return this.subrule(
+      0,
+      ruleToCall as ParserMethodInternal<ARGS, R>,
+      options,
+    );
+  }
+
+  override SUBRULE1<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  override SUBRULE1<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethodInternal<ARGS, R> | ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    return this.subrule(
+      1,
+      ruleToCall as ParserMethodInternal<ARGS, R>,
+      options,
+    );
+  }
+
+  override SUBRULE2<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  override SUBRULE2<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethodInternal<ARGS, R> | ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    return this.subrule(
+      2,
+      ruleToCall as ParserMethodInternal<ARGS, R>,
+      options,
+    );
+  }
+
+  override SUBRULE3<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  override SUBRULE3<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethodInternal<ARGS, R> | ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    return this.subrule(
+      3,
+      ruleToCall as ParserMethodInternal<ARGS, R>,
+      options,
+    );
+  }
+
+  override SUBRULE4<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  override SUBRULE4<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethodInternal<ARGS, R> | ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    return this.subrule(
+      4,
+      ruleToCall as ParserMethodInternal<ARGS, R>,
+      options,
+    );
+  }
+
+  override SUBRULE5<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  override SUBRULE5<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethodInternal<ARGS, R> | ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    return this.subrule(
+      5,
+      ruleToCall as ParserMethodInternal<ARGS, R>,
+      options,
+    );
+  }
+
+  override SUBRULE6<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  override SUBRULE6<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethodInternal<ARGS, R> | ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    return this.subrule(
+      6,
+      ruleToCall as ParserMethodInternal<ARGS, R>,
+      options,
+    );
+  }
+
+  override SUBRULE7<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  override SUBRULE7<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethodInternal<ARGS, R> | ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    return this.subrule(
+      7,
+      ruleToCall as ParserMethodInternal<ARGS, R>,
+      options,
+    );
+  }
+
+  override SUBRULE8<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  override SUBRULE8<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethodInternal<ARGS, R> | ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    return this.subrule(
+      8,
+      ruleToCall as ParserMethodInternal<ARGS, R>,
+      options,
+    );
+  }
+
+  override SUBRULE9<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R;
+  override SUBRULE9<ARGS extends unknown[], R>(
+    ruleToCall: ParserMethodInternal<ARGS, R> | ParserMethod<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    return this.subrule(
+      9,
+      ruleToCall as ParserMethodInternal<ARGS, R>,
+      options,
+    );
+  }
+
+  override OPTION<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    return this.option(0, actionORMethodDef);
+  }
+
+  override OPTION1<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    return this.option(1, actionORMethodDef);
+  }
+
+  override OPTION2<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    return this.option(2, actionORMethodDef);
+  }
+
+  override OPTION3<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    return this.option(3, actionORMethodDef);
+  }
+
+  override OPTION4<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    return this.option(4, actionORMethodDef);
+  }
+
+  override OPTION5<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    return this.option(5, actionORMethodDef);
+  }
+
+  override OPTION6<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    return this.option(6, actionORMethodDef);
+  }
+
+  override OPTION7<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    return this.option(7, actionORMethodDef);
+  }
+
+  override OPTION8<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    return this.option(8, actionORMethodDef);
+  }
+
+  override OPTION9<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    return this.option(9, actionORMethodDef);
+  }
+
+  override OR<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.or(0, altsOrOpts);
+  }
+
+  override OR1<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.or(1, altsOrOpts);
+  }
+
+  override OR2<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.or(2, altsOrOpts);
+  }
+
+  override OR3<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.or(3, altsOrOpts);
+  }
+
+  override OR4<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.or(4, altsOrOpts);
+  }
+
+  override OR5<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.or(5, altsOrOpts);
+  }
+
+  override OR6<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.or(6, altsOrOpts);
+  }
+
+  override OR7<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.or(7, altsOrOpts);
+  }
+
+  override OR8<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.or(8, altsOrOpts);
+  }
+
+  override OR9<T>(altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>): T {
+    return this.or(9, altsOrOpts);
+  }
+
+  override MANY<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    this.many(0, actionORMethodDef);
+  }
+
+  override MANY1<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    this.many(1, actionORMethodDef);
+  }
+
+  override MANY2<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    this.many(2, actionORMethodDef);
+  }
+
+  override MANY3<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    this.many(3, actionORMethodDef);
+  }
+
+  override MANY4<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    this.many(4, actionORMethodDef);
+  }
+
+  override MANY5<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    this.many(5, actionORMethodDef);
+  }
+
+  override MANY6<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    this.many(6, actionORMethodDef);
+  }
+
+  override MANY7<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    this.many(7, actionORMethodDef);
+  }
+
+  override MANY8<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    this.many(8, actionORMethodDef);
+  }
+
+  override MANY9<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    this.many(9, actionORMethodDef);
+  }
+
+  override MANY_SEP<OUT>(options: ManySepMethodOpts<OUT>): void {
+    this.manySep(0, options);
+  }
+
+  override MANY_SEP1<OUT>(options: ManySepMethodOpts<OUT>): void {
+    this.manySep(1, options);
+  }
+
+  override MANY_SEP2<OUT>(options: ManySepMethodOpts<OUT>): void {
+    this.manySep(2, options);
+  }
+
+  override MANY_SEP3<OUT>(options: ManySepMethodOpts<OUT>): void {
+    this.manySep(3, options);
+  }
+
+  override MANY_SEP4<OUT>(options: ManySepMethodOpts<OUT>): void {
+    this.manySep(4, options);
+  }
+
+  override MANY_SEP5<OUT>(options: ManySepMethodOpts<OUT>): void {
+    this.manySep(5, options);
+  }
+
+  override MANY_SEP6<OUT>(options: ManySepMethodOpts<OUT>): void {
+    this.manySep(6, options);
+  }
+
+  override MANY_SEP7<OUT>(options: ManySepMethodOpts<OUT>): void {
+    this.manySep(7, options);
+  }
+
+  override MANY_SEP8<OUT>(options: ManySepMethodOpts<OUT>): void {
+    this.manySep(8, options);
+  }
+
+  override MANY_SEP9<OUT>(options: ManySepMethodOpts<OUT>): void {
+    this.manySep(9, options);
+  }
+
+  override AT_LEAST_ONE<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    this.atLeastOne(0, actionORMethodDef);
+  }
+
+  override AT_LEAST_ONE1<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    this.atLeastOne(1, actionORMethodDef);
+  }
+
+  override AT_LEAST_ONE2<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    this.atLeastOne(2, actionORMethodDef);
+  }
+
+  override AT_LEAST_ONE3<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    this.atLeastOne(3, actionORMethodDef);
+  }
+
+  override AT_LEAST_ONE4<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    this.atLeastOne(4, actionORMethodDef);
+  }
+
+  override AT_LEAST_ONE5<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    this.atLeastOne(5, actionORMethodDef);
+  }
+
+  override AT_LEAST_ONE6<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    this.atLeastOne(6, actionORMethodDef);
+  }
+
+  override AT_LEAST_ONE7<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    this.atLeastOne(7, actionORMethodDef);
+  }
+
+  override AT_LEAST_ONE8<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    this.atLeastOne(8, actionORMethodDef);
+  }
+
+  override AT_LEAST_ONE9<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    this.atLeastOne(9, actionORMethodDef);
+  }
+
+  override AT_LEAST_ONE_SEP<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
+    this.atLeastOneSep(0, options);
+  }
+
+  override AT_LEAST_ONE_SEP1<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
+    this.atLeastOneSep(1, options);
+  }
+
+  override AT_LEAST_ONE_SEP2<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
+    this.atLeastOneSep(2, options);
+  }
+
+  override AT_LEAST_ONE_SEP3<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
+    this.atLeastOneSep(3, options);
+  }
+
+  override AT_LEAST_ONE_SEP4<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
+    this.atLeastOneSep(4, options);
+  }
+
+  override AT_LEAST_ONE_SEP5<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
+    this.atLeastOneSep(5, options);
+  }
+
+  override AT_LEAST_ONE_SEP6<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
+    this.atLeastOneSep(6, options);
+  }
+
+  override AT_LEAST_ONE_SEP7<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
+    this.atLeastOneSep(7, options);
+  }
+
+  override AT_LEAST_ONE_SEP8<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
+    this.atLeastOneSep(8, options);
+  }
+
+  override AT_LEAST_ONE_SEP9<OUT>(options: AtLeastOneSepMethodOpts<OUT>): void {
+    this.atLeastOneSep(9, options);
+  }
+
+  public override performSelfAnalysis(): void {
+    this.TRACE_INIT("performSelfAnalysis", () => {
+      let defErrorsMsgs;
+
+      this.selfAnalysisDone = true;
+      const className = this.className;
+
+      this.TRACE_INIT("toFastProps", () => {
+        toFastProperties(this);
+      });
+
+      this.TRACE_INIT("Grammar Recording", () => {
+        try {
+          this.enableRecording();
+          this.definedRulesNames.forEach((currRuleName: string) => {
+            const wrappedRule = (this as any)[
+              currRuleName
+            ] as ParserMethodInternal<unknown[], unknown>;
+            const originalGrammarAction = wrappedRule["originalGrammarAction"];
+            let recordedRuleGast!: Rule;
+            this.TRACE_INIT(`${currRuleName} Rule`, () => {
+              recordedRuleGast = this.topLevelRuleRecord(
+                currRuleName,
+                originalGrammarAction,
+              );
+            });
+            this.gastProductionsCache[currRuleName] = recordedRuleGast;
+          });
+        } finally {
+          this.disableRecording();
+        }
+      });
+
+      let resolverErrors: IParserDefinitionError[] = [];
+      this.TRACE_INIT("Grammar Resolving", () => {
+        resolverErrors = resolveGrammar({
+          rules: Object.values(this.gastProductionsCache),
+        });
+        this.definitionErrors = this.definitionErrors.concat(resolverErrors);
+      });
+
+      this.TRACE_INIT("Grammar Validations", () => {
+        if (resolverErrors.length === 0 && this.skipValidations === false) {
+          const validationErrors = validateGrammar({
+            rules: Object.values(this.gastProductionsCache),
+            tokenTypes: Object.values(this.tokensMap),
+            errMsgProvider: defaultGrammarValidatorErrorProvider,
+            grammarName: className,
+          });
+          this.definitionErrors =
+            this.definitionErrors.concat(validationErrors);
+
+          const lookaheadValidationErrors = validateLookahead({
+            lookaheadStrategy: this.lookaheadStrategy,
+            rules: Object.values(this.gastProductionsCache),
+            tokenTypes: Object.values(this.tokensMap),
+            grammarName: className,
+          });
+          this.definitionErrors = this.definitionErrors.concat(
+            lookaheadValidationErrors,
+          );
+        }
+      });
+
+      if (this.definitionErrors.length === 0) {
+        if (this.recoveryEnabled) {
+          this.TRACE_INIT("computeAllProdsFollows", () => {
+            const allFollows = computeAllProdsFollows(
+              Object.values(this.gastProductionsCache),
+            );
+            this.resyncFollows = allFollows;
+          });
+        }
+
+        this.TRACE_INIT("preComputeProdLookaheadCaches", () => {
+          this.preComputeLookaheadCaches(false);
+        });
+
+        if (this.lookaheadStrategy instanceof LLkLookaheadStrategy) {
+          this.TRACE_INIT("prePopulateOrFastMaps", () => {
+            this.prePopulateOrFastMaps();
+          });
+        } else {
+          this.TRACE_INIT("preComputeAlternationLookaheadCaches", () => {
+            this.preComputeLookaheadCaches(true);
+          });
+        }
+      }
+
+      if (
+        !(this.constructor as typeof ParserBase)
+          .DEFER_DEFINITION_ERRORS_HANDLING &&
+        this.definitionErrors.length !== 0
+      ) {
+        const fatalErrors = this.definitionErrors.filter(
+          (e) =>
+            e.type !== ParserDefinitionErrorType.AMBIGUOUS_ALTS &&
+            e.type !== ParserDefinitionErrorType.AMBIGUOUS_PREFIX_ALTS,
+        );
+        if (fatalErrors.length !== 0) {
+          defErrorsMsgs = fatalErrors.map((defError) => defError.message);
+          throw new Error(
+            `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
+              "\n-------------------------------\n",
+            )}`,
+          );
+        }
+      }
+    });
+  }
+
+  public override getGAstProductions(): Record<string, Rule> {
+    this.ensureGastProductionsCachePopulated();
+    return this.gastProductionsCache;
+  }
+
+  public override getSerializedGastProductions(): ISerializedGast[] {
+    this.ensureGastProductionsCachePopulated();
+    return serializeGrammar(Object.values(this.gastProductionsCache));
+  }
+
+  override enableRecording(): void {
+    this.RECORDING_PHASE = true;
+    this.TRACE_INIT("Enable Recording", () => {
+      this.captureRecordingApiBackup();
+      const that: any = this;
+      that.consume = function (
+        _idx: number,
+        arg1: TokenType,
+        arg2?: ConsumeMethodOpts,
+      ) {
+        const idx = this._dslCounter++;
+        return this.consumeInternalRecord(arg1, idx, arg2);
+      };
+      that.subrule = function (
+        _idx: number,
+        arg1: ParserMethodInternal<unknown[], unknown>,
+        arg2?: SubruleMethodOpts<unknown[]>,
+      ) {
+        const idx = this._dslCounter++;
+        return this.subruleInternalRecord(arg1, idx, arg2);
+      };
+      that.option = function (
+        _idx: number,
+        arg1: GrammarAction<unknown> | DSLMethodOpts<unknown>,
+      ) {
+        const idx = this._dslCounter++;
+        return this.optionInternalRecord(arg1, idx);
+      };
+      that.or = function (
+        _idx: number,
+        arg1: IOrAlt<unknown>[] | OrMethodOpts<unknown>,
+      ) {
+        const idx = this._dslCounter++;
+        return this.orInternalRecord(arg1, idx);
+      };
+      that.many = function (
+        _idx: number,
+        arg1: GrammarAction<unknown> | DSLMethodOpts<unknown>,
+      ) {
+        const idx = this._dslCounter++;
+        this.manyInternalRecord(idx, arg1);
+      };
+      that.manySep = function (_idx: number, arg1: ManySepMethodOpts<unknown>) {
+        const idx = this._dslCounter++;
+        this.manySepFirstInternalRecord(idx, arg1);
+      };
+      that.atLeastOne = function (
+        _idx: number,
+        arg1: GrammarAction<unknown> | DSLMethodOptsWithErr<unknown>,
+      ) {
+        const idx = this._dslCounter++;
+        this.atLeastOneInternalRecord(idx, arg1);
+      };
+      that.atLeastOneSep = function (
+        _idx: number,
+        arg1: AtLeastOneSepMethodOpts<unknown>,
+      ) {
+        const idx = this._dslCounter++;
+        this.atLeastOneSepFirstInternalRecord(idx, arg1);
+      };
+      that.ACTION = this.ACTION_RECORD;
+      that.BACKTRACK = this.BACKTRACK_RECORD;
+      that.LA = this.LA_RECORD;
+    });
+  }
+
+  override disableRecording() {
+    this.RECORDING_PHASE = false;
+    this.TRACE_INIT("Restore Recording methods", () => {
+      this.restoreRecordingApiBackup();
+    });
+  }
+
+  override ensureGastProductionsCachePopulated(): void {
+    if (Object.keys(this.gastProductionsCache).length > 0) {
+      return;
+    }
+    toFastProperties(this);
+    try {
+      this.enableRecording();
+      this.definedRulesNames.forEach((currRuleName: string) => {
+        const wrappedRule = (this as any)[currRuleName] as ParserMethodInternal<
+          unknown[],
+          unknown
+        >;
+        const originalGrammarAction = wrappedRule["originalGrammarAction"];
+        const recordedRuleGast = this.topLevelRuleRecord(
+          currRuleName,
+          originalGrammarAction,
+        );
+        this.gastProductionsCache[currRuleName] = recordedRuleGast;
+      });
+    } finally {
+      this.disableRecording();
+    }
+    const resolverErrors = resolveGrammar({
+      rules: Object.values(this.gastProductionsCache),
+    });
+    this.definitionErrors = this.definitionErrors.concat(resolverErrors);
+    if (resolverErrors.length === 0 && this.skipValidations === false) {
+      const validationErrors = validateGrammar({
+        rules: Object.values(this.gastProductionsCache),
+        tokenTypes: Object.values(this.tokensMap),
+        errMsgProvider: defaultGrammarValidatorErrorProvider,
+        grammarName: this.className,
+      });
+      this.definitionErrors = this.definitionErrors.concat(validationErrors);
+      const lookaheadValidationErrors = validateLookahead({
+        lookaheadStrategy: this.lookaheadStrategy,
+        rules: Object.values(this.gastProductionsCache),
+        tokenTypes: Object.values(this.tokensMap),
+        grammarName: this.className,
+      });
+      this.definitionErrors = this.definitionErrors.concat(
+        lookaheadValidationErrors,
+      );
+    }
+    if (
+      !(this.constructor as typeof ParserBase)
+        .DEFER_DEFINITION_ERRORS_HANDLING &&
+      this.definitionErrors.length !== 0
+    ) {
+      const fatalErrors = this.definitionErrors.filter(
+        (e) =>
+          e.type !== ParserDefinitionErrorType.AMBIGUOUS_ALTS &&
+          e.type !== ParserDefinitionErrorType.AMBIGUOUS_PREFIX_ALTS,
+      );
+      if (fatalErrors.length !== 0) {
+        const defErrorsMsgs = fatalErrors.map((defError) => defError.message);
+        throw new Error(
+          `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
+            "\n-------------------------------\n",
+          )}`,
+        );
+      }
+    }
+    if (this.definitionErrors.length === 0 && this.recoveryEnabled) {
+      const allFollows = computeAllProdsFollows(
+        Object.values(this.gastProductionsCache),
+      );
+      this.resyncFollows = allFollows;
+    }
+    if (this.definitionErrors.length === 0) {
+      this.preComputeLookaheadCaches(false);
+      if (this.lookaheadStrategy instanceof LLkLookaheadStrategy) {
+        this.prePopulateOrFastMaps();
+      } else {
+        this.preComputeLookaheadCaches(true);
+      }
+    }
+    this.selfAnalysisDone = true;
+  }
+
+  override set input(newInput: IToken[]) {
+    if (!this.selfAnalysisDone) {
+      this.ensureGastProductionsCachePopulated();
+    }
+    this.reset();
+    this.tokVector = newInput;
+    this.tokVectorLength = newInput.length;
+  }
+
+  override ruleInvocationStateUpdate(
+    shortName: number,
+    fullName: string,
+    idxInCallingRule: number,
+  ): void {
+    const depth = ++this.RULE_STACK_IDX;
+    this.RULE_OCCURRENCE_STACK[depth] = idxInCallingRule;
+    this.RULE_STACK[depth] = shortName;
+    this.currRuleShortName = shortName;
+    this._dslCounterStack[depth] = this._dslCounter;
+    this._dslCounter = 0;
+    this.cstInvocationStateUpdate(fullName);
+  }
+
+  override ruleFinallyStateUpdate(): void {
+    this._dslCounter = this._dslCounterStack[this.RULE_STACK_IDX];
+    this.RULE_STACK_IDX--;
+
+    if (this.RULE_STACK_IDX >= 0) {
+      this.currRuleShortName = this.RULE_STACK[this.RULE_STACK_IDX];
+    }
+
+    this.cstFinallyStateUpdate();
+  }
+
+  override consume(
+    _idx: number,
+    tokType: TokenType,
+    options?: ConsumeMethodOpts,
+  ): IToken {
+    const idx = this._dslCounter++;
+    return this.consumeInternal(tokType, idx, options);
+  }
+
+  override subrule<ARGS extends unknown[], R>(
+    _idx: number,
+    ruleToCall: ParserMethodInternal<ARGS, R>,
+    options?: SubruleMethodOpts<ARGS>,
+  ): R {
+    const idx = this._dslCounter++;
+    if (options === undefined) {
+      this.subruleIdx = idx;
+      try {
+        const ruleResult = ruleToCall.coreRule.call(this);
+        this.cstPostNonTerminal(ruleResult, ruleToCall.ruleName);
+        return ruleResult;
+      } catch (e) {
+        throw this.subruleInternalError(e, undefined, ruleToCall.ruleName);
+      }
+    }
+    return this.subruleInternal(ruleToCall, idx, options);
+  }
+
+  override option<OUT>(
+    _idx: number,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): OUT | undefined {
+    const idx = this._dslCounter++;
+    if (!this.IS_SPECULATING) {
+      const laFunc =
+        this._prodLookahead[this.currRuleShortName | OPTION_IDX | idx];
+      if (laFunc !== undefined) {
+        let action: GrammarAction<OUT>;
+        let gate: (() => boolean) | undefined;
+        if (typeof actionORMethodDef === "function") {
+          action = actionORMethodDef;
+          gate = undefined;
+        } else {
+          action = actionORMethodDef.DEF;
+          gate = actionORMethodDef.GATE;
+        }
+        if (gate !== undefined && !gate.call(this)) return undefined;
+        if (!laFunc.call(this)) return undefined;
+        const optPos = this.currIdx;
+        const optErrors = this._errors.length;
+        const optCst = this.saveCheckpoint();
+        try {
+          return action.call(this);
+        } catch (e) {
+          if (e === SPEC_FAIL || isRecognitionException(e)) {
+            this.restoreCheckpoint(optCst);
+            this.currIdx = optPos;
+            this._errors.length = optErrors;
+            return undefined;
+          }
+          throw e;
+        }
+      }
+    }
+    return this.optionInternal(actionORMethodDef, idx);
+  }
+
+  override optionInternal<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+    occurrence: number,
+  ): OUT | undefined {
+    return this.optionInternalLogic(actionORMethodDef, occurrence);
+  }
+
+  override optionInternalLogic<OUT>(
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+    occurrence?: number,
+  ): OUT | undefined {
+    let action: GrammarAction<OUT>;
+    let gate: (() => boolean) | undefined;
+    if (typeof actionORMethodDef !== "function") {
+      action = actionORMethodDef.DEF;
+      gate = actionORMethodDef.GATE;
+    } else {
+      action = actionORMethodDef;
+      gate = undefined;
+    }
+
+    const errors = this._errors;
+
+    if (this.IS_SPECULATING) {
+      if (this.exportLexerState() === this._orAltStartLexPos) {
+        this._orAltHasAnyPrefix = true;
+        if (gate !== undefined) {
+          this._orAltHasGatedPrefix = true;
+        }
+      }
+    }
+    if (gate !== undefined && !gate.call(this)) {
+      return undefined;
+    }
+
+    if (occurrence !== undefined && !this.IS_SPECULATING) {
+      const optLaKey = this.currRuleShortName | OPTION_IDX | occurrence;
+      const laFunc = this._prodLookahead[optLaKey];
+      if (laFunc !== undefined) {
+        if (!laFunc.call(this)) {
+          return undefined;
+        }
+        const optPos = this.currIdx;
+        const optErrors = errors.length;
+        const optCst = this.saveCheckpoint();
+        try {
+          return action.call(this);
+        } catch (e) {
+          if (e === SPEC_FAIL || isRecognitionException(e)) {
+            this.restoreCheckpoint(optCst);
+            this.currIdx = optPos;
+            errors.length = optErrors;
+            return undefined;
+          }
+          throw e;
+        }
+      }
+    }
+
+    const startPos = this.currIdx;
+    const startErrors = errors.length;
+    const cstSave = this.saveCheckpoint();
+    try {
+      const result = action.call(this);
+      if (this.currIdx === startPos || errors.length > startErrors) {
+        this.restoreCheckpoint(cstSave);
+        this.currIdx = startPos;
+        errors.length = startErrors;
+        return undefined;
+      }
+      if (occurrence !== undefined) {
+        const optLaKey = this.currRuleShortName | OPTION_IDX | occurrence;
+        if (this._prodLookahead[optLaKey] === undefined) {
+          this.lazyBuildProdClosure(
+            optLaKey,
+            occurrence,
+            OPTION_IDX,
+            PROD_TYPE.OPTION,
+          );
+        }
+      }
+      return result;
+    } catch (e) {
+      if (e === SPEC_FAIL || isRecognitionException(e)) {
+        this.restoreCheckpoint(cstSave);
+        this.currIdx = startPos;
+        errors.length = startErrors;
+        return undefined;
+      }
+      throw e;
+    }
+  }
+
+  override or<T = unknown>(
+    _idx: number,
+    altsOrOpts: IOrAlt<T>[] | OrMethodOpts<T>,
+  ): T {
+    const idx = this._dslCounter++;
+    if (!this.IS_SPECULATING) {
+      const mapKey = this.currRuleShortName | idx;
+      const ll1Dispatch = this._orLookaheadLL1[mapKey];
+      if (ll1Dispatch !== undefined) {
+        const altIdx = ll1Dispatch.call(this);
+        if (altIdx !== undefined) {
+          const alts = isArray(altsOrOpts)
+            ? (altsOrOpts as IOrAlt<T>[])
+            : (altsOrOpts as OrMethodOpts<T>).DEF;
+          return alts[altIdx].ALT.call(this) as T;
+        }
+        return this.orInternal(altsOrOpts, idx);
+      }
+      const orDispatch = this._orLookahead[mapKey];
+      if (orDispatch !== undefined) {
+        const alts = isArray(altsOrOpts)
+          ? (altsOrOpts as IOrAlt<T>[])
+          : (altsOrOpts as OrMethodOpts<T>).DEF;
+        const result = orDispatch.call(this, alts);
+        if (result !== OR_NO_MATCH) return result as T;
+      }
+    }
+    return this.orInternal(altsOrOpts, idx);
+  }
+
+  override orInternal<T>(
+    altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
+    occurrence: number,
+  ): T {
+    return forgivingOrInternal.call(this, altsOrOpts, occurrence);
+  }
+
+  override many(
+    _idx: number,
+    actionORMethodDef: GrammarAction<any> | DSLMethodOpts<any>,
+  ): void {
+    const idx = this._dslCounter++;
+    this.manyInternal(idx, actionORMethodDef);
+  }
+
+  override manyInternal<OUT>(
+    prodOccurrence: number,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    return this.manyInternalLogic(prodOccurrence, actionORMethodDef);
+  }
+
+  override manyInternalLogic<OUT>(
+    prodOccurrence: number,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
+  ): void {
+    let action: GrammarAction<OUT>;
+    let gate: (() => boolean) | undefined;
+    if (typeof actionORMethodDef !== "function") {
+      action = actionORMethodDef.DEF;
+      gate = actionORMethodDef.GATE;
+    } else {
+      action = actionORMethodDef;
+      gate = undefined;
+    }
+
+    const errors = this._errors;
+    const wasSpeculating = this.IS_SPECULATING;
+    const savedRepDslCounter = this._dslCounter;
+    const laKey = getKeyForAutomaticLookahead(
+      this.currRuleShortName,
+      MANY_IDX,
+      prodOccurrence,
+    );
+    const laSet = this._prodLookahead[laKey];
+
+    let notStuck = true;
+    let ranAtLeastOnce = false;
+    let lookaheadFunc: (() => boolean) | undefined;
+
+    if (!wasSpeculating && laSet !== undefined) {
+      while (notStuck) {
+        if (gate !== undefined && !gate.call(this)) break;
+        if (!laSet.call(this)) break;
+
+        this._dslCounter = savedRepDslCounter;
+        const iterPos = this.currIdx;
+
+        action.call(this);
+
+        if (this.currIdx <= iterPos) {
+          notStuck = false;
+          break;
+        }
+
+        ranAtLeastOnce = true;
+      }
+    }
+    if (wasSpeculating || laSet === undefined) {
+      while (notStuck) {
+        if (this.IS_SPECULATING && !ranAtLeastOnce) {
+          if (this.currIdx === this._orAltStartLexPos) {
+            this._orAltHasAnyPrefix = true;
+            if (gate !== undefined) {
+              this._orAltHasGatedPrefix = true;
+            }
+          }
+        }
+
+        if (gate !== undefined && !gate.call(this)) break;
+
+        this._dslCounter = savedRepDslCounter;
+        const iterPos = this.currIdx;
+        const iterErrors = errors.length;
+        const cstSave = this.saveCheckpoint();
+
+        this.IS_SPECULATING = true;
+        try {
+          action.call(this);
+          this.IS_SPECULATING = wasSpeculating;
+        } catch (e) {
+          this.IS_SPECULATING = wasSpeculating;
+
+          if (e === SPEC_FAIL) {
+            this.currIdx = iterPos;
+            this.restoreCheckpoint(cstSave);
+            errors.length = iterErrors;
+            break;
+          }
+
+          if (isRecognitionException(e)) {
+            if (this.currIdx > iterPos) {
+              throw e;
+            }
+            this.currIdx = iterPos;
+            this.restoreCheckpoint(cstSave);
+            errors.length = iterErrors;
+            break;
+          }
+
+          throw e;
+        }
+
+        if (this.currIdx <= iterPos) {
+          this.currIdx = iterPos;
+          notStuck = false;
+          break;
+        }
+
+        ranAtLeastOnce = true;
+      }
+    }
+
+    if (ranAtLeastOnce && laSet === undefined) {
+      this.lazyBuildProdClosure(
+        laKey,
+        prodOccurrence,
+        MANY_IDX,
+        PROD_TYPE.REPETITION,
+      );
+    }
+
+    if (ranAtLeastOnce) {
+      lookaheadFunc ??= this.makeSpecLookahead(action);
+      this.attemptInRepetitionRecovery(
+        this.manyInternal,
+        [prodOccurrence, actionORMethodDef],
+        lookaheadFunc,
+        MANY_IDX,
+        prodOccurrence,
+        NextTerminalAfterManyWalker,
+        notStuck,
+      );
+    }
+  }
+
+  protected override manySep(
+    _idx: number,
+    options: ManySepMethodOpts<any>,
+  ): void {
+    const idx = this._dslCounter++;
+    this.manySepFirstInternal(idx, options);
+  }
+
+  override manySepFirstInternal<OUT>(
+    prodOccurrence: number,
+    options: ManySepMethodOpts<OUT>,
+  ): void {
+    this.manySepFirstInternalLogic(prodOccurrence, options);
+  }
+
+  override manySepFirstInternalLogic<OUT>(
+    prodOccurrence: number,
+    options: ManySepMethodOpts<OUT>,
+  ): void {
+    const action = options.DEF;
+    const separator = options.SEP;
+    const errors = this._errors;
+    const tokenMatcher = this.tokenMatcher;
+
+    const savedRepDslCounter = this._dslCounter;
+
+    const firstLexPos = this.exportLexerState();
+    const firstErrors = errors.length;
+    const firstCstSave = this.saveCheckpoint();
+    try {
+      action.call(this);
+    } catch (e) {
+      if (e === SPEC_FAIL || isRecognitionException(e)) {
+        this.restoreCheckpoint(firstCstSave);
+        this.importLexerState(firstLexPos);
+        errors.length = firstErrors;
+        return;
+      }
+      throw e;
+    }
+    if (this.exportLexerState() <= firstLexPos) {
+      this.restoreCheckpoint(firstCstSave);
+      this.importLexerState(firstLexPos);
+      errors.length = firstErrors;
+      return;
+    }
+
+    const separatorLookAheadFunc = () =>
+      tokenMatcher(this.LA_FAST(1), separator);
+    while (tokenMatcher(this.LA_FAST(1), separator) === true) {
+      this.CONSUME(separator);
+      this._dslCounter = savedRepDslCounter;
+      action.call(this);
+    }
+
+    this.attemptInRepetitionRecovery(
+      this.repetitionSepSecondInternal,
+      [
+        prodOccurrence,
+        separator,
+        separatorLookAheadFunc,
+        action,
+        NextTerminalAfterManySepWalker,
+      ],
+      separatorLookAheadFunc,
+      MANY_SEP_IDX,
+      prodOccurrence,
+      NextTerminalAfterManySepWalker,
+    );
+  }
+
+  override atLeastOne(
+    _idx: number,
+    actionORMethodDef: GrammarAction<any> | DSLMethodOptsWithErr<any>,
+  ): void {
+    const idx = this._dslCounter++;
+    this.atLeastOneInternal(idx, actionORMethodDef);
+  }
+
+  override atLeastOneInternal<OUT>(
+    prodOccurrence: number,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    return this.atLeastOneInternalLogic(prodOccurrence, actionORMethodDef);
+  }
+
+  override atLeastOneInternalLogic<OUT>(
+    prodOccurrence: number,
+    actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
+  ): void {
+    let action: GrammarAction<OUT>;
+    let gate: (() => boolean) | undefined;
+    let errMsg: string | undefined;
+    if (typeof actionORMethodDef !== "function") {
+      action = actionORMethodDef.DEF;
+      gate = actionORMethodDef.GATE;
+      errMsg = actionORMethodDef.ERR_MSG;
+    } else {
+      action = actionORMethodDef;
+      gate = undefined;
+      errMsg = undefined;
+    }
+
+    const errors = this._errors;
+
+    if (this.IS_SPECULATING) {
+      if (this.exportLexerState() === this._orAltStartLexPos) {
+        this._orAltHasAnyPrefix = true;
+        if (gate !== undefined) {
+          this._orAltHasGatedPrefix = true;
+        }
+      }
+    }
+    if (gate !== undefined && !gate.call(this)) {
+      throw this.raiseEarlyExitException(
+        prodOccurrence,
+        PROD_TYPE.REPETITION_MANDATORY,
+        errMsg,
+      );
+    }
+
+    const savedRepDslCounter = this._dslCounter;
+    const lookaheadFunc = this.makeSpecLookahead(action);
+    if (!lookaheadFunc()) {
+      throw this.raiseEarlyExitException(
+        prodOccurrence,
+        PROD_TYPE.REPETITION_MANDATORY,
+        errMsg,
+      );
+    }
+
+    {
+      this._dslCounter = savedRepDslCounter;
+      const firstLexPos = this.exportLexerState();
+      const firstErrors = errors.length;
+      const firstCstSave = this.saveCheckpoint();
+      try {
+        action.call(this);
+      } catch (e) {
+        if (e === SPEC_FAIL || isRecognitionException(e)) {
+          this.restoreCheckpoint(firstCstSave);
+          this.importLexerState(firstLexPos);
+          errors.length = firstErrors;
+          throw this.raiseEarlyExitException(
+            prodOccurrence,
+            PROD_TYPE.REPETITION_MANDATORY,
+            errMsg,
+          );
+        }
+        throw e;
+      }
+    }
+
+    while (lookaheadFunc()) {
+      if (gate !== undefined && !gate.call(this)) break;
+      this._dslCounter = savedRepDslCounter;
+      const iterLexPos = this.exportLexerState();
+      const iterErrors = errors.length;
+      const cstSave = this.saveCheckpoint();
+      try {
+        action.call(this);
+      } catch (e) {
+        if (e === SPEC_FAIL || isRecognitionException(e)) {
+          this.restoreCheckpoint(cstSave);
+          this.importLexerState(iterLexPos);
+          errors.length = iterErrors;
+          break;
+        }
+        throw e;
+      }
+      if (this.exportLexerState() <= iterLexPos) {
+        this.restoreCheckpoint(cstSave);
+        this.importLexerState(iterLexPos);
+        errors.length = iterErrors;
+        break;
+      }
+    }
+    this.attemptInRepetitionRecovery(
+      this.atLeastOneInternal,
+      [prodOccurrence, actionORMethodDef],
+      lookaheadFunc,
+      AT_LEAST_ONE_IDX,
+      prodOccurrence,
+      NextTerminalAfterAtLeastOneWalker,
+    );
+  }
+
+  protected override atLeastOneSep(
+    _idx: number,
+    options: AtLeastOneSepMethodOpts<any>,
+  ): void {
+    const idx = this._dslCounter++;
+    this.atLeastOneSepFirstInternal(idx, options);
+  }
+
+  override atLeastOneSepFirstInternal<OUT>(
+    prodOccurrence: number,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    this.atLeastOneSepFirstInternalLogic(prodOccurrence, options);
+  }
+
+  override atLeastOneSepFirstInternalLogic<OUT>(
+    prodOccurrence: number,
+    options: AtLeastOneSepMethodOpts<OUT>,
+  ): void {
+    const action = options.DEF;
+    const separator = options.SEP;
+    const errors = this._errors;
+    const tokenMatcher = this.tokenMatcher;
+
+    const savedRepDslCounter = this._dslCounter;
+
+    {
+      this._dslCounter = savedRepDslCounter;
+      const firstLexPos = this.exportLexerState();
+      const firstErrors = errors.length;
+      const firstCstSave = this.saveCheckpoint();
+      try {
+        action.call(this);
+      } catch (e) {
+        if (e === SPEC_FAIL || isRecognitionException(e)) {
+          this.restoreCheckpoint(firstCstSave);
+          this.importLexerState(firstLexPos);
+          errors.length = firstErrors;
+          throw this.raiseEarlyExitException(
+            prodOccurrence,
+            PROD_TYPE.REPETITION_MANDATORY_WITH_SEPARATOR,
+            options.ERR_MSG,
+          );
+        }
+        throw e;
+      }
+    }
+
+    const separatorLookAheadFunc = () =>
+      tokenMatcher(this.LA_FAST(1), separator);
+    while (tokenMatcher(this.LA_FAST(1), separator) === true) {
+      this.CONSUME(separator);
+      this._dslCounter = savedRepDslCounter;
+      action.call(this);
+    }
+
+    this.attemptInRepetitionRecovery(
+      this.repetitionSepSecondInternal,
+      [
+        prodOccurrence,
+        separator,
+        separatorLookAheadFunc,
+        action,
+        NextTerminalAfterAtLeastOneSepWalker,
+      ],
+      separatorLookAheadFunc,
+      AT_LEAST_ONE_SEP_IDX,
+      prodOccurrence,
+      NextTerminalAfterAtLeastOneSepWalker,
+    );
+  }
+}
+
+export class SmartParser extends ForgivingParser {}
+
+export const SimpleParser = SmartParser;

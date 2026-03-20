@@ -4,7 +4,7 @@
  * and must receive unique occurrence IDs via the auto-counter.
  */
 import { expect } from "chai";
-import { EmbeddedActionsParser } from "../../src/parse/parser/traits/parser_traits.js";
+import { SmartParser } from "../../src/parse/parser/parser.js";
 import { createToken } from "../../src/scan/tokens_public.js";
 import { Lexer } from "../../src/scan/lexer_public.js";
 
@@ -17,7 +17,7 @@ const E = createToken({ name: "E", pattern: /e/ });
 const allTokens = [A, B, C, D, E];
 const lexer = new Lexer(allTokens);
 
-class MultipleOrParser extends EmbeddedActionsParser {
+class MultipleOrParser extends SmartParser {
   constructor() {
     super(allTokens);
     this.performSelfAnalysis();
@@ -62,7 +62,7 @@ class MultipleOrParser extends EmbeddedActionsParser {
   });
 }
 
-describe("Multiple OR calls in the same rule", () => {
+describe("SmartParser multiple OR calls in the same rule", () => {
   let parser: MultipleOrParser;
 
   before(() => {

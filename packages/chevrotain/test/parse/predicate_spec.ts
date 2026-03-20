@@ -1,4 +1,5 @@
 import { EmbeddedActionsParser } from "../../src/parse/parser/traits/parser_traits.js";
+import { SmartParser } from "../../src/parse/parser/parser.js";
 import {
   EarlyExitException,
   NoViableAltException,
@@ -444,6 +445,90 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
   });
 
   describe("OR GATE must be checked even after fast-dispatch cache is populated", () => {
+    it("restores the self-analysis lookahead baseline when parser.input is replaced", () => {
+      class ReuseCacheParser extends EmbeddedActionsParser {
+        constructor() {
+          super(ALL_TOKENS, { skipValidations: true });
+          this.performSelfAnalysis();
+        }
+
+        public staticRule = this.RULE("staticRule", () => {
+          return this.OR([
+            {
+              ALT: () => {
+                this.CONSUME1(A);
+                return "A";
+              },
+            },
+            {
+              ALT: () => {
+                this.CONSUME1(B);
+                return "B";
+              },
+            },
+          ]);
+        });
+      }
+
+      function snapshotLookaheadCaches(parser: any) {
+        return {
+          fastMaps: JSON.parse(JSON.stringify(parser._orFastMaps ?? [])),
+          gatedPrefixAlts: JSON.parse(
+            JSON.stringify(parser._orGatedPrefixAlts ?? []),
+          ),
+          committable: JSON.parse(JSON.stringify(parser._orCommittable ?? [])),
+          fastMapAltsRefKeys: Object.keys(parser._orFastMapAltsRef ?? {}),
+          orLookaheadKeys: Object.keys(parser._orLookahead ?? {}).filter(
+            (key) => parser._orLookahead[key] !== undefined,
+          ),
+          orLookaheadLL1Keys: Object.keys(parser._orLookaheadLL1 ?? {}).filter(
+            (key) => parser._orLookaheadLL1[key] !== undefined,
+          ),
+          prodLookaheadKeys: Object.keys(parser._prodLookahead ?? {}).filter(
+            (key) => parser._prodLookahead[key] !== undefined,
+          ),
+        };
+      }
+
+      const parser = new ReuseCacheParser();
+
+      parser.input = [createRegularToken(A)];
+      expect(parser.staticRule()).to.equal("A");
+      expect(parser.errors).to.be.empty;
+
+      const baseline = snapshotLookaheadCaches(parser);
+
+      const runtimeCacheState = parser as any;
+      runtimeCacheState._orFastMaps[999] = Object.assign(Object.create(null), {
+        [(A as any).tokenTypeIdx]: 0,
+      });
+      runtimeCacheState._orFastMapAltsRef[999] = [
+        {
+          ALT: () => "mutated",
+        },
+      ];
+      runtimeCacheState._orGatedPrefixAlts[999] = [0];
+      runtimeCacheState._orCommittable[999] = Object.assign(
+        Object.create(null),
+        {
+          [(A as any).tokenTypeIdx]: true,
+        },
+      );
+      runtimeCacheState._orLookahead[999] = () => 0;
+      runtimeCacheState._orLookaheadLL1[999] = () => 0;
+      runtimeCacheState._prodLookahead[999] = () => true;
+      runtimeCacheState._runtimeLookaheadCachesDirty = true;
+
+      parser.input = [createRegularToken(B)];
+      expect(snapshotLookaheadCaches(parser)).to.deep.equal(
+        baseline,
+        "replacing parser.input should restore the performSelfAnalysis cache baseline",
+      );
+
+      expect(parser.staticRule()).to.equal("B");
+      expect(parser.errors).to.be.empty;
+    });
+
     it("gated alt takes priority when gate passes, even after gate-free alt was cached", () => {
       // Scenario:
       // - Alt 0: GATED (gate = () => this.useGatedAlt), consumes token A → returns "gated"
@@ -1122,179 +1207,6 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
     });
   });
 
-  describe("Auto-occurrence: multiple ORs in the same rule without numbered variants", () => {
-    it("two ORs with occurrence=0 should not collide in fast-dispatch maps", () => {
-      const TokenA = createToken({ name: "TokenA" });
-      const TokenB = createToken({ name: "TokenB" });
-      const TokenC = createToken({ name: "TokenC" });
-      const TokenD = createToken({ name: "TokenD" });
-      const allTokens = [TokenA, TokenB, TokenC, TokenD];
-      augmentTokenTypes(allTokens);
-
-      class TwoOrParser extends EmbeddedActionsParser {
-        constructor() {
-          super(allTokens, {});
-          this.performSelfAnalysis();
-        }
-
-        public testRule = this.RULE("testRule", () => {
-          // Two $.OR calls in the same rule — NO numbered variants.
-          // Without auto-occurrence, both get mapKey = currRuleShortName | 0,
-          // causing fast-dispatch cache collision.
-          const first = this.OR([
-            {
-              ALT: () => {
-                this.CONSUME(TokenA);
-                return "A";
-              },
-            },
-            {
-              ALT: () => {
-                this.CONSUME(TokenB);
-                return "B";
-              },
-            },
-          ]);
-          const second = this.OR([
-            {
-              ALT: () => {
-                this.CONSUME(TokenC);
-                return "C";
-              },
-            },
-            {
-              ALT: () => {
-                this.CONSUME(TokenD);
-                return "D";
-              },
-            },
-          ]);
-          return [first, second];
-        });
-      }
-
-      const parser = new TwoOrParser();
-
-      // Parse 1: A C — should succeed
-      parser.input = [createRegularToken(TokenA), createRegularToken(TokenC)];
-      let result = parser.testRule();
-      expect(parser.errors).to.be.empty;
-      expect(result).to.deep.equal(["A", "C"]);
-
-      // Parse 2: B D — should also succeed
-      parser.input = [createRegularToken(TokenB), createRegularToken(TokenD)];
-      result = parser.testRule();
-      expect(parser.errors).to.be.empty;
-      expect(result).to.deep.equal(["B", "D"]);
-
-      // Parse 3: A D — mixed, should succeed
-      parser.input = [createRegularToken(TokenA), createRegularToken(TokenD)];
-      result = parser.testRule();
-      expect(parser.errors).to.be.empty;
-      expect(result).to.deep.equal(["A", "D"]);
-
-      // Parse 4: B C — mixed, should succeed
-      parser.input = [createRegularToken(TokenB), createRegularToken(TokenC)];
-      result = parser.testRule();
-      expect(parser.errors).to.be.empty;
-      expect(result).to.deep.equal(["B", "C"]);
-
-      // Verify fast-dispatch maps have TWO distinct mapKeys (one per OR)
-      const fastMaps = (parser as any)._orFastMaps ?? {};
-      const mapKeys = Object.keys(fastMaps);
-      expect(mapKeys.length).to.equal(
-        2,
-        "two ORs should have two distinct map keys",
-      );
-    });
-
-    it("multiple CONSUMEs without numbered variants work correctly", () => {
-      const TokenA = createToken({ name: "TokenA" });
-      const TokenB = createToken({ name: "TokenB" });
-      const allTokens = [TokenA, TokenB];
-      augmentTokenTypes(allTokens);
-
-      class MultiConsumeParser extends EmbeddedActionsParser {
-        constructor() {
-          super(allTokens, {});
-          this.performSelfAnalysis();
-        }
-
-        public testRule = this.RULE("testRule", () => {
-          // Two $.CONSUME calls without numbered variants
-          const first = this.CONSUME(TokenA);
-          const second = this.CONSUME(TokenB);
-          return [first.image, second.image];
-        });
-      }
-
-      const parser = new MultiConsumeParser();
-      parser.input = [
-        createRegularToken(TokenA, "a"),
-        createRegularToken(TokenB, "b"),
-      ];
-      const result = parser.testRule();
-      expect(parser.errors).to.be.empty;
-      expect(result).to.deep.equal(["a", "b"]);
-    });
-  });
-
-  describe("Ambiguous alternatives should not crash performSelfAnalysis", () => {
-    it("ambiguous LL(1) alternatives parse correctly (speculative engine resolves them)", () => {
-      // Two alternatives start with the same token (Ident). This is an
-      // LL(1) ambiguity. Our speculative engine handles it at runtime by
-      // trying alternatives in declaration order. performSelfAnalysis
-      // should NOT throw — ambiguity is a non-fatal condition.
-      const Ident = createToken({ name: "Ident" });
-      const LParen = createToken({ name: "LParen" });
-      const allTokens = [Ident, LParen];
-      augmentTokenTypes(allTokens);
-
-      // Construction must not throw despite the ambiguity
-      expect(() => {
-        class AmbiguousParser extends EmbeddedActionsParser {
-          constructor() {
-            super(allTokens, {});
-            this.performSelfAnalysis();
-          }
-
-          public testRule = this.RULE("testRule", () => {
-            return this.OR([
-              {
-                ALT: () => {
-                  const id = this.CONSUME(Ident);
-                  this.CONSUME(LParen);
-                  return "call:" + id.image;
-                },
-              },
-              {
-                ALT: () => {
-                  const id = this.CONSUME(Ident);
-                  return "ref:" + id.image;
-                },
-              },
-            ]);
-          });
-        }
-
-        const parser = new AmbiguousParser();
-
-        // Parsing should work correctly — alt 0 wins (tried first)
-        parser.input = [
-          createRegularToken(Ident, "foo"),
-          createRegularToken(LParen, "("),
-        ];
-        expect(parser.testRule()).to.equal("call:foo");
-        expect(parser.errors).to.be.empty;
-
-        // When only Ident is present, alt 0 fails (no LParen), alt 1 wins
-        parser.input = [createRegularToken(Ident, "bar")];
-        expect(parser.testRule()).to.equal("ref:bar");
-        expect(parser.errors).to.be.empty;
-      }).to.not.throw();
-    });
-  });
-
   describe("Deep backtracking: MANY unwinds failed iterations (CSS nesting pattern)", () => {
     // This replicates the CSS nesting ambiguity:
     //   .parent { a:hover { color: red; } }
@@ -1311,7 +1223,7 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
     const allTokens = [Ident, Colon, Semi, LCurly, RCurly];
     augmentTokenTypes(allTokens);
 
-    class CssNestingParser extends EmbeddedActionsParser {
+    class CssNestingParser extends SmartParser {
       constructor() {
         super(allTokens, {});
         this.performSelfAnalysis();

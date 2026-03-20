@@ -973,15 +973,12 @@ describe("lookahead Regular Tokens Mode", () => {
         }
       }
 
-      // Ambiguity is non-fatal — our speculative engine resolves it at runtime.
-      // The parser should construct without throwing.
-      const parser = new OrAmbiguityLookAheadParser();
-      // But the ambiguity should be recorded in definitionErrors.
-      expect(
-        (parser as any).definitionErrors.some((e: any) =>
-          e.message?.includes("Ambiguous"),
-        ),
-      ).to.be.true;
+      expect(() => new OrAmbiguityLookAheadParser()).to.throw(
+        "Ambiguous Alternatives Detected",
+      );
+      expect(() => new OrAmbiguityLookAheadParser()).to.throw(
+        "<OneTok> may appears as a prefix path",
+      );
     });
 
     it("will throw an error when two alternatives have the same multi token (lookahead > 1) prefix", () => {
@@ -1022,13 +1019,12 @@ describe("lookahead Regular Tokens Mode", () => {
           ]);
         }
       }
-      // Ambiguity is non-fatal with the speculative engine.
-      const parser = new OrAmbiguityMultiTokenLookAheadParser();
-      expect(
-        (parser as any).definitionErrors.some((e: any) =>
-          e.message?.includes("Ambiguous"),
-        ),
-      ).to.be.true;
+      expect(() => new OrAmbiguityMultiTokenLookAheadParser()).to.throw(
+        "Ambiguous Alternatives Detected",
+      );
+      expect(() => new OrAmbiguityMultiTokenLookAheadParser()).to.throw(
+        "<TwoTok, ThreeTok, FourTok> may appears as a prefix path",
+      );
     });
   });
 
@@ -1624,11 +1620,12 @@ describe("lookahead Regular Tokens Mode", () => {
         createRegularToken(TwoTok),
       ]);
       const parseResult = parser.rule();
-      // The speculative engine correctly avoids the wrong OPTION path regardless
-      // of MAX_LOOKAHEAD — it tries the body speculatively, sees ThreeTok is
-      // missing, and skips the OPTION. No error; input consumed by CONSUME2 calls.
-      expect(parseResult).to.equal("OPTION Not Taken");
-      expect(parser.errors.length).to.eql(0);
+      expect(parseResult).to.be.undefined;
+      expect(parser.errors.length).to.eql(1);
+      // wrong path chosen due to low explicit lookahead
+      expect(parser.errors[0].message).to.include(
+        "Expecting token of type --> ThreeTok <--",
+      );
     });
 
     it("MANY", () => {

@@ -1,7 +1,4 @@
-import {
-  CstParser,
-  EmbeddedActionsParser,
-} from "../../../src/parse/parser/traits/parser_traits.js";
+import { EmbeddedActionsParser } from "../../../src/parse/parser/traits/parser_traits.js";
 import {
   EMPTY_ALT,
   END_OF_FILE,
@@ -584,13 +581,15 @@ describe("The duplicate occurrence validations full flow", () => {
       });
     }
 
-    // With auto-occurrence counting, each SUBRULE call gets a unique idx
-    // automatically, so "duplicate" calls using the same numbered variant
-    // (e.g., SUBRULE1 twice) no longer produce definition errors.
-    expect(() => new ErroneousOccurrenceNumUsageParser1()).to.not.throw();
+    expect(() => new ErroneousOccurrenceNumUsageParser1()).to.throw(
+      "->SUBRULE1<- with argument: ->anotherRule<-",
+    );
+    expect(() => new ErroneousOccurrenceNumUsageParser1()).to.throw(
+      "appears more than once (2 times) in the top level rule: ->duplicateRef<-",
+    );
   });
 
-  it("will not throw errors on duplicate Subrules references because auto-counting assigns unique indices", () => {
+  it("will throw errors on duplicate Subrules references in the same top level rule", () => {
     class ErroneousOccurrenceNumUsageParser2 extends EmbeddedActionsParser {
       constructor(input: IToken[] = []) {
         super([PlusTok]);
@@ -604,12 +603,15 @@ describe("The duplicate occurrence validations full flow", () => {
       });
     }
 
-    // Auto-counting gives each CONSUME a unique idx regardless of the variant
-    // suffix, so no duplicate-occurrence error is raised.
-    expect(() => new ErroneousOccurrenceNumUsageParser2()).to.not.throw();
+    expect(() => new ErroneousOccurrenceNumUsageParser2()).to.throw("CONSUME");
+    expect(() => new ErroneousOccurrenceNumUsageParser2()).to.throw("3");
+    expect(() => new ErroneousOccurrenceNumUsageParser2()).to.throw("PlusTok");
+    expect(() => new ErroneousOccurrenceNumUsageParser2()).to.throw(
+      "duplicateTerminal",
+    );
   });
 
-  it("will not throw errors on duplicate MANY productions because auto-counting assigns unique indices", () => {
+  it("will throw errors on duplicate MANY productions in the same top level rule", () => {
     class ErroneousOccurrenceNumUsageParser3 extends EmbeddedActionsParser {
       constructor(input: IToken[] = []) {
         super([PlusTok, MinusTok]);
@@ -627,8 +629,13 @@ describe("The duplicate occurrence validations full flow", () => {
       });
     }
 
-    // Auto-counting gives each MANY a unique idx, so no duplicate error.
-    expect(() => new ErroneousOccurrenceNumUsageParser3()).to.not.throw();
+    expect(() => new ErroneousOccurrenceNumUsageParser3()).to.throw("->MANY<-");
+    expect(() => new ErroneousOccurrenceNumUsageParser3()).to.throw(
+      "appears more than once (2 times) in the top level rule: ->duplicateMany<-",
+    );
+    expect(() => new ErroneousOccurrenceNumUsageParser3()).to.throw(
+      "https://chevrotain.io/docs/FAQ.html#NUMERICAL_SUFFIXES",
+    );
   });
 
   it("won't detect issues in a Parser using Tokens created by extendToken(...) utility (anonymous)", () => {
@@ -757,9 +764,7 @@ describe("The Recorder runtime checks full flow", () => {
       });
     }
 
-    // With auto-counting, the idx suffix reflects the auto-assigned
-    // occurrence (0 → "CONSUME" without a number suffix).
-    expect(() => new InvalidTokTypeParser()).to.throw("<CONSUME>");
+    expect(() => new InvalidTokTypeParser()).to.throw("<CONSUME3>");
     expect(() => new InvalidTokTypeParser()).to.throw("argument is invalid");
     expect(() => new InvalidTokTypeParser()).to.throw("but got: <null>");
     expect(() => new InvalidTokTypeParser()).to.throw(
@@ -768,7 +773,7 @@ describe("The Recorder runtime checks full flow", () => {
   });
 
   context(
-    "lowercase methods with user-provided idx — auto-counting ignores the idx parameter",
+    "will throw an error when trying to init a parser with an invalid method idx",
     () => {
       it("consume", () => {
         class InvalidIdxParser extends EmbeddedActionsParser {
@@ -783,14 +788,17 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        // With auto-counting, the user-provided idx is ignored and
-        // _dslCounter++ provides a valid occurrence index.
-        expect(() => new InvalidIdxParser()).to.not.throw();
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Invalid DSL Method idx value: <256>",
+        );
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Idx value must be a none negative value smaller than 128",
+        );
       });
 
       it("subrule", () => {
         const ATok = createToken({ name: "A" });
-        class InvalidIdxParser extends CstParser {
+        class InvalidIdxParser extends EmbeddedActionsParser {
           constructor(input: IToken[] = []) {
             super([myToken, myOtherToken]);
             this.performSelfAnalysis();
@@ -806,7 +814,12 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        expect(() => new InvalidIdxParser()).to.not.throw();
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Invalid DSL Method idx value: <-1>",
+        );
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Idx value must be a none negative value smaller than 128",
+        );
       });
 
       it("option", () => {
@@ -824,7 +837,12 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        expect(() => new InvalidIdxParser()).to.not.throw();
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Invalid DSL Method idx value: <666>",
+        );
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Idx value must be a none negative value smaller than 128",
+        );
       });
 
       it("many", () => {
@@ -842,7 +860,12 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        expect(() => new InvalidIdxParser()).to.not.throw();
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Invalid DSL Method idx value: <-333>",
+        );
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Idx value must be a none negative value smaller than 128",
+        );
       });
 
       it("atLeastOne", () => {
@@ -860,7 +883,12 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        expect(() => new InvalidIdxParser()).to.not.throw();
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Invalid DSL Method idx value: <1999>",
+        );
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Idx value must be a none negative value smaller than 128",
+        );
       });
 
       it("or", () => {
@@ -882,7 +910,12 @@ describe("The Recorder runtime checks full flow", () => {
           });
         }
 
-        expect(() => new InvalidIdxParser()).to.not.throw();
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Invalid DSL Method idx value: <543>",
+        );
+        expect(() => new InvalidIdxParser()).to.throw(
+          "Idx value must be a none negative value smaller than 128",
+        );
       });
     },
   );
@@ -1199,18 +1232,14 @@ describe("The empty alternative detection full flow", () => {
         ]);
       });
     }
-    const parser = new AltAmbiguityParserImplicitOccurence();
-    expect(
-      (parser as any).definitionErrors.some(
-        (e: any) =>
-          e.message?.includes("Ambiguous Alternatives Detected") &&
-          e.message?.includes("1") &&
-          e.message?.includes("2") &&
-          e.message?.includes(
-            "<PlusTok, StarTok> may appears as a prefix path",
-          ),
-      ),
-    ).to.be.true;
+    expect(() => new AltAmbiguityParserImplicitOccurence()).to.throw(
+      "Ambiguous Alternatives Detected",
+    );
+    expect(() => new AltAmbiguityParserImplicitOccurence()).to.throw("1");
+    expect(() => new AltAmbiguityParserImplicitOccurence()).to.throw("2");
+    expect(() => new AltAmbiguityParserImplicitOccurence()).to.throw(
+      "<PlusTok, StarTok> may appears as a prefix path",
+    );
   });
 
   it("will detect alternative ambiguity with identical empty lookaheads", () => {
@@ -1276,16 +1305,14 @@ describe("The empty alternative detection full flow", () => {
         },
       );
     }
-    const parser = new AltAmbiguityParserImplicitOccurrence();
-    expect(
-      (parser as any).definitionErrors.some(
-        (e: any) =>
-          e.message?.includes("Ambiguous Alternatives Detected") &&
-          e.message?.includes("1") &&
-          e.message?.includes("2") &&
-          e.message?.includes("<PlusTok> may appears as a prefix path"),
-      ),
-    ).to.be.true;
+    expect(() => new AltAmbiguityParserImplicitOccurrence()).to.throw(
+      "Ambiguous Alternatives Detected",
+    );
+    expect(() => new AltAmbiguityParserImplicitOccurrence()).to.throw("1");
+    expect(() => new AltAmbiguityParserImplicitOccurrence()).to.throw("2");
+    expect(() => new AltAmbiguityParserImplicitOccurrence()).to.throw(
+      "<PlusTok> may appears as a prefix path",
+    );
   });
 
   context("IGNORE_AMBIGUITIES flag", () => {
@@ -1402,7 +1429,7 @@ describe("The prefix ambiguity detection full flow", () => {
 
     class PrefixAltAmbiguity extends EmbeddedActionsParser {
       constructor(input: IToken[] = []) {
-        super([A, B, C], { recoveryEnabled: true });
+        super([A, B, C]);
         this.performSelfAnalysis();
         this.input = input;
       }
@@ -1425,21 +1452,15 @@ describe("The prefix ambiguity detection full flow", () => {
         ]);
       });
     }
-    // With auto-counting, OR3 gets auto-assigned idx=0, so the error
-    // message references <OR> (no number suffix for idx 0).
-    const parser = new PrefixAltAmbiguity();
-    expect(
-      (parser as any).definitionErrors.some(
-        (e: any) =>
-          e.message?.includes("<OR>") &&
-          e.message?.includes("Ambiguous alternatives") &&
-          e.message?.includes("due to common lookahead prefix") &&
-          e.message?.includes("<B, A>") &&
-          e.message?.includes(
-            "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#COMMON_PREFIX",
-          ),
-      ),
-    ).to.be.true;
+    expect(() => new PrefixAltAmbiguity()).to.throw("OR3");
+    expect(() => new PrefixAltAmbiguity()).to.throw("Ambiguous alternatives");
+    expect(() => new PrefixAltAmbiguity()).to.throw(
+      "due to common lookahead prefix",
+    );
+    expect(() => new PrefixAltAmbiguity()).to.throw("<B, A>");
+    expect(() => new PrefixAltAmbiguity()).to.throw(
+      "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#COMMON_PREFIX",
+    );
   });
 
   it("will throw an error when an an alts ambiguity is detected", () => {
@@ -1453,7 +1474,6 @@ describe("The prefix ambiguity detection full flow", () => {
       constructor() {
         super(ALL_TOKENS, {
           maxLookahead: 4,
-          recoveryEnabled: true,
         });
         this.performSelfAnalysis();
       }
@@ -1479,18 +1499,18 @@ describe("The prefix ambiguity detection full flow", () => {
         this.CONSUME(TwoTok);
       });
     }
-    const parser = new AlternativesAmbiguityParser();
-    expect(
-      (parser as any).definitionErrors.some(
-        (e: any) =>
-          e.message?.includes("Ambiguous Alternatives Detected: <1 ,2>") &&
-          e.message?.includes("in <OR> inside <main> Rule") &&
-          e.message?.includes("Comma, Comma, Comma, Comma") &&
-          e.message?.includes(
-            "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#AMBIGUOUS_ALTERNATIVES",
-          ),
-      ),
-    ).to.be.true;
+    expect(() => new AlternativesAmbiguityParser()).to.throw(
+      "Ambiguous Alternatives Detected: <1 ,2>",
+    );
+    expect(() => new AlternativesAmbiguityParser()).to.throw(
+      "in <OR> inside <main> Rule",
+    );
+    expect(() => new AlternativesAmbiguityParser()).to.throw(
+      "Comma, Comma, Comma, Comma",
+    );
+    expect(() => new AlternativesAmbiguityParser()).to.throw(
+      "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#AMBIGUOUS_ALTERNATIVES",
+    );
   });
 
   it("will throw an error when an an alts ambiguity is detected - Categories", () => {
@@ -1505,7 +1525,6 @@ describe("The prefix ambiguity detection full flow", () => {
       constructor() {
         super(ALL_TOKENS, {
           maxLookahead: 4,
-          recoveryEnabled: true,
         });
         this.performSelfAnalysis();
       }
@@ -1531,18 +1550,16 @@ describe("The prefix ambiguity detection full flow", () => {
         this.CONSUME(B);
       });
     }
-    const parser = new AlternativesAmbiguityParser();
-    expect(
-      (parser as any).definitionErrors.some(
-        (e: any) =>
-          e.message?.includes("Ambiguous Alternatives Detected: <1 ,2>") &&
-          e.message?.includes("in <OR> inside <main> Rule") &&
-          e.message?.includes("D, D, D, D") &&
-          e.message?.includes(
-            "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#AMBIGUOUS_ALTERNATIVES",
-          ),
-      ),
-    ).to.be.true;
+    expect(() => new AlternativesAmbiguityParser()).to.throw(
+      "Ambiguous Alternatives Detected: <1 ,2>",
+    );
+    expect(() => new AlternativesAmbiguityParser()).to.throw(
+      "in <OR> inside <main> Rule",
+    );
+    expect(() => new AlternativesAmbiguityParser()).to.throw("D, D, D, D");
+    expect(() => new AlternativesAmbiguityParser()).to.throw(
+      "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#AMBIGUOUS_ALTERNATIVES",
+    );
   });
 
   // TODO: detect these ambiguity with categories
@@ -1572,19 +1589,15 @@ describe("The prefix ambiguity detection full flow", () => {
         ]);
       });
     }
-    const parser = new PrefixAltAmbiguity2();
-    expect(
-      (parser as any).definitionErrors.some(
-        (e: any) =>
-          e.message?.includes("OR") &&
-          e.message?.includes("Ambiguous alternatives") &&
-          e.message?.includes("due to common lookahead prefix") &&
-          e.message?.includes("<PlusTok, MinusTok>") &&
-          e.message?.includes(
-            "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#COMMON_PREFIX",
-          ),
-      ),
-    ).to.be.true;
+    expect(() => new PrefixAltAmbiguity2()).to.throw("OR");
+    expect(() => new PrefixAltAmbiguity2()).to.throw("Ambiguous alternatives");
+    expect(() => new PrefixAltAmbiguity2()).to.throw(
+      "due to common lookahead prefix",
+    );
+    expect(() => new PrefixAltAmbiguity2()).to.throw("<PlusTok, MinusTok>");
+    expect(() => new PrefixAltAmbiguity2()).to.throw(
+      "https://chevrotain.io/docs/guide/resolving_grammar_errors.html#COMMON_PREFIX",
+    );
   });
 });
 
@@ -1640,7 +1653,7 @@ describe("The no non-empty lookahead validation", () => {
   it("will throw an error when there are no non-empty lookaheads for AT_LEAST_ONE_SEP", () => {
     class EmptyLookaheadParserAtLeastOneSep extends EmbeddedActionsParser {
       constructor(input: IToken[] = []) {
-        super([PlusTok], { recoveryEnabled: true });
+        super([PlusTok]);
         this.performSelfAnalysis();
         this.input = input;
       }
@@ -1652,10 +1665,8 @@ describe("The no non-empty lookahead validation", () => {
         }),
       );
     }
-    // With auto-counting, AT_LEAST_ONE_SEP5 gets auto-assigned idx=0,
-    // so the error message says <AT_LEAST_ONE_SEP> (no number suffix).
     expect(() => new EmptyLookaheadParserAtLeastOneSep()).to.throw(
-      "The repetition <AT_LEAST_ONE_SEP>",
+      "The repetition <AT_LEAST_ONE_SEP5>",
     );
     expect(() => new EmptyLookaheadParserAtLeastOneSep()).to.throw(
       "within Rule <someRule>",
@@ -1665,16 +1676,15 @@ describe("The no non-empty lookahead validation", () => {
   it("will throw an error when there are no non-empty lookaheads for MANY", () => {
     class EmptyLookaheadParserMany extends EmbeddedActionsParser {
       constructor(input: IToken[] = []) {
-        super([PlusTok], { recoveryEnabled: true });
+        super([PlusTok]);
         this.performSelfAnalysis();
         this.input = input;
       }
 
       public someRule = this.RULE("someRule", () => this.MANY2(() => {}));
     }
-    // MANY2 gets auto-assigned idx=0 → <MANY>
     expect(() => new EmptyLookaheadParserMany()).to.throw(
-      "The repetition <MANY>",
+      "The repetition <MANY2>",
     );
     expect(() => new EmptyLookaheadParserMany()).to.throw(
       "<someRule> can never consume any tokens",
@@ -1684,7 +1694,7 @@ describe("The no non-empty lookahead validation", () => {
   it("will throw an error when there are no non-empty lookaheads for MANY_SEP", () => {
     class EmptyLookaheadParserManySep extends EmbeddedActionsParser {
       constructor(input: IToken[] = []) {
-        super([PlusTok], { recoveryEnabled: true });
+        super([PlusTok]);
         this.performSelfAnalysis();
         this.input = input;
       }
@@ -1696,9 +1706,8 @@ describe("The no non-empty lookahead validation", () => {
         }),
       );
     }
-    // MANY_SEP3 gets auto-assigned idx=0 → <MANY_SEP>
     expect(() => new EmptyLookaheadParserManySep()).to.throw(
-      "The repetition <MANY_SEP>",
+      "The repetition <MANY_SEP3>",
     );
     expect(() => new EmptyLookaheadParserManySep()).to.throw(
       "within Rule <someRule>",

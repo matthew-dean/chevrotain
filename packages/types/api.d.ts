@@ -7,7 +7,7 @@ export type ParserMethod<ARGS extends unknown[], R> = (...args: ARGS) => R;
  * This is just a helper to avoid duplications in the Type Definitions
  * Of `CstParser` and `EmbeddedActionsParser`
  */
-declare abstract class BaseParser {
+export declare abstract class BaseParser {
   /**
    * This must be called at the end of a Parser constructor.
    * See: http://chevrotain.io/docs/tutorial/step2_parsing.html#under-the-hood
@@ -1221,6 +1221,11 @@ export declare class EmbeddedActionsParser extends BaseParser {
     options?: SubruleMethodOpts<unknown[]>,
   ): R;
 }
+
+export declare class StrictParser extends BaseParser {}
+export declare class ForgivingParser extends BaseParser {}
+export declare class SmartParser extends ForgivingParser {}
+export { SmartParser as SimpleParser };
 
 export interface ILexerDefinitionError {
   message: string;

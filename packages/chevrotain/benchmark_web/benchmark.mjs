@@ -36,7 +36,7 @@ const selectedParser = getArg("--parser", "all");
 const useCst = args.includes("--cst");
 const quiet = args.includes("--quiet");
 // --no-psa: construct parsers WITHOUT calling performSelfAnalysis().
-// Our fork supports this (lazy-build path). v12 requires performSelfAnalysis().
+// Local no-PSA runs use SmartParser. v12 requires performSelfAnalysis().
 const noPsa = args.includes("--no-psa");
 const ITERATIONS = parseInt(getArg("--iterations", "5000"), 10);
 const WARMUP = Math.max(100, Math.floor(ITERATIONS * 0.1));
@@ -50,8 +50,13 @@ const libUrl =
     : pathToFileURL(path.resolve(process.cwd(), libPath)).href;
 
 const chevrotain = await import(libUrl);
-const { createToken, Lexer, EmbeddedActionsParser, CstParser } = chevrotain;
-const ParserBase = useCst ? CstParser : EmbeddedActionsParser;
+const { createToken, Lexer, EmbeddedActionsParser, CstParser, SmartParser } =
+  chevrotain;
+const ParserBase = useCst
+  ? CstParser
+  : noPsa
+    ? SmartParser
+    : EmbeddedActionsParser;
 const parserConfig = useCst ? {} : { outputCst: false };
 
 // ---------------------------------------------------------------------------
@@ -397,7 +402,7 @@ if (!quiet) {
   console.log(`\nChevrotain parser benchmark`);
   console.log(`  lib:        ${libUrl}`);
   console.log(
-    `  parser type: ${useCst ? "CstParser" : "EmbeddedActionsParser"}`,
+    `  parser type: ${useCst ? "CstParser" : noPsa ? "SmartParser" : "EmbeddedActionsParser"}`,
   );
   console.log(`  mode:       ${mode}`);
   console.log(
@@ -489,11 +494,11 @@ if (mode === "compare") {
     }
   }
 
-  const phases = ["construction", "cold", "first-parse", "warm"];
+  const phases = ["construction", "first-parse", "cold", "warm"];
   const configs = [
     { label: "v12 + psa", args: ["--lib", v12Lib] },
     { label: "ours + psa", args: ["--lib", ourLib] },
-    { label: "ours - psa", args: ["--lib", ourLib, "--no-psa"] },
+    { label: "smart - psa", args: ["--lib", ourLib, "--no-psa"] },
   ];
 
   // Collect results: results[phase][configLabel][parserName] = value
@@ -517,6 +522,12 @@ if (mode === "compare") {
       : isWarm(phase)
         ? `${Math.round(val).toLocaleString().padStart(8)}/s`
         : `${val.toFixed(2).padStart(7)} ms`;
+  const phaseLabels = {
+    construction: "constructor",
+    cold: "construct+parse",
+    "first-parse": "parse-only",
+    warm: "warm-reuse",
+  };
 
   const ratio = (phase, ourVal, v12Val) => {
     if (ourVal == null || v12Val == null) return "";
@@ -542,7 +553,7 @@ if (mode === "compare") {
       ) + "║",
     );
     console.log(
-      `║  Phase          v12 + psa    ours + psa    ours - psa           ║`,
+      `║  Phase          v12 + psa    ours + psa   smart - psa          ║`,
     );
     console.log(
       `║  ─────────────────────────────────────────────────────────────  ║`,
@@ -553,7 +564,7 @@ if (mode === "compare") {
       const nopsaVal = results[phase][configs[2].label]?.[parser];
       const r1 = ratio(phase, psaVal, v12Val);
       const r2 = ratio(phase, nopsaVal, v12Val);
-      const phasePad = phase.padEnd(13);
+      const phasePad = phaseLabels[phase].padEnd(13);
       console.log(
         `║  ${phasePad}  ${fmt(phase, v12Val)}  ${fmt(phase, psaVal)} ${r1.padEnd(6)}  ${fmt(phase, nopsaVal)} ${r2.padEnd(6)}  ║`,
       );
@@ -640,3 +651,9 @@ if (mode === "warm") {
     console.log(JSON.stringify(results));
   }
 }
+const phaseLabels = {
+  construction: "constructor",
+  cold: "construct+parse",
+  "first-parse": "parse-only",
+  warm: "warm-reuse",
+};
