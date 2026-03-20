@@ -116,7 +116,18 @@ exactly. The `Lexer` is improved but its interface is unchanged.
   127 (independent of bit constants). JSON +9% (11,913 → 13,014 ops/sec, 90%
   of v12 14,448). CSS now faster than v12 (2,119 vs 2,025 ops/sec).
 
-### Current profile breakdown (post-compact-key, JSON EmbeddedActionsParser warm)
+### Current benchmark (post all optimizations, node --expose-gc, JSON EmbeddedActionsParser warm)
+
+| Config     | JSON warm | CSS warm | Notes                         |
+| ---------- | --------- | -------- | ----------------------------- |
+| v12 + psa  | ~14,400/s | ~2,100/s | Baseline                      |
+| ours + psa | ~13,800/s | ~2,200/s | **95% JSON, 104% CSS**        |
+| ours - psa | ~12,800/s | ~2,200/s | No performSelfAnalysis needed |
+
+Construction: ours 2-3× faster than v12. Cold parse: ours ~60-80% faster.
+CSS warm: ours beats v12 by ~4%. JSON warm: ~5% gap remaining.
+
+### Profile breakdown (post-compact-key, JSON EmbeddedActionsParser warm)
 
 | Symbol                 | Ours  | v12   | Notes                                    |
 | ---------------------- | ----- | ----- | ---------------------------------------- |
@@ -127,16 +138,14 @@ exactly. The `Lexer` is improved but its interface is unchanged.
 | `manyInternalLogic`    | 0.3%  | 0.3%  | Same                                     |
 | GC / C++               | 28.4% | 24.8% | Largely measurement noise                |
 
-The lexer takes the same absolute wall-time as v12. The remaining ~10% gap is:
+The lexer takes the same absolute wall-time as v12. The remaining ~5% gap is:
 
-1. `invokeRuleWithTryCst` 2× v12 cost — the 3 extra property r/w for `_dslCounter`
-   save/restore. Estimated savings if removed: ~1.8% total.
-2. `orDispatchLL1Simple` — indirect closure call not inlined by V8 because the
-   closure both looks up altIdx AND calls `ALT.call(this)` (v12 separates these,
-   making the lookup closure small enough to inline). Estimated savings: ~0.5%.
-3. Residual structural overhead from `_dslCounter` management throughout: the
-   full elimination requires replacing `_dslCounter` with static compile-time
-   indices (like v12's OR1/OR2 naming), which is a major refactor.
+1. `_dslCounter` overhead: every DSL call (CONSUME/OR/OPTION/MANY/SUBRULE) does
+   `idx = this._dslCounter++` — 3 property ops × ~3,950 calls/parse. v12 avoids
+   this entirely by encoding occurrence index in method name (OR1/OR2/etc).
+   Full elimination requires static index baking (major refactor).
+2. Residual overhead from speculative infrastructure (`IS_SPECULATING`,
+   `_earlyExitLookahead` on CONSUME hot path, etc.) that v12 lacks entirely.
 
 - ✅ **`orDispatchLL1Simple` — split lookup from call**: closure now returns
   `altIdx` only (no `alts` param, no ALT call). OR() calls
@@ -144,26 +153,29 @@ The lexer takes the same absolute wall-time as v12. The remaining ~10% gap is:
   map; OR() checks it before `_orLookahead[]`. Benchmark: within noise (±8%
   cross-run variance on JSON warm). Committed since no regression and closure
   is genuinely smaller.
-- ⬜ **`invokeRuleWithTryCst` — skip `_dslCounter` save/restore when possible**:
-  parser methods that are only ever called as top-level rules (never as subrules)
-  don't need the save/restore. Could specialize at `RULE()` definition time.
-- ⬜ **Post-performSelfAnalysis method specialization**: after `performSelfAnalysis`
-  completes, `RECORDING_PHASE` is always false. Swap prototype OR/MANY/OPTION
-  methods to versions that skip the `RECORDING_PHASE` guard. Saves 1 property
-  read + branch per DSL call. Needs careful prototype-swap implementation.
-- ⬜ **Eliminate `_dslCounter` from hot paths**: when performSelfAnalysis was
-  called, counter deltas are known statically. Bake them into the closure or
-  pre-compute a static occurrence mapping. Saves 4-5 property accesses per OR.
-- ⬜ **Remove OPTION try/catch**: the committed OPTION path still has save/restore
-  try/catch for correctness. If LL(k) guarantees are strengthened (deeper GAST
-  analysis), the try/catch can be removed.
-- ⬜ **Specialize consumeInternal for committed path**: remove `_earlyExitLookahead`
-  and `IS_SPECULATING` checks (2 property reads + 2 branches per CONSUME).
-- ⬜ **Single-dispatch MANY closures**: like OR, replace `_prodLookahead[laKey]`
-  lookup with a single cached closure per MANY site.
+- ✅ **Eliminate `RULE_OCCURRENCE_STACK_IDX`**: always equal to `RULE_STACK_IDX`
+  (both incremented/decremented in lockstep in ruleInvocationStateUpdate /
+  ruleFinallyStateUpdate). Removed redundant counter; ruleInvocationStateUpdate
+  now writes `RULE_OCCURRENCE_STACK[depth]` using the single depth counter.
+  Benchmark: within noise. Saves 2 property ops per rule invocation.
+- ✅ **Fix benchmark compare mode**: child processes now spawn `node` instead of
+  bun's execPath. bun's JIT under-warmed v12 producing misleading ~1,000 ops/s
+  instead of correct ~14,000 ops/s.
+- ❌ **RECORDING_PHASE guard elimination**: prototype-swap approaches all cause
+  V8 de-optimization (5-10% regression risk). The branch is already predicted
+  correctly 100% of the time; real gain ≤1%. Not worth the risk.
+- ❌ **consumeInternal specialization (function pointer swap)**: worktree
+  implementation via `_consumeFn` pointer showed neutral benchmark. Indirect
+  call overhead offset the saved branch checks.
+- ⬜ **`_dslCounter` static index baking**: after performSelfAnalysis, occurrence
+  indices are known statically. Could generate specialized rule closures with
+  hardcoded mapKeys, eliminating all `_dslCounter` reads/writes. Estimated
+  ~3-5% gain but requires parser-compiler level refactor.
 - ⬜ **`invokeRuleWithTryCst` try/catch** (structural per-rule cost): investigate
   if the outer recovery try/catch can be removed for `recoveryEnabled=false`
   (default) parsers — shared with upstream, but worth profiling the saving.
+- ⬜ **Single-dispatch MANY closures**: like OR, replace `_prodLookahead[laKey]`
+  lookup with a single cached closure per MANY site.
 
 ### Lexer investigations (after parser gap is closed)
 
