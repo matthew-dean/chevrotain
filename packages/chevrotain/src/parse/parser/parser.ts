@@ -1197,21 +1197,6 @@ class ParserBase {
    */
   _orFastMaps!: Record<number, Record<number, number>>;
   /**
-   * The alts array reference that was used to populate each OR site's fast
-   * map. When a caller passes a different alts array (dynamic alternatives,
-   * e.g., CSS `main` called from different contexts), the cached altIdx
-   * may point to wrong/nonexistent alts. We detect this by identity check
-   * and skip the fast path.
-   */
-  _orFastMapAltsRef!: Record<number, IOrAlt<any>[]>;
-  /**
-   * Per-OR set of alt indices whose first-token set is gate-dependent
-   * (they have a gated OPTION/MANY/AT_LEAST_ONE before their first CONSUME).
-   * Keyed by the same mapKey as _orFastMaps. These alts must always be
-   * speculated on the fast path — they cannot be cached by LA(1) alone.
-   */
-  _orGatedPrefixAlts!: Record<number, number[]>;
-  /**
    * Per-OR _dslCounter advance amount. When `_dslCounter` is shared across
    * all DSL methods, each OR alternative may contain a different number of
    * DSL calls. During recording ALL alternatives are walked sequentially, but
@@ -1230,26 +1215,6 @@ class ParserBase {
    * `savedCounter + _orAltCounterStarts[mapKey][i]`.
    */
   _orAltCounterStarts!: Record<number, number[]>;
-  /**
-   * Set during an OR alt's speculative execution. Records the lexer position
-   * at the start of the alt so that gated productions (OPTION, MANY, etc.)
-   * can detect whether they are executing before the first CONSUME.
-   */
-  _orAltStartLexPos!: number;
-  /**
-   * Set to true when a gated production (OPTION/MANY/AT_LEAST_ONE with GATE)
-   * is encountered before the first CONSUME in an OR alt. When true, the alt
-   * must not be added to the fast-dispatch candidate list because its
-   * first-token set depends on gate state.
-   */
-  _orAltHasGatedPrefix!: boolean;
-  /**
-   * Set to true when ANY OPTION/MANY/AT_LEAST_ONE (gated or not) is
-   * encountered before the first CONSUME in an OR alt. When true, the
-   * alt's first-token match is not sufficient for committed dispatch —
-   * the alt could fail partway through depending on the OPTION path.
-   */
-  _orAltHasAnyPrefix!: boolean;
   /**
    * Per-OR, per-tokenTypeIdx committability. `true` = the alt that matched
    * this token had no OPTION/MANY prefix, so committed dispatch is safe.
@@ -4619,6 +4584,41 @@ export class ForgivingParser extends ParserBase {
   >;
   _baselineOrLookaheadLL1!: ((this: ParserBase) => number | undefined)[];
   _baselineProdLookahead!: Record<number, () => boolean>;
+  /**
+   * The alts array reference that was used to populate each OR site's fast
+   * map. When a caller passes a different alts array (dynamic alternatives,
+   * e.g., CSS `main` called from different contexts), the cached altIdx
+   * may point to wrong/nonexistent alts. We detect this by identity check
+   * and skip the fast path.
+   */
+  _orFastMapAltsRef!: Record<number, IOrAlt<any>[]>;
+  /**
+   * Per-OR set of alt indices whose first-token set is gate-dependent
+   * (they have a gated OPTION/MANY/AT_LEAST_ONE before their first CONSUME).
+   * Keyed by the same mapKey as _orFastMaps. These alts must always be
+   * speculated on the fast path — they cannot be cached by LA(1) alone.
+   */
+  _orGatedPrefixAlts!: Record<number, number[]>;
+  /**
+   * Set during an OR alt's speculative execution. Records the lexer position
+   * at the start of the alt so that gated productions (OPTION, MANY, etc.)
+   * can detect whether they are executing before the first CONSUME.
+   */
+  _orAltStartLexPos!: number;
+  /**
+   * Set to true when a gated production (OPTION/MANY/AT_LEAST_ONE with GATE)
+   * is encountered before the first CONSUME in an OR alt. When true, the alt
+   * must not be added to the fast-dispatch candidate list because its
+   * first-token set depends on gate state.
+   */
+  _orAltHasGatedPrefix!: boolean;
+  /**
+   * Set to true when ANY OPTION/MANY/AT_LEAST_ONE (gated or not) is
+   * encountered before the first CONSUME in an OR alt. When true, the
+   * alt's first-token match is not sufficient for committed dispatch —
+   * the alt could fail partway through depending on the OPTION path.
+   */
+  _orAltHasAnyPrefix!: boolean;
 
   constructor(
     tokenVocabulary: TokenVocabulary,
