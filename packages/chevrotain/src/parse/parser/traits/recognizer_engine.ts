@@ -150,7 +150,6 @@ export class RecognizerEngine {
   // Using index-based access (arr[++idx] = val / idx--) instead of push/pop
   // avoids method-call overhead on every rule entry/exit.
   RULE_STACK_IDX: number;
-  RULE_OCCURRENCE_STACK_IDX: number;
   /**
    * Runtime OR call counter — auto-increments per OR call within a rule.
    * Saved/restored on rule entry/exit via _orCounterStack. Gives unique
@@ -254,7 +253,6 @@ export class RecognizerEngine {
     this.RULE_STACK = [];
     this.RULE_STACK_IDX = -1;
     this.RULE_OCCURRENCE_STACK = [];
-    this.RULE_OCCURRENCE_STACK_IDX = -1;
     this._dslCounter = 0;
     this._dslCounterStack = [];
     this.gastProductionsCache = {};
@@ -1447,7 +1445,6 @@ export class RecognizerEngine {
     // Restore the single DSL counter from the parent rule scope.
     this._dslCounter = this._dslCounterStack[this.RULE_STACK_IDX];
     this.RULE_STACK_IDX--;
-    this.RULE_OCCURRENCE_STACK_IDX--;
 
     // Restore the cached short name to the parent rule.
     // When the stack is empty (top-level rule exiting), the stale value
@@ -1632,9 +1629,8 @@ export class RecognizerEngine {
     fullName: string,
     idxInCallingRule: number,
   ): void {
-    this.RULE_OCCURRENCE_STACK[++this.RULE_OCCURRENCE_STACK_IDX] =
-      idxInCallingRule;
     const depth = ++this.RULE_STACK_IDX;
+    this.RULE_OCCURRENCE_STACK[depth] = idxInCallingRule;
     this.RULE_STACK[depth] = shortName;
     this.currRuleShortName = shortName;
     // Save and reset the single DSL auto-occurrence counter.
@@ -1674,7 +1670,6 @@ export class RecognizerEngine {
     // Reset depth counters but keep arrays allocated to avoid re-allocation.
     // Stale number values in unused slots are harmless.
     this.RULE_STACK_IDX = -1;
-    this.RULE_OCCURRENCE_STACK_IDX = -1;
     // TODO: extract a specific reset for TreeBuilder trait
     this.CST_STACK = [];
   }

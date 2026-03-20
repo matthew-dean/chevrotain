@@ -1224,7 +1224,9 @@ export class Parser {
   // Using index-based access (arr[++idx] = val / idx--) instead of push/pop
   // avoids method-call overhead on every rule entry/exit.
   RULE_STACK_IDX!: number;
-  RULE_OCCURRENCE_STACK_IDX!: number;
+  // RULE_OCCURRENCE_STACK_IDX removed: always equals RULE_STACK_IDX since
+  // both are incremented/decremented in lockstep in ruleInvocationStateUpdate
+  // and ruleFinallyStateUpdate. All reads replaced with RULE_STACK_IDX.
   /**
    * Single auto-occurrence counter for ALL DSL methods. Every DSL call
    * (CONSUME, SUBRULE, OR, OPTION, MANY, etc.) increments this counter,
@@ -1376,7 +1378,6 @@ export class Parser {
     this.RULE_STACK = [];
     this.RULE_STACK_IDX = -1;
     this.RULE_OCCURRENCE_STACK = [];
-    this.RULE_OCCURRENCE_STACK_IDX = -1;
     this._dslCounter = 0;
     this._dslCounterStack = [];
     this.gastProductionsCache = {};
@@ -2720,7 +2721,6 @@ export class Parser {
     // RULE_STACK_IDX still points at the slot where we stored the value.
     this._dslCounter = this._dslCounterStack[this.RULE_STACK_IDX];
     this.RULE_STACK_IDX--;
-    this.RULE_OCCURRENCE_STACK_IDX--;
 
     // Restore the cached short name to the parent rule.
     // When the stack is empty (top-level rule exiting), the stale value
@@ -2908,9 +2908,8 @@ export class Parser {
     fullName: string,
     idxInCallingRule: number,
   ): void {
-    this.RULE_OCCURRENCE_STACK[++this.RULE_OCCURRENCE_STACK_IDX] =
-      idxInCallingRule;
     const depth = ++this.RULE_STACK_IDX;
+    this.RULE_OCCURRENCE_STACK[depth] = idxInCallingRule;
     this.RULE_STACK[depth] = shortName;
     this.currRuleShortName = shortName;
     // Save the caller's _dslCounter in the stack slot for this depth, then
@@ -2954,7 +2953,6 @@ export class Parser {
     // Reset depth counters but keep arrays allocated to avoid re-allocation.
     // Stale number values in unused slots are harmless.
     this.RULE_STACK_IDX = -1;
-    this.RULE_OCCURRENCE_STACK_IDX = -1;
     // TODO: extract a specific reset for TreeBuilder trait
     this.CST_STACK = [];
   }
@@ -3392,7 +3390,7 @@ export class Parser {
     const pathRuleStack: string[] = this.getHumanReadableRuleStack();
     const pathOccurrenceStack: number[] = this.RULE_OCCURRENCE_STACK.slice(
       0,
-      this.RULE_OCCURRENCE_STACK_IDX + 1,
+      this.RULE_STACK_IDX + 1,
     );
     const grammarPath: any = {
       ruleStack: pathRuleStack,
@@ -4776,7 +4774,7 @@ export class Parser {
   }
 
   getLastExplicitRuleOccurrenceIndex(): number {
-    return this.RULE_OCCURRENCE_STACK[this.RULE_OCCURRENCE_STACK_IDX];
+    return this.RULE_OCCURRENCE_STACK[this.RULE_STACK_IDX];
   }
 
   // --- GastRecorder (absorbed from trait) ---
@@ -5006,7 +5004,7 @@ export class Parser {
         ruleStack: this.getHumanReadableRuleStack(),
         ruleOccurrenceStack: this.RULE_OCCURRENCE_STACK.slice(
           0,
-          this.RULE_OCCURRENCE_STACK_IDX + 1,
+          this.RULE_STACK_IDX + 1,
         ),
       };
       this._errors.push(error);

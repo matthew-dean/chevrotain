@@ -408,11 +408,24 @@ if (!quiet) {
 }
 
 // ---------------------------------------------------------------------------
+// Prefer `node` over bun when spawning child processes: bun's JIT warms up
+// differently from V8 and produces misleading comparison numbers.
+// ---------------------------------------------------------------------------
+const { execFileSync: _execFileSync } = await import("node:child_process");
+const nodeExec = (() => {
+  try {
+    _execFileSync("node", ["--version"], { stdio: "ignore" });
+    return "node";
+  } catch {
+    return process.execPath;
+  }
+})();
+
+// ---------------------------------------------------------------------------
 // "all" mode: spawn a fresh V8 process for each phase so JIT profiles from
 // construction-heavy phases don't pollute the warm steady-state measurement.
 // ---------------------------------------------------------------------------
 if (mode === "all") {
-  const { execFileSync } = await import("node:child_process");
   const selfPath = new URL(import.meta.url).pathname;
   // Forward CLI args, replacing --mode all with each specific mode.
   const baseArgs = process.argv
@@ -421,7 +434,7 @@ if (mode === "all") {
   for (const phase of ["construction", "cold", "first-parse", "warm"]) {
     const childArgs = [selfPath, "--mode", phase, ...baseArgs, "--quiet"];
     try {
-      const output = execFileSync(process.execPath, childArgs, {
+      const output = _execFileSync(nodeExec, childArgs, {
         encoding: "utf-8",
         stdio: ["ignore", "pipe", "inherit"],
       });
@@ -443,7 +456,6 @@ if (mode === "all") {
 //   node benchmark.mjs --mode compare --v12 /tmp/chevrotain-v12/package/lib/chevrotain.mjs
 // ---------------------------------------------------------------------------
 if (mode === "compare") {
-  const { execFileSync } = await import("node:child_process");
   const selfPath = new URL(import.meta.url).pathname;
   const ourLib = new URL("../lib/chevrotain.mjs", import.meta.url).href;
   const v12Lib = getArg(
@@ -462,7 +474,7 @@ if (mode === "compare") {
       ...extraArgs,
     ];
     try {
-      const out = execFileSync(process.execPath, childArgs, {
+      const out = _execFileSync(nodeExec, childArgs, {
         encoding: "utf-8",
         stdio: ["ignore", "pipe", "inherit"],
       });

@@ -431,7 +431,7 @@ export class Recoverable {
     const pathRuleStack: string[] = this.getHumanReadableRuleStack();
     const pathOccurrenceStack: number[] = this.RULE_OCCURRENCE_STACK.slice(
       0,
-      this.RULE_OCCURRENCE_STACK_IDX + 1,
+      this.RULE_STACK_IDX + 1,
     );
     const grammarPath: any = {
       ruleStack: pathRuleStack,

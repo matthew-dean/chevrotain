@@ -371,6 +371,6 @@ export class TreeBuilder {
   }
 
   getLastExplicitRuleOccurrenceIndex(this: MixedInParser): number {
-    return this.RULE_OCCURRENCE_STACK[this.RULE_OCCURRENCE_STACK_IDX];
+    return this.RULE_OCCURRENCE_STACK[this.RULE_STACK_IDX];
   }
 }
