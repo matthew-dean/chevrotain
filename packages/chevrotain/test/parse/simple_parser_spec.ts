@@ -174,6 +174,113 @@ describe("SmartParser", () => {
         expect(parser.rule()).to.equal("second");
         expect(parser.errors).to.be.empty;
       });
+
+      it(`restores the self-analysis lookahead baseline when parser.input is replaced ${
+        explicitPSA ? "with" : "without"
+      } performSelfAnalysis()`, () => {
+        const A = createToken({ name: "A" });
+        const B = createToken({ name: "B" });
+        const allTokens = [A, B];
+        augmentTokenTypes(allTokens);
+
+        class ReuseCacheParser extends SmartParser {
+          constructor() {
+            super(allTokens, { skipValidations: true });
+            if (explicitPSA) {
+              this.performSelfAnalysis();
+            }
+          }
+
+          public staticRule = this.RULE("staticRule", () => {
+            return this.OR([
+              {
+                ALT: () => {
+                  this.CONSUME1(A);
+                  return "A";
+                },
+              },
+              {
+                ALT: () => {
+                  this.CONSUME1(B);
+                  return "B";
+                },
+              },
+            ]);
+          });
+        }
+
+        function snapshotLookaheadCaches(parser: any) {
+          function sparseRecordTableSnapshot(table: any) {
+            const result: Record<string, Record<string, number | boolean>> = {};
+            for (const key of Object.keys(table ?? {})) {
+              const value = table[key];
+              if (value !== undefined) {
+                result[key] = JSON.parse(JSON.stringify(value));
+              }
+            }
+            return result;
+          }
+
+          return {
+            fastMaps: sparseRecordTableSnapshot(parser._orFastMaps),
+            gatedPrefixAlts: sparseRecordTableSnapshot(
+              parser._orGatedPrefixAlts,
+            ),
+            committable: sparseRecordTableSnapshot(parser._orCommittable),
+            fastMapAltsRefKeys: Object.keys(parser._orFastMapAltsRef ?? {}),
+            orLookaheadKeys: Object.keys(parser._orLookahead ?? {}).filter(
+              (key) => parser._orLookahead[key] !== undefined,
+            ),
+            orLookaheadLL1Keys: Object.keys(
+              parser._orLookaheadLL1 ?? {},
+            ).filter((key) => parser._orLookaheadLL1[key] !== undefined),
+            prodLookaheadKeys: Object.keys(parser._prodLookahead ?? {}).filter(
+              (key) => parser._prodLookahead[key] !== undefined,
+            ),
+          };
+        }
+
+        const parser = new ReuseCacheParser();
+
+        parser.input = [createRegularToken(A)];
+        expect(parser.staticRule()).to.equal("A");
+        expect(parser.errors).to.be.empty;
+
+        const baseline = snapshotLookaheadCaches(parser);
+
+        const runtimeCacheState = parser as any;
+        runtimeCacheState._orFastMaps[999] = Object.assign(
+          Object.create(null),
+          {
+            [(A as any).tokenTypeIdx]: 0,
+          },
+        );
+        runtimeCacheState._orFastMapAltsRef[999] = [
+          {
+            ALT: () => "mutated",
+          },
+        ];
+        runtimeCacheState._orGatedPrefixAlts[999] = [0];
+        runtimeCacheState._orCommittable[999] = Object.assign(
+          Object.create(null),
+          {
+            [(A as any).tokenTypeIdx]: true,
+          },
+        );
+        runtimeCacheState._orLookahead[999] = () => 0;
+        runtimeCacheState._orLookaheadLL1[999] = () => 0;
+        runtimeCacheState._prodLookahead[999] = () => true;
+        runtimeCacheState._runtimeLookaheadCachesDirty = true;
+
+        parser.input = [createRegularToken(B)];
+        expect(snapshotLookaheadCaches(parser)).to.deep.equal(
+          baseline,
+          "replacing parser.input should restore the performSelfAnalysis cache baseline",
+        );
+
+        expect(parser.staticRule()).to.equal("B");
+        expect(parser.errors).to.be.empty;
+      });
     }
   });
 

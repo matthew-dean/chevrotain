@@ -1133,253 +1133,21 @@ class ParserBase {
     }
   }
 
-  /**
-   * Lazily build an OR dispatch closure after the first speculative pass.
-   * Ensures GAST is populated (via lazy recording), then builds the LL(k)
-   * closure from GAST — same as prePopulateOrFastMaps but for a single OR.
-   */
-  private lazyBuildOrClosure(mapKey: number): void {
-    try {
-      this.ensureGastProductionsCachePopulated();
-      const ruleName = this.shortRuleNameToFull[this.currRuleShortName];
-      const rule = this.gastProductionsCache[ruleName];
-      if (rule === undefined) return;
+  protected lazyBuildOrClosure(_mapKey: number): void {}
 
-      // Find the Alternation with matching idx in this rule's GAST.
-      const occurrence =
-        mapKey & ((1 << (BITS_FOR_METHOD_TYPE + BITS_FOR_OCCURRENCE_IDX)) - 1);
-      let targetNode: InstanceType<typeof Alternation> | undefined;
-      const findAlt = (prods: IProduction[]) => {
-        for (const prod of prods) {
-          if (prod instanceof NonTerminal) continue;
-          if (prod instanceof Alternation && prod.idx === occurrence) {
-            targetNode = prod;
-            return;
-          }
-          if ("definition" in prod && isArray(prod.definition)) {
-            findAlt(prod.definition);
-            if (targetNode) return;
-          }
-        }
-      };
-      findAlt(rule.definition);
-      if (targetNode === undefined) return;
-
-      const prodMaxLA = (targetNode as any).maxLookahead ?? this.maxLookahead;
-      const paths = getLookaheadPathsForOr(occurrence, rule, prodMaxLA);
-
-      // Build dispatch closure; skip counter management when GAST shows it's unnecessary.
-      const altStarts = this._orAltCounterStarts[mapKey];
-      const counterDelta = this._orCounterDeltas[mapKey];
-      const needsCounter = orNeedsCounterManagement(
-        targetNode,
-        rule,
-        this.recoveryEnabled,
-      );
-      const choiceToAlt =
-        !targetNode.hasPredicates && !this.dynamicTokensEnabled
-          ? buildOrChoiceMap(paths)
-          : null;
-      if (choiceToAlt !== null) {
-        if (
-          needsCounter &&
-          altStarts !== undefined &&
-          counterDelta !== undefined
-        ) {
-          this._orLookahead[mapKey] = function orDispatchLL1(
-            this: ParserBase,
-            orAlts: IOrAlt<any>[],
-          ): any {
-            const altIdx =
-              choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
-            if (altIdx !== undefined) {
-              const saved = this._dslCounter;
-              this._dslCounter = saved + altStarts[altIdx];
-              const r = orAlts[altIdx].ALT.call(this);
-              this._dslCounter = saved + counterDelta;
-              return r;
-            }
-            return OR_NO_MATCH;
-          };
-          this.markRuntimeLookaheadCachesDirty();
-        } else {
-          this._orLookaheadLL1[mapKey] = function orDispatchLL1Simple(
-            this: ParserBase,
-          ): number | undefined {
-            return choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
-          };
-          this.markRuntimeLookaheadCachesDirty();
-        }
-      } else {
-        const tmatcher = this.tokenMatcher;
-        const laFunc = buildAlternativesLookAheadFunc(
-          paths,
-          targetNode.hasPredicates,
-          tmatcher,
-          this.dynamicTokensEnabled,
-        );
-        if (
-          needsCounter &&
-          altStarts !== undefined &&
-          counterDelta !== undefined
-        ) {
-          this._orLookahead[mapKey] = function orDispatch(
-            this: ParserBase,
-            orAlts: IOrAlt<any>[],
-          ): any {
-            const altIdx = laFunc.call(this, orAlts);
-            if (altIdx !== undefined) {
-              const saved = this._dslCounter;
-              this._dslCounter = saved + altStarts[altIdx];
-              const r = orAlts[altIdx].ALT.call(this);
-              this._dslCounter = saved + counterDelta;
-              return r;
-            }
-            return OR_NO_MATCH;
-          };
-          this.markRuntimeLookaheadCachesDirty();
-        } else {
-          this._orLookahead[mapKey] = function orDispatchSimple(
-            this: ParserBase,
-            orAlts: IOrAlt<any>[],
-          ): any {
-            const altIdx = laFunc.call(this, orAlts);
-            if (altIdx !== undefined) {
-              return orAlts[altIdx].ALT.call(this);
-            }
-            return OR_NO_MATCH;
-          };
-          this.markRuntimeLookaheadCachesDirty();
-        }
-      }
-    } catch (_e) {
-      // GAST walk failed — stay on speculative path.
-    }
-  }
-
-  /**
-   * Lazily build a MANY/OPTION/AT_LEAST_ONE lookahead closure after the
-   * first speculative pass succeeds. Same pattern as lazyBuildOrClosure.
-   */
   protected lazyBuildProdClosure(
-    laKey: number,
-    occurrence: number,
+    _laKey: number,
+    _occurrence: number,
     _keyIdx: number,
-    prodType: PROD_TYPE,
-  ): void {
-    try {
-      this.ensureGastProductionsCachePopulated();
-      const ruleName = this.shortRuleNameToFull[this.currRuleShortName];
-      const rule = this.gastProductionsCache[ruleName];
-      if (rule === undefined) return;
+    _prodType: PROD_TYPE,
+  ): void {}
 
-      const prodMaxLA = this.maxLookahead;
-      const paths = getLookaheadPathsForOptionalProd(
-        occurrence,
-        rule,
-        prodType,
-        prodMaxLA,
-      );
-      const insidePaths = paths[0];
-      const afterPaths = paths[1];
-      if (insidePaths === undefined || insidePaths.length === 0) return;
-      // Skip if inside/after overlap at first token.
-      if (afterPaths !== undefined && afterPaths.length > 0) {
-        const insideFirst = new Set(
-          insidePaths
-            .filter((p) => p.length > 0)
-            .map((p) => p[0]?.tokenTypeIdx),
-        );
-        const hasOverlap = afterPaths.some(
-          (p) => p.length > 0 && insideFirst.has(p[0]?.tokenTypeIdx),
-        );
-        if (hasOverlap) return;
-      }
-      const tmatcher = this.tokenMatcher;
-      this._prodLookahead[laKey] = buildSingleAlternativeLookaheadFunction(
-        insidePaths,
-        tmatcher,
-        this.dynamicTokensEnabled,
-      );
-      this.markRuntimeLookaheadCachesDirty();
-    } catch (_e) {
-      // GAST walk failed — stay on speculative path.
-    }
-  }
-
-  /**
-   * Lazily populates gastProductionsCache when GAST-dependent APIs
-   * (getSerializedGastProductions, getGAstProductions) are called without
-   * recoveryEnabled. Preserves backward compatibility — these APIs work
-   * regardless of recoveryEnabled.
-   */
   ensureGastProductionsCachePopulated(): void {
-    if (Object.keys(this.gastProductionsCache).length > 0) {
-      return;
-    }
-    // Must run before any recording-phase manipulation of `this` —
-    // same as performSelfAnalysis(). Without it the parser is 3-4x slower.
-    toFastProperties(this);
-    try {
-      this.enableRecording();
-      this.definedRulesNames.forEach((currRuleName: string) => {
-        const wrappedRule = (this as any)[currRuleName] as ParserMethodInternal<
-          unknown[],
-          unknown
-        >;
-        const originalGrammarAction = wrappedRule["originalGrammarAction"];
-        const recordedRuleGast = this.topLevelRuleRecord(
-          currRuleName,
-          originalGrammarAction,
-        );
-        this.gastProductionsCache[currRuleName] = recordedRuleGast;
-      });
-    } finally {
-      this.disableRecording();
-    }
-    const resolverErrors = resolveGrammar({
-      rules: Object.values(this.gastProductionsCache),
-    });
-    this.definitionErrors = this.definitionErrors.concat(resolverErrors);
-    if (resolverErrors.length === 0 && this.skipValidations === false) {
-      const validationErrors = validateGrammar({
-        rules: Object.values(this.gastProductionsCache),
-        tokenTypes: Object.values(this.tokensMap),
-        errMsgProvider: defaultGrammarValidatorErrorProvider,
-        grammarName: this.className,
-      });
-      this.definitionErrors = this.definitionErrors.concat(validationErrors);
-      const lookaheadValidationErrors = validateLookahead({
-        lookaheadStrategy: this.lookaheadStrategy,
-        rules: Object.values(this.gastProductionsCache),
-        tokenTypes: Object.values(this.tokensMap),
-        grammarName: this.className,
-      });
-      this.definitionErrors = this.definitionErrors.concat(
-        lookaheadValidationErrors,
+    if (!this.selfAnalysisDone) {
+      throw Error(
+        `Missing <performSelfAnalysis> invocation at the end of the Parser's constructor.`,
       );
     }
-    if (
-      !(this.constructor as typeof ParserBase)
-        .DEFER_DEFINITION_ERRORS_HANDLING &&
-      this.definitionErrors.length !== 0
-    ) {
-      const defErrorsMsgs = this.definitionErrors.map(
-        (defError) => defError.message,
-      );
-      throw new Error(
-        `Parser Definition Errors detected:\n ${defErrorsMsgs.join(
-          "\n-------------------------------\n",
-        )}`,
-      );
-    }
-    if (this.definitionErrors.length === 0 && this.recoveryEnabled) {
-      const allFollows = computeAllProdsFollows(
-        Object.values(this.gastProductionsCache),
-      );
-      this.resyncFollows = allFollows;
-    }
-    this.selfAnalysisDone = true;
   }
 
   definitionErrors: IParserDefinitionError[] = [];
@@ -1545,13 +1313,8 @@ class ParserBase {
     this._isInTrueBacktrack = false;
     this._earlyExitLookahead = false;
     this._orFastMaps = [];
-    this._orFastMapAltsRef = [];
-    this._orGatedPrefixAlts = [];
     this._orCounterDeltas = [];
     this._orAltCounterStarts = [];
-    this._orAltStartLexPos = 0;
-    this._orAltHasGatedPrefix = false;
-    this._orAltHasAnyPrefix = false;
     this._orCommittable = [];
     this._orLookahead = [];
     this._orLookaheadLL1 = [];
@@ -4930,6 +4693,41 @@ export class ForgivingParser extends ParserBase {
   >;
   _baselineOrLookaheadLL1!: ((this: ParserBase) => number | undefined)[];
   _baselineProdLookahead!: Record<number, () => boolean>;
+  /**
+   * The alts array reference that was used to populate each OR site's fast
+   * map. When a caller passes a different alts array (dynamic alternatives,
+   * e.g., CSS `main` called from different contexts), the cached altIdx
+   * may point to wrong/nonexistent alts. We detect this by identity check
+   * and skip the fast path.
+   */
+  _orFastMapAltsRef!: Record<number, IOrAlt<any>[]>;
+  /**
+   * Per-OR set of alt indices whose first-token set is gate-dependent
+   * (they have a gated OPTION/MANY/AT_LEAST_ONE before their first CONSUME).
+   * Keyed by the same mapKey as _orFastMaps. These alts must always be
+   * speculated on the fast path — they cannot be cached by LA(1) alone.
+   */
+  _orGatedPrefixAlts!: Record<number, number[]>;
+  /**
+   * Set during an OR alt's speculative execution. Records the lexer position
+   * at the start of the alt so that gated productions (OPTION, MANY, etc.)
+   * can detect whether they are executing before the first CONSUME.
+   */
+  _orAltStartLexPos!: number;
+  /**
+   * Set to true when a gated production (OPTION/MANY/AT_LEAST_ONE with GATE)
+   * is encountered before the first CONSUME in an OR alt. When true, the alt
+   * must not be added to the fast-dispatch candidate list because its
+   * first-token set depends on gate state.
+   */
+  _orAltHasGatedPrefix!: boolean;
+  /**
+   * Set to true when ANY OPTION/MANY/AT_LEAST_ONE (gated or not) is
+   * encountered before the first CONSUME in an OR alt. When true, the
+   * alt's first-token match is not sufficient for committed dispatch —
+   * the alt could fail partway through depending on the OPTION path.
+   */
+  _orAltHasAnyPrefix!: boolean;
 
   constructor(
     tokenVocabulary: TokenVocabulary,
@@ -4940,6 +4738,11 @@ export class ForgivingParser extends ParserBase {
     super(tokenVocabulary, configClone);
     this._lookaheadCacheBaselineCaptured = false;
     this._runtimeLookaheadCachesDirty = false;
+    this._orFastMapAltsRef = [];
+    this._orGatedPrefixAlts = [];
+    this._orAltStartLexPos = 0;
+    this._orAltHasGatedPrefix = false;
+    this._orAltHasAnyPrefix = false;
     this._baselineOrFastMaps = [];
     this._baselineOrFastMapAltsRef = [];
     this._baselineOrGatedPrefixAlts = [];
@@ -4949,7 +4752,7 @@ export class ForgivingParser extends ParserBase {
     this._baselineProdLookahead = [];
   }
 
-  protected captureLookaheadCacheBaseline(): void {
+  protected override captureLookaheadCacheBaseline(): void {
     this._baselineOrFastMaps = cloneSparseRecordTable(this._orFastMaps);
     this._baselineOrFastMapAltsRef = cloneSparseValueTable(
       this._orFastMapAltsRef,
@@ -4979,6 +4782,172 @@ export class ForgivingParser extends ParserBase {
     this._orLookaheadLL1 = cloneSparseArray(this._baselineOrLookaheadLL1);
     this._prodLookahead = cloneSparseValueTable(this._baselineProdLookahead);
     this._runtimeLookaheadCachesDirty = false;
+  }
+
+  protected override markRuntimeLookaheadCachesDirty(): void {
+    this._runtimeLookaheadCachesDirty = true;
+  }
+
+  protected override lazyBuildOrClosure(mapKey: number): void {
+    try {
+      this.ensureGastProductionsCachePopulated();
+      const ruleName = this.shortRuleNameToFull[this.currRuleShortName];
+      const rule = this.gastProductionsCache[ruleName];
+      if (rule === undefined) return;
+
+      const occurrence =
+        mapKey & ((1 << (BITS_FOR_METHOD_TYPE + BITS_FOR_OCCURRENCE_IDX)) - 1);
+      let targetNode: InstanceType<typeof Alternation> | undefined;
+      const findAlt = (prods: IProduction[]) => {
+        for (const prod of prods) {
+          if (prod instanceof NonTerminal) continue;
+          if (prod instanceof Alternation && prod.idx === occurrence) {
+            targetNode = prod;
+            return;
+          }
+          if ("definition" in prod && isArray(prod.definition)) {
+            findAlt(prod.definition);
+            if (targetNode) return;
+          }
+        }
+      };
+      findAlt(rule.definition);
+      if (targetNode === undefined) return;
+
+      const prodMaxLA = (targetNode as any).maxLookahead ?? this.maxLookahead;
+      const paths = getLookaheadPathsForOr(occurrence, rule, prodMaxLA);
+
+      const altStarts = this._orAltCounterStarts[mapKey];
+      const counterDelta = this._orCounterDeltas[mapKey];
+      const needsCounter = orNeedsCounterManagement(
+        targetNode,
+        rule,
+        this.recoveryEnabled,
+      );
+      const choiceToAlt =
+        !targetNode.hasPredicates && !this.dynamicTokensEnabled
+          ? buildOrChoiceMap(paths)
+          : null;
+      if (choiceToAlt !== null) {
+        if (
+          needsCounter &&
+          altStarts !== undefined &&
+          counterDelta !== undefined
+        ) {
+          this._orLookahead[mapKey] = function orDispatchLL1(
+            this: ParserBase,
+            orAlts: IOrAlt<any>[],
+          ): any {
+            const altIdx =
+              choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
+            if (altIdx !== undefined) {
+              const saved = this._dslCounter;
+              this._dslCounter = saved + altStarts[altIdx];
+              const r = orAlts[altIdx].ALT.call(this);
+              this._dslCounter = saved + counterDelta;
+              return r;
+            }
+            return OR_NO_MATCH;
+          };
+          this.markRuntimeLookaheadCachesDirty();
+        } else {
+          this._orLookaheadLL1[mapKey] = function orDispatchLL1Simple(
+            this: ParserBase,
+          ): number | undefined {
+            return choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
+          };
+          this.markRuntimeLookaheadCachesDirty();
+        }
+      } else {
+        const tmatcher = this.tokenMatcher;
+        const laFunc = buildAlternativesLookAheadFunc(
+          paths,
+          targetNode.hasPredicates,
+          tmatcher,
+          this.dynamicTokensEnabled,
+        );
+        if (
+          needsCounter &&
+          altStarts !== undefined &&
+          counterDelta !== undefined
+        ) {
+          this._orLookahead[mapKey] = function orDispatch(
+            this: ParserBase,
+            orAlts: IOrAlt<any>[],
+          ): any {
+            const altIdx = laFunc.call(this, orAlts);
+            if (altIdx !== undefined) {
+              const saved = this._dslCounter;
+              this._dslCounter = saved + altStarts[altIdx];
+              const r = orAlts[altIdx].ALT.call(this);
+              this._dslCounter = saved + counterDelta;
+              return r;
+            }
+            return OR_NO_MATCH;
+          };
+          this.markRuntimeLookaheadCachesDirty();
+        } else {
+          this._orLookahead[mapKey] = function orDispatchSimple(
+            this: ParserBase,
+            orAlts: IOrAlt<any>[],
+          ): any {
+            const altIdx = laFunc.call(this, orAlts);
+            if (altIdx !== undefined) {
+              return orAlts[altIdx].ALT.call(this);
+            }
+            return OR_NO_MATCH;
+          };
+          this.markRuntimeLookaheadCachesDirty();
+        }
+      }
+    } catch (_e) {
+      // GAST walk failed — stay on speculative path.
+    }
+  }
+
+  protected override lazyBuildProdClosure(
+    laKey: number,
+    occurrence: number,
+    _keyIdx: number,
+    prodType: PROD_TYPE,
+  ): void {
+    try {
+      this.ensureGastProductionsCachePopulated();
+      const ruleName = this.shortRuleNameToFull[this.currRuleShortName];
+      const rule = this.gastProductionsCache[ruleName];
+      if (rule === undefined) return;
+
+      const prodMaxLA = this.maxLookahead;
+      const paths = getLookaheadPathsForOptionalProd(
+        occurrence,
+        rule,
+        prodType,
+        prodMaxLA,
+      );
+      const insidePaths = paths[0];
+      const afterPaths = paths[1];
+      if (insidePaths === undefined || insidePaths.length === 0) return;
+      if (afterPaths !== undefined && afterPaths.length > 0) {
+        const insideFirst = new Set(
+          insidePaths
+            .filter((p) => p.length > 0)
+            .map((p) => p[0]?.tokenTypeIdx),
+        );
+        const hasOverlap = afterPaths.some(
+          (p) => p.length > 0 && insideFirst.has(p[0]?.tokenTypeIdx),
+        );
+        if (hasOverlap) return;
+      }
+      const tmatcher = this.tokenMatcher;
+      this._prodLookahead[laKey] = buildSingleAlternativeLookaheadFunction(
+        insidePaths,
+        tmatcher,
+        this.dynamicTokensEnabled,
+      );
+      this.markRuntimeLookaheadCachesDirty();
+    } catch (_e) {
+      // GAST walk failed — stay on speculative path.
+    }
   }
 
   public override reset(): void {
@@ -5586,6 +5555,7 @@ export class ForgivingParser extends ParserBase {
           );
         }
       }
+      this.captureLookaheadCacheBaseline();
     });
   }
 
@@ -5749,6 +5719,7 @@ export class ForgivingParser extends ParserBase {
         this.preComputeLookaheadCaches(true);
       }
     }
+    this.captureLookaheadCacheBaseline();
     this.selfAnalysisDone = true;
   }
 

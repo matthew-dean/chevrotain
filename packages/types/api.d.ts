@@ -889,7 +889,7 @@ export declare abstract class BaseParser {
  *    - https://chevrotain.io/docs/guide/concrete_syntax_tree.html
  * For in depth docs.
  */
-export declare class CstParser extends BaseParser {
+export declare class CstParser extends StrictParser {
   /**
    * Creates a Grammar Rule
    *
@@ -1036,7 +1036,7 @@ export declare class CstParser extends BaseParser {
  *   - https://chevrotain.io/docs/tutorial/step3_adding_actions_root.html#alternatives
  *   - https://chevrotain.io/docs/tutorial/step3b_adding_actions_embedded.html#simple-example
  */
-export declare class EmbeddedActionsParser extends BaseParser {
+export declare class EmbeddedActionsParser extends StrictParser {
   /**
    * Creates a Grammar Rule
    *

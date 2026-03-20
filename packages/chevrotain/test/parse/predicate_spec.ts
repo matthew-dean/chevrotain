@@ -445,90 +445,6 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
   });
 
   describe("OR GATE must be checked even after fast-dispatch cache is populated", () => {
-    it("restores the self-analysis lookahead baseline when parser.input is replaced", () => {
-      class ReuseCacheParser extends EmbeddedActionsParser {
-        constructor() {
-          super(ALL_TOKENS, { skipValidations: true });
-          this.performSelfAnalysis();
-        }
-
-        public staticRule = this.RULE("staticRule", () => {
-          return this.OR([
-            {
-              ALT: () => {
-                this.CONSUME1(A);
-                return "A";
-              },
-            },
-            {
-              ALT: () => {
-                this.CONSUME1(B);
-                return "B";
-              },
-            },
-          ]);
-        });
-      }
-
-      function snapshotLookaheadCaches(parser: any) {
-        return {
-          fastMaps: JSON.parse(JSON.stringify(parser._orFastMaps ?? [])),
-          gatedPrefixAlts: JSON.parse(
-            JSON.stringify(parser._orGatedPrefixAlts ?? []),
-          ),
-          committable: JSON.parse(JSON.stringify(parser._orCommittable ?? [])),
-          fastMapAltsRefKeys: Object.keys(parser._orFastMapAltsRef ?? {}),
-          orLookaheadKeys: Object.keys(parser._orLookahead ?? {}).filter(
-            (key) => parser._orLookahead[key] !== undefined,
-          ),
-          orLookaheadLL1Keys: Object.keys(parser._orLookaheadLL1 ?? {}).filter(
-            (key) => parser._orLookaheadLL1[key] !== undefined,
-          ),
-          prodLookaheadKeys: Object.keys(parser._prodLookahead ?? {}).filter(
-            (key) => parser._prodLookahead[key] !== undefined,
-          ),
-        };
-      }
-
-      const parser = new ReuseCacheParser();
-
-      parser.input = [createRegularToken(A)];
-      expect(parser.staticRule()).to.equal("A");
-      expect(parser.errors).to.be.empty;
-
-      const baseline = snapshotLookaheadCaches(parser);
-
-      const runtimeCacheState = parser as any;
-      runtimeCacheState._orFastMaps[999] = Object.assign(Object.create(null), {
-        [(A as any).tokenTypeIdx]: 0,
-      });
-      runtimeCacheState._orFastMapAltsRef[999] = [
-        {
-          ALT: () => "mutated",
-        },
-      ];
-      runtimeCacheState._orGatedPrefixAlts[999] = [0];
-      runtimeCacheState._orCommittable[999] = Object.assign(
-        Object.create(null),
-        {
-          [(A as any).tokenTypeIdx]: true,
-        },
-      );
-      runtimeCacheState._orLookahead[999] = () => 0;
-      runtimeCacheState._orLookaheadLL1[999] = () => 0;
-      runtimeCacheState._prodLookahead[999] = () => true;
-      runtimeCacheState._runtimeLookaheadCachesDirty = true;
-
-      parser.input = [createRegularToken(B)];
-      expect(snapshotLookaheadCaches(parser)).to.deep.equal(
-        baseline,
-        "replacing parser.input should restore the performSelfAnalysis cache baseline",
-      );
-
-      expect(parser.staticRule()).to.equal("B");
-      expect(parser.errors).to.be.empty;
-    });
-
     it("gated alt takes priority when gate passes, even after gate-free alt was cached", () => {
       // Scenario:
       // - Alt 0: GATED (gate = () => this.useGatedAlt), consumes token A → returns "gated"
@@ -540,7 +456,7 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       // Without the fix, parse 2 dispatches directly to cached alt 1,
       // ignoring alt 0 even though its gate now passes.
 
-      class GateFastPathParser extends EmbeddedActionsParser {
+      class GateFastPathParser extends SmartParser {
         public useGatedAlt = false;
 
         constructor() {
@@ -606,7 +522,7 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       //          → alt 1 succeeds
       // Parse 3: flag ON again → alt 0 should succeed again (still a candidate)
 
-      class GatedOptionParser extends EmbeddedActionsParser {
+      class GatedOptionParser extends SmartParser {
         public optionFlag = true;
 
         constructor() {
@@ -668,7 +584,7 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       // Alt 0: CONSUME(A), CONSUME(B) → needs [A, B]
       // Alt 1: CONSUME(A), CONSUME(C) → needs [A, C]
 
-      class FailWithProgressParser extends EmbeddedActionsParser {
+      class FailWithProgressParser extends SmartParser {
         constructor() {
           super(ALL_TOKENS, {});
           this.performSelfAnalysis();
@@ -748,7 +664,7 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       const CAT_TOKENS = [Keyword, IfKeyword, ElseKeyword, Ident];
       augmentTokenTypes(CAT_TOKENS);
 
-      class CategoryFastPathParser extends EmbeddedActionsParser {
+      class CategoryFastPathParser extends SmartParser {
         constructor() {
           super(CAT_TOKENS, {});
           this.performSelfAnalysis();
@@ -798,7 +714,7 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       //
       // Once cached, the same LA(1) always takes the same path.
 
-      class NonGatedOptionParser extends EmbeddedActionsParser {
+      class NonGatedOptionParser extends SmartParser {
         constructor() {
           super(ALL_TOKENS, {});
           this.performSelfAnalysis();
@@ -856,7 +772,7 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       // Alt 0: SUBRULE(helper) where helper = OPTION(GATE, CONSUME(A)) + CONSUME(B)
       // Alt 1: CONSUME(A)
 
-      class NestedGatedOptionParser extends EmbeddedActionsParser {
+      class NestedGatedOptionParser extends SmartParser {
         public optionFlag = true;
 
         constructor() {
@@ -940,7 +856,7 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       // Without tracking gated-prefix OPTIONs, the fast path gives the
       // WRONG result: it returns "alt1" instead of "alt0".
 
-      class GatedPrefixParser extends EmbeddedActionsParser {
+      class GatedPrefixParser extends SmartParser {
         public flag = false;
 
         constructor() {
@@ -997,7 +913,7 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       // around orInternal, the outer OR incorrectly marks alt 0 as having
       // a gated prefix, preventing it from being cached.
 
-      class NestedOrParser extends EmbeddedActionsParser {
+      class NestedOrParser extends SmartParser {
         public innerFlag = false;
 
         constructor() {
@@ -1110,7 +1026,7 @@ describe("The chevrotain support for custom gates/predicates on DSL production:"
       // Call 1: gate0 OFF, gate2 ON → alt 2 discovered as gated-prefix first.
       // Call 2: gate0 ON, gate2 OFF → alt 0 discovered as gated-prefix second.
 
-      class MultiGatedParser extends EmbeddedActionsParser {
+      class MultiGatedParser extends SmartParser {
         public gate0 = false;
         public gate2 = false;
 
