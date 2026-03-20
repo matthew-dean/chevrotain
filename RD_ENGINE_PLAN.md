@@ -138,10 +138,12 @@ The lexer takes the same absolute wall-time as v12. The remaining ~10% gap is:
    full elimination requires replacing `_dslCounter` with static compile-time
    indices (like v12's OR1/OR2 naming), which is a major refactor.
 
-- ⬜ **`orDispatchLL1Simple` — split lookup from call**: return altIdx from the
-  closure instead of calling ALT; have OR() call `alts[altIdx].ALT.call(this)`
-  directly. Makes the closure small enough for V8 to inline (like v12). Trades
-  closure simplicity for slightly more code in OR() — net should be a win.
+- ✅ **`orDispatchLL1Simple` — split lookup from call**: closure now returns
+  `altIdx` only (no `alts` param, no ALT call). OR() calls
+  `alts[altIdx].ALT.call(this)` directly. Stored in separate `_orLookaheadLL1[]`
+  map; OR() checks it before `_orLookahead[]`. Benchmark: within noise (±8%
+  cross-run variance on JSON warm). Committed since no regression and closure
+  is genuinely smaller.
 - ⬜ **`invokeRuleWithTryCst` — skip `_dslCounter` save/restore when possible**:
   parser methods that are only ever called as top-level rules (never as subrules)
   don't need the save/restore. Could specialize at `RULE()` definition time.

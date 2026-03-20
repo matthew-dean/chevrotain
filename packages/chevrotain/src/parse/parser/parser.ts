@@ -811,16 +811,15 @@ export class Parser {
                 return OR_NO_MATCH;
               };
             } else {
-              this._orLookahead[mapKey] = function orDispatchLL1Simple(
+              // Tiny closure: only looks up altIdx — no alts arg, no ALT call.
+              // OR() calls alts[altIdx].ALT.call(this) directly, making this
+              // closure small enough for V8 to inline at the call site.
+              this._orLookaheadLL1[mapKey] = function orDispatchLL1Simple(
                 this: Parser,
-                alts: IOrAlt<any>[],
-              ): any {
-                const altIdx =
-                  choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
-                if (altIdx !== undefined) {
-                  return alts[altIdx].ALT.call(this);
-                }
-                return OR_NO_MATCH;
+              ): number | undefined {
+                return choiceToAlt[
+                  this.tokVector[this.currIdx + 1].tokenTypeIdx!
+                ];
               };
             }
           } else {
@@ -1019,16 +1018,10 @@ export class Parser {
             return OR_NO_MATCH;
           };
         } else {
-          this._orLookahead[mapKey] = function orDispatchLL1Simple(
+          this._orLookaheadLL1[mapKey] = function orDispatchLL1Simple(
             this: Parser,
-            orAlts: IOrAlt<any>[],
-          ): any {
-            const altIdx =
-              choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
-            if (altIdx !== undefined) {
-              return orAlts[altIdx].ALT.call(this);
-            }
-            return OR_NO_MATCH;
+          ): number | undefined {
+            return choiceToAlt[this.tokVector[this.currIdx + 1].tokenTypeIdx!];
           };
         }
       } else {
@@ -1330,6 +1323,12 @@ export class Parser {
    */
   _orLookahead!: Record<number, (orAlts: IOrAlt<any>[]) => number | undefined>;
   /**
+   * LL(1) no-counter OR dispatch closures. Stored separately so the closure is
+   * tiny (returns altIdx only, no ALT call) and V8 can inline it. OR() calls
+   * alts[altIdx].ALT.call(this) directly after getting the index.
+   */
+  _orLookaheadLL1!: ((this: Parser) => number | undefined)[];
+  /**
    * Precomputed first-token sets for MANY/OPTION/AT_LEAST_ONE bodies.
    * Keyed by `getKeyForAutomaticLookahead(ruleShortName, prodTypeIdx, occurrence)`.
    * Values: `Record<tokenTypeIdx, true>` — a hash set. When present,
@@ -1369,6 +1368,7 @@ export class Parser {
     this._orAltHasAnyPrefix = false;
     this._orCommittable = [];
     this._orLookahead = [];
+    this._orLookaheadLL1 = [];
     this._prodLookahead = [];
 
     this.definedRulesNames = [];
@@ -2583,7 +2583,10 @@ export class Parser {
         }
         // Lazy closure building: if no precomputed closure exists yet,
         // try to build one from GAST for future calls. One-time cost.
-        if (this._orLookahead[mapKey] === undefined) {
+        if (
+          this._orLookahead[mapKey] === undefined &&
+          this._orLookaheadLL1[mapKey] === undefined
+        ) {
           this.lazyBuildOrClosure(mapKey);
         }
         return result;
@@ -3502,6 +3505,17 @@ export class Parser {
     // Primary path: precomputed LL(k) dispatch closure (same as OR below).
     if (!this.IS_SPECULATING) {
       const mapKey = this.currRuleShortName | idx;
+      const ll1Dispatch = this._orLookaheadLL1[mapKey];
+      if (ll1Dispatch !== undefined) {
+        const altIdx = ll1Dispatch.call(this);
+        if (altIdx !== undefined) {
+          const alts = isArray(altsOrOpts)
+            ? (altsOrOpts as IOrAlt<any>[])
+            : (altsOrOpts as OrMethodOpts<unknown>).DEF;
+          return alts[altIdx].ALT.call(this);
+        }
+        return this.orInternal(altsOrOpts, idx);
+      }
       const orDispatch = this._orLookahead[mapKey];
       if (orDispatch !== undefined) {
         const alts = isArray(altsOrOpts)
@@ -3971,6 +3985,19 @@ export class Parser {
     // keeping orInternal (too large to inline) off the hot call stack.
     if (!this.IS_SPECULATING) {
       const mapKey = this.currRuleShortName | idx;
+      // LL(1) no-counter fast path: tiny closure returns altIdx only.
+      // Closure is small enough for V8 to inline; OR() calls ALT directly.
+      const ll1Dispatch = this._orLookaheadLL1[mapKey];
+      if (ll1Dispatch !== undefined) {
+        const altIdx = ll1Dispatch.call(this);
+        if (altIdx !== undefined) {
+          const alts = isArray(altsOrOpts)
+            ? (altsOrOpts as IOrAlt<any>[])
+            : (altsOrOpts as OrMethodOpts<unknown>).DEF;
+          return alts[altIdx].ALT.call(this) as T;
+        }
+        return this.orInternal(altsOrOpts, idx);
+      }
       const orDispatch = this._orLookahead[mapKey];
       if (orDispatch !== undefined) {
         const alts = isArray(altsOrOpts)
