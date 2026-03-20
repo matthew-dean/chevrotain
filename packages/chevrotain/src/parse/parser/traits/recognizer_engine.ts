@@ -65,6 +65,12 @@ import { SPEC_FAIL } from "../parser.js";
 // the check `>= GATED_OFFSET` is a single integer comparison — zero cost.
 export const GATED_OFFSET = 256;
 
+// These absorbed trait sources are retained for reference/type compatibility
+// only; runtime behavior now lives in parser.ts. Use a widened `this` type for
+// forgiving-only paths so strict parser state does not need to carry these
+// fields just to satisfy legacy trait compilation.
+type ForgivingMixedInParser = any;
+
 /**
  * Records that `altIdx` matched when LA(1) had `tokenTypeIdx`. When a
  * preceding alt has a GATE, stores `altIdx + GATED_OFFSET` so the fast
@@ -527,7 +533,7 @@ export class RecognizerEngine {
    *   2. Recovery mode added errors — the optional content wasn't really there.
    */
   optionInternalLogic<OUT>(
-    this: MixedInParser,
+    this: ForgivingMixedInParser,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): OUT | undefined {
     let action: GrammarAction<OUT>;
@@ -599,7 +605,7 @@ export class RecognizerEngine {
    * speculatively running the full body and exiting via SPEC_FAIL.
    */
   atLeastOneInternalLogic<OUT>(
-    this: MixedInParser,
+    this: ForgivingMixedInParser,
     prodOccurrence: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOptsWithErr<OUT>,
   ): void {
@@ -831,7 +837,7 @@ export class RecognizerEngine {
    *   ambiguous OR) are preserved in `_errors` for diagnostics.
    */
   manyInternalLogic<OUT>(
-    this: MixedInParser,
+    this: ForgivingMixedInParser,
     prodOccurrence: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ) {
@@ -1122,7 +1128,7 @@ export class RecognizerEngine {
    * (no progress) or re-throw (progress made).
    */
   orInternal<T>(
-    this: MixedInParser,
+    this: ForgivingMixedInParser,
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
     occurrence: number,
   ): T {
@@ -1320,7 +1326,7 @@ export class RecognizerEngine {
           }
           if (!gpa.includes(i)) {
             gpa.push(i);
-            if (gpa.length > 1) gpa.sort((a, b) => a - b);
+            if (gpa.length > 1) gpa.sort((a: number, b: number) => a - b);
           }
         } else {
           addOrFastMapEntry(this._orFastMaps, mapKey, la1TypeIdx, i, alts);
@@ -1344,7 +1350,7 @@ export class RecognizerEngine {
             }
             if (!gpa.includes(i)) {
               gpa.push(i);
-              if (gpa.length > 1) gpa.sort((a, b) => a - b);
+              if (gpa.length > 1) gpa.sort((a: number, b: number) => a - b);
             }
           }
           // Record failed alt with progress for fast-dispatch ambiguity
@@ -1439,6 +1445,7 @@ export class RecognizerEngine {
       throw SPEC_FAIL;
     }
     this.raiseNoAltException(occurrence, errMsg);
+    throw SPEC_FAIL;
   }
 
   ruleFinallyStateUpdate(this: MixedInParser): void {

@@ -714,13 +714,8 @@ class ParserBase {
           )}`,
         );
       }
-      this.captureLookaheadCacheBaseline();
     });
   }
-
-  protected captureLookaheadCacheBaseline(): void {}
-
-  protected markRuntimeLookaheadCachesDirty(): void {}
 
   /**
    * Pre-populate `_orFastMaps` and `_orCommittable` from GAST first-token
@@ -1132,15 +1127,6 @@ class ParserBase {
       }
     }
   }
-
-  protected lazyBuildOrClosure(_mapKey: number): void {}
-
-  protected lazyBuildProdClosure(
-    _laKey: number,
-    _occurrence: number,
-    _keyIdx: number,
-    _prodType: PROD_TYPE,
-  ): void {}
 
   ensureGastProductionsCachePopulated(): void {
     if (!this.selfAnalysisDone) {
@@ -4752,7 +4738,7 @@ export class ForgivingParser extends ParserBase {
     this._baselineProdLookahead = [];
   }
 
-  protected override captureLookaheadCacheBaseline(): void {
+  protected captureLookaheadCacheBaseline(): void {
     this._baselineOrFastMaps = cloneSparseRecordTable(this._orFastMaps);
     this._baselineOrFastMapAltsRef = cloneSparseValueTable(
       this._orFastMapAltsRef,
@@ -4784,11 +4770,11 @@ export class ForgivingParser extends ParserBase {
     this._runtimeLookaheadCachesDirty = false;
   }
 
-  protected override markRuntimeLookaheadCachesDirty(): void {
+  protected markRuntimeLookaheadCachesDirty(): void {
     this._runtimeLookaheadCachesDirty = true;
   }
 
-  protected override lazyBuildOrClosure(mapKey: number): void {
+  protected lazyBuildOrClosure(mapKey: number): void {
     try {
       this.ensureGastProductionsCachePopulated();
       const ruleName = this.shortRuleNameToFull[this.currRuleShortName];
@@ -4905,7 +4891,7 @@ export class ForgivingParser extends ParserBase {
     }
   }
 
-  protected override lazyBuildProdClosure(
+  protected lazyBuildProdClosure(
     laKey: number,
     occurrence: number,
     _keyIdx: number,

@@ -5,14 +5,13 @@ import {
   StrictParser as StrictParserConstructorImpl,
   SmartParser as SmartParserConstructorImpl,
   SimpleParser as SimpleParserConstructorImpl,
-  Parser as ParserConstructorImpel,
 } from "../parser.js";
 import * as defs from "@chevrotain/types";
 /**
  * All traits have been absorbed into the strict parser implementation (Stage 7).
  * MixedInParser is now just StrictParser itself.
  */
-export type MixedInParser = ParserConstructorImpel;
+export type MixedInParser = StrictParserConstructorImpl;
 
 interface MixedInCstParserConstructor {
   new (
