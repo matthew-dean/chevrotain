@@ -365,108 +365,6 @@ function buildOrChoiceMap(
 export const GATED_OFFSET = 256;
 
 /**
- * Records that `altIdx` matched when LA(1) had `tokenTypeIdx`. When a
- * preceding alt has a GATE, stores `altIdx + GATED_OFFSET` so the fast
- * path knows to check gates adaptively. True ambiguity (two non-gated
- * alts) is marked as -1.
- */
-function addOrFastMapEntry(
-  orFastMaps: Record<number, Record<number, number>>,
-  orFastMapAltsRef: Record<number, IOrAlt<any>[]>,
-  mapKey: number,
-  tokenTypeIdx: number,
-  altIdx: number,
-  alts: IOrAlt<any>[],
-): void {
-  let map = orFastMaps[mapKey];
-  if (map === undefined) {
-    map = Object.create(null);
-    orFastMaps[mapKey] = map;
-    orFastMapAltsRef[mapKey] = alts;
-  }
-  // Check if any preceding alt has a GATE.
-  let hasGatedPredecessor = false;
-  for (let g = 0; g < altIdx; g++) {
-    if (alts[g].GATE !== undefined) {
-      hasGatedPredecessor = true;
-      break;
-    }
-  }
-  const encodedAlt = hasGatedPredecessor ? altIdx + GATED_OFFSET : altIdx;
-  const existing = map[tokenTypeIdx];
-  if (existing === undefined) {
-    map[tokenTypeIdx] = encodedAlt;
-  } else if (existing >= 0) {
-    const existingAlt =
-      existing >= GATED_OFFSET ? existing - GATED_OFFSET : existing;
-    if (existingAlt !== altIdx) {
-      const existingGated = alts[existingAlt].GATE !== undefined;
-      const newGated = alts[altIdx].GATE !== undefined;
-      if (existingGated && !newGated) {
-        map[tokenTypeIdx] = encodedAlt;
-      } else if (!existingGated && newGated) {
-        // keep existing non-gated, but mark gated if new has predecessor
-        if (hasGatedPredecessor && existing < GATED_OFFSET) {
-          map[tokenTypeIdx] = existing + GATED_OFFSET;
-        }
-      } else if (!existingGated && !newGated) {
-        map[tokenTypeIdx] = -1; // true ambiguity
-      }
-    }
-  }
-}
-
-function cloneNullProtoRecord<T>(
-  src: Record<number, T> | undefined,
-): Record<number, T> | undefined {
-  if (src === undefined) return undefined;
-  const clone: Record<number, T> = Object.create(null);
-  for (const key of Object.keys(src)) {
-    clone[key as any] = src[key as any];
-  }
-  return clone;
-}
-
-function cloneSparseRecordTable<T>(
-  src: Record<number, Record<number, T>>,
-): Record<number, Record<number, T>> {
-  const clone: Record<number, Record<number, T>> = [];
-  for (const key of Object.keys(src)) {
-    clone[key as any] = cloneNullProtoRecord(src[key as any]) as Record<
-      number,
-      T
-    >;
-  }
-  return clone;
-}
-
-function cloneSparseNumberArrayTable(
-  src: Record<number, number[]>,
-): Record<number, number[]> {
-  const clone: Record<number, number[]> = [];
-  for (const key of Object.keys(src)) {
-    clone[key as any] = src[key as any].slice();
-  }
-  return clone;
-}
-
-function cloneSparseValueTable<T>(src: Record<number, T>): Record<number, T> {
-  const clone: Record<number, T> = [];
-  for (const key of Object.keys(src)) {
-    clone[key as any] = src[key as any];
-  }
-  return clone;
-}
-
-function cloneSparseArray<T>(src: T[]): T[] {
-  const clone: T[] = [];
-  for (const key of Object.keys(src)) {
-    clone[key as any] = src[key as any];
-  }
-  return clone;
-}
-
-/**
  * Thrown by `consumeInternal` when `_earlyExitLookahead` is true and a token
  * successfully matches. This aborts the action immediately after the first
  * successful CONSUME, preventing embedded-action side effects from executing
@@ -4116,6 +4014,226 @@ function orNeedsCounterManagement(
   return false;
 }
 
+// --- GastRecorder module-level helpers (absorbed from trait) ---
+// Prefixed with `gast` to avoid name collisions with engine methods.
+function gastRecordProd(
+  prodConstructor: any,
+  mainProdArg: any,
+  occurrence: number,
+  handleSep: boolean = false,
+): any {
+  gastAssertMethodIdxIsValid(occurrence);
+  const prevProd: any = this.recordingProdStack.at(-1);
+  const grammarAction =
+    typeof mainProdArg === "function" ? mainProdArg : mainProdArg.DEF;
+
+  const newProd = new prodConstructor({ definition: [], idx: occurrence });
+  if (handleSep) {
+    newProd.separator = mainProdArg.SEP;
+  }
+  if (Object.hasOwn(mainProdArg, "MAX_LOOKAHEAD")) {
+    newProd.maxLookahead = mainProdArg.MAX_LOOKAHEAD;
+  }
+
+  this.recordingProdStack.push(newProd);
+  grammarAction.call(this);
+  prevProd.definition.push(newProd);
+  this.recordingProdStack.pop();
+
+  return RECORDING_NULL_OBJECT;
+}
+
+function gastRecordOrProd(mainProdArg: any, occurrence: number): any {
+  gastAssertMethodIdxIsValid(occurrence);
+  const prevProd: any = this.recordingProdStack.at(-1);
+  const hasOptions = isArray(mainProdArg) === false;
+  const alts: IOrAlt<unknown>[] =
+    hasOptions === false ? mainProdArg : mainProdArg.DEF;
+
+  const newOrProd = new Alternation({
+    definition: [],
+    idx: occurrence,
+    ignoreAmbiguities: hasOptions && mainProdArg.IGNORE_AMBIGUITIES === true,
+  });
+  if (Object.hasOwn(mainProdArg, "MAX_LOOKAHEAD")) {
+    newOrProd.maxLookahead = mainProdArg.MAX_LOOKAHEAD;
+  }
+
+  const hasPredicates = alts.some(
+    (currAlt: any) => typeof currAlt.GATE === "function",
+  );
+  newOrProd.hasPredicates = hasPredicates;
+
+  prevProd.definition.push(newOrProd);
+
+  const savedDslCounter = this._dslCounter;
+  const altStarts: number[] = [];
+
+  alts.forEach((currAlt) => {
+    altStarts.push(this._dslCounter - savedDslCounter);
+
+    const currAltFlat = new Alternative({ definition: [] });
+    newOrProd.definition.push(currAltFlat);
+    if (Object.hasOwn(currAlt, "IGNORE_AMBIGUITIES")) {
+      currAltFlat.ignoreAmbiguities = currAlt.IGNORE_AMBIGUITIES as boolean;
+    } else if (Object.hasOwn(currAlt, "GATE")) {
+      currAltFlat.ignoreAmbiguities = true;
+    }
+    this.recordingProdStack.push(currAltFlat);
+    currAlt.ALT.call(this);
+    this.recordingProdStack.pop();
+  });
+
+  const totalDelta = this._dslCounter - savedDslCounter;
+
+  const mapKey = this.currRuleShortName | occurrence;
+  this._orCounterDeltas[mapKey] = totalDelta;
+  this._orAltCounterStarts[mapKey] = altStarts;
+
+  return RECORDING_NULL_OBJECT;
+}
+
+function gastGetIdxSuffix(idx: number): string {
+  return idx === 0 ? "" : idx.toString();
+}
+
+function gastAssertMethodIdxIsValid(idx: number): void {
+  if (idx < 0 || idx > MAX_METHOD_IDX) {
+    const error: any = new Error(
+      `Invalid DSL Method idx value: <${idx}>\n\t` +
+        `Idx value must be a none negative value smaller than ${
+          MAX_METHOD_IDX + 1
+        }`,
+    );
+    error.KNOWN_RECORDER_ERROR = true;
+    throw error;
+  }
+}
+
+export class CstParser extends StrictParser {
+  constructor(
+    tokenVocabulary: TokenVocabulary,
+    config: IParserConfig = DEFAULT_PARSER_CONFIG,
+  ) {
+    const configClone = { ...config } as IParserConfigInternal;
+    configClone.outputCst = true;
+    super(tokenVocabulary, configClone);
+  }
+}
+
+export class EmbeddedActionsParser extends StrictParser {
+  constructor(
+    tokenVocabulary: TokenVocabulary,
+    config: IParserConfig = DEFAULT_PARSER_CONFIG,
+  ) {
+    const configClone = { ...config } as IParserConfigInternal;
+    configClone.outputCst = false;
+    super(tokenVocabulary, configClone);
+  }
+}
+
+// --- ForgivingParser helpers ---
+
+/**
+ * Records that `altIdx` matched when LA(1) had `tokenTypeIdx`. When a
+ * preceding alt has a GATE, stores `altIdx + GATED_OFFSET` so the fast
+ * path knows to check gates adaptively. True ambiguity (two non-gated
+ * alts) is marked as -1.
+ */
+function addOrFastMapEntry(
+  orFastMaps: Record<number, Record<number, number>>,
+  orFastMapAltsRef: Record<number, IOrAlt<any>[]>,
+  mapKey: number,
+  tokenTypeIdx: number,
+  altIdx: number,
+  alts: IOrAlt<any>[],
+): void {
+  let map = orFastMaps[mapKey];
+  if (map === undefined) {
+    map = Object.create(null);
+    orFastMaps[mapKey] = map;
+    orFastMapAltsRef[mapKey] = alts;
+  }
+  let hasGatedPredecessor = false;
+  for (let g = 0; g < altIdx; g++) {
+    if (alts[g].GATE !== undefined) {
+      hasGatedPredecessor = true;
+      break;
+    }
+  }
+  const encodedAlt = hasGatedPredecessor ? altIdx + GATED_OFFSET : altIdx;
+  const existing = map[tokenTypeIdx];
+  if (existing === undefined) {
+    map[tokenTypeIdx] = encodedAlt;
+  } else if (existing >= 0) {
+    const existingAlt =
+      existing >= GATED_OFFSET ? existing - GATED_OFFSET : existing;
+    if (existingAlt !== altIdx) {
+      const existingGated = alts[existingAlt].GATE !== undefined;
+      const newGated = alts[altIdx].GATE !== undefined;
+      if (existingGated && !newGated) {
+        map[tokenTypeIdx] = encodedAlt;
+      } else if (!existingGated && newGated) {
+        if (hasGatedPredecessor && existing < GATED_OFFSET) {
+          map[tokenTypeIdx] = existing + GATED_OFFSET;
+        }
+      } else if (!existingGated && !newGated) {
+        map[tokenTypeIdx] = -1;
+      }
+    }
+  }
+}
+
+function cloneNullProtoRecord<T>(
+  src: Record<number, T> | undefined,
+): Record<number, T> | undefined {
+  if (src === undefined) return undefined;
+  const clone: Record<number, T> = Object.create(null);
+  for (const key of Object.keys(src)) {
+    clone[key as any] = src[key as any];
+  }
+  return clone;
+}
+
+function cloneSparseRecordTable<T>(
+  src: Record<number, Record<number, T>>,
+): Record<number, Record<number, T>> {
+  const clone: Record<number, Record<number, T>> = [];
+  for (const key of Object.keys(src)) {
+    clone[key as any] = cloneNullProtoRecord(src[key as any]) as Record<
+      number,
+      T
+    >;
+  }
+  return clone;
+}
+
+function cloneSparseNumberArrayTable(
+  src: Record<number, number[]>,
+): Record<number, number[]> {
+  const clone: Record<number, number[]> = [];
+  for (const key of Object.keys(src)) {
+    clone[key as any] = src[key as any].slice();
+  }
+  return clone;
+}
+
+function cloneSparseValueTable<T>(src: Record<number, T>): Record<number, T> {
+  const clone: Record<number, T> = [];
+  for (const key of Object.keys(src)) {
+    clone[key as any] = src[key as any];
+  }
+  return clone;
+}
+
+function cloneSparseArray<T>(src: T[]): T[] {
+  const clone: T[] = [];
+  for (const key of Object.keys(src)) {
+    clone[key as any] = src[key as any];
+  }
+  return clone;
+}
+
 function forgivingOrInternal<T>(
   this: any,
   altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
@@ -4451,124 +4569,6 @@ function forgivingOrInternal<T>(
     : (altsOrOpts as OrMethodOpts<unknown>).ERR_MSG;
   this.raiseNoAltException(occurrence, em);
   throw new Error("unreachable");
-}
-
-// --- GastRecorder module-level helpers (absorbed from trait) ---
-// Prefixed with `gast` to avoid name collisions with engine methods.
-function gastRecordProd(
-  prodConstructor: any,
-  mainProdArg: any,
-  occurrence: number,
-  handleSep: boolean = false,
-): any {
-  gastAssertMethodIdxIsValid(occurrence);
-  const prevProd: any = this.recordingProdStack.at(-1);
-  const grammarAction =
-    typeof mainProdArg === "function" ? mainProdArg : mainProdArg.DEF;
-
-  const newProd = new prodConstructor({ definition: [], idx: occurrence });
-  if (handleSep) {
-    newProd.separator = mainProdArg.SEP;
-  }
-  if (Object.hasOwn(mainProdArg, "MAX_LOOKAHEAD")) {
-    newProd.maxLookahead = mainProdArg.MAX_LOOKAHEAD;
-  }
-
-  this.recordingProdStack.push(newProd);
-  grammarAction.call(this);
-  prevProd.definition.push(newProd);
-  this.recordingProdStack.pop();
-
-  return RECORDING_NULL_OBJECT;
-}
-
-function gastRecordOrProd(mainProdArg: any, occurrence: number): any {
-  gastAssertMethodIdxIsValid(occurrence);
-  const prevProd: any = this.recordingProdStack.at(-1);
-  const hasOptions = isArray(mainProdArg) === false;
-  const alts: IOrAlt<unknown>[] =
-    hasOptions === false ? mainProdArg : mainProdArg.DEF;
-
-  const newOrProd = new Alternation({
-    definition: [],
-    idx: occurrence,
-    ignoreAmbiguities: hasOptions && mainProdArg.IGNORE_AMBIGUITIES === true,
-  });
-  if (Object.hasOwn(mainProdArg, "MAX_LOOKAHEAD")) {
-    newOrProd.maxLookahead = mainProdArg.MAX_LOOKAHEAD;
-  }
-
-  const hasPredicates = alts.some(
-    (currAlt: any) => typeof currAlt.GATE === "function",
-  );
-  newOrProd.hasPredicates = hasPredicates;
-
-  prevProd.definition.push(newOrProd);
-
-  const savedDslCounter = this._dslCounter;
-  const altStarts: number[] = [];
-
-  alts.forEach((currAlt) => {
-    altStarts.push(this._dslCounter - savedDslCounter);
-
-    const currAltFlat = new Alternative({ definition: [] });
-    newOrProd.definition.push(currAltFlat);
-    if (Object.hasOwn(currAlt, "IGNORE_AMBIGUITIES")) {
-      currAltFlat.ignoreAmbiguities = currAlt.IGNORE_AMBIGUITIES as boolean;
-    } else if (Object.hasOwn(currAlt, "GATE")) {
-      currAltFlat.ignoreAmbiguities = true;
-    }
-    this.recordingProdStack.push(currAltFlat);
-    currAlt.ALT.call(this);
-    this.recordingProdStack.pop();
-  });
-
-  const totalDelta = this._dslCounter - savedDslCounter;
-
-  const mapKey = this.currRuleShortName | occurrence;
-  this._orCounterDeltas[mapKey] = totalDelta;
-  this._orAltCounterStarts[mapKey] = altStarts;
-
-  return RECORDING_NULL_OBJECT;
-}
-
-function gastGetIdxSuffix(idx: number): string {
-  return idx === 0 ? "" : idx.toString();
-}
-
-function gastAssertMethodIdxIsValid(idx: number): void {
-  if (idx < 0 || idx > MAX_METHOD_IDX) {
-    const error: any = new Error(
-      `Invalid DSL Method idx value: <${idx}>\n\t` +
-        `Idx value must be a none negative value smaller than ${
-          MAX_METHOD_IDX + 1
-        }`,
-    );
-    error.KNOWN_RECORDER_ERROR = true;
-    throw error;
-  }
-}
-
-export class CstParser extends StrictParser {
-  constructor(
-    tokenVocabulary: TokenVocabulary,
-    config: IParserConfig = DEFAULT_PARSER_CONFIG,
-  ) {
-    const configClone = { ...config } as IParserConfigInternal;
-    configClone.outputCst = true;
-    super(tokenVocabulary, configClone);
-  }
-}
-
-export class EmbeddedActionsParser extends StrictParser {
-  constructor(
-    tokenVocabulary: TokenVocabulary,
-    config: IParserConfig = DEFAULT_PARSER_CONFIG,
-  ) {
-    const configClone = { ...config } as IParserConfigInternal;
-    configClone.outputCst = false;
-    super(tokenVocabulary, configClone);
-  }
 }
 
 export class ForgivingParser extends ParserBase {
