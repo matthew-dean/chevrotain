@@ -31,15 +31,23 @@ const libPath = getArg(
   "--lib",
   new URL("../lib/chevrotain.mjs", import.meta.url).href,
 );
-const mode = getArg("--mode", "warm"); // "warm" | "cold" | "first-parse" | "construction" | "all"
+const mode = getArg("--mode", "warm"); // "warm" | "warm-lex" | "warm-parse" | "cold" | "first-parse" | "construction" | "all"
 const selectedParser = getArg("--parser", "all");
 const useCst = args.includes("--cst");
+const useSmart = args.includes("--smart");
 const quiet = args.includes("--quiet");
 // --no-psa: construct parsers WITHOUT calling performSelfAnalysis().
 // Local no-PSA runs use SmartParser. v12 requires performSelfAnalysis().
 const noPsa = args.includes("--no-psa");
 const ITERATIONS = parseInt(getArg("--iterations", "5000"), 10);
 const WARMUP = Math.max(100, Math.floor(ITERATIONS * 0.1));
+const defaultRuns = mode === "compare" ? "3" : "1";
+const defaultBurnInRuns = mode === "compare" ? "1" : "0";
+const RUNS = Math.max(1, parseInt(getArg("--runs", defaultRuns), 10));
+const BURN_IN_RUNS = Math.max(
+  0,
+  parseInt(getArg("--burn-in-runs", defaultBurnInRuns), 10),
+);
 
 // ---------------------------------------------------------------------------
 // Load chevrotain
@@ -54,7 +62,7 @@ const { createToken, Lexer, EmbeddedActionsParser, CstParser, SmartParser } =
   chevrotain;
 const ParserBase = useCst
   ? CstParser
-  : noPsa
+  : useSmart || noPsa
     ? SmartParser
     : EmbeddedActionsParser;
 const parserConfig = useCst ? {} : { outputCst: false };
@@ -183,10 +191,15 @@ function makeJsonParser() {
 
   return {
     name: "JSON",
-    run() {
-      const { tokens } = lexer.tokenize(sample);
+    tokenize() {
+      return lexer.tokenize(sample).tokens;
+    },
+    parse(tokens) {
       parser.input = tokens;
       parser.json();
+    },
+    run() {
+      this.parse(this.tokenize());
     },
   };
 }
@@ -346,10 +359,15 @@ function makeCssParser() {
 
   return {
     name: "CSS",
-    run() {
-      const { tokens } = lexer.tokenize(sample);
+    tokenize() {
+      return lexer.tokenize(sample).tokens;
+    },
+    parse(tokens) {
       parser.input = tokens;
       parser.stylesheet();
+    },
+    run() {
+      this.parse(this.tokenize());
     },
   };
 }
@@ -389,6 +407,27 @@ function bench(name, fn) {
   return opsPerSec;
 }
 
+function median(nums) {
+  const xs = [...nums].sort((a, b) => a - b);
+  return xs[Math.floor(xs.length / 2)];
+}
+
+function stripFlags(argv, flagsWithValues = [], flagsWithoutValues = []) {
+  const result = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (flagsWithValues.includes(arg)) {
+      i++;
+      continue;
+    }
+    if (flagsWithoutValues.includes(arg)) {
+      continue;
+    }
+    result.push(arg);
+  }
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -402,11 +441,14 @@ if (!quiet) {
   console.log(`\nChevrotain parser benchmark`);
   console.log(`  lib:        ${libUrl}`);
   console.log(
-    `  parser type: ${useCst ? "CstParser" : noPsa ? "SmartParser" : "EmbeddedActionsParser"}`,
+    `  parser type: ${useCst ? "CstParser" : useSmart || noPsa ? "SmartParser" : "EmbeddedActionsParser"}`,
   );
   console.log(`  mode:       ${mode}`);
   console.log(
     `  iterations: ${ITERATIONS.toLocaleString()} (+ ${WARMUP.toLocaleString()} warmup)`,
+  );
+  console.log(
+    `  warm runs:  ${RUNS.toLocaleString()}${BURN_IN_RUNS > 0 ? ` (+ ${BURN_IN_RUNS.toLocaleString()} burn-in)` : ""}`,
   );
   console.log(`  parsers:    ${factories.map((f) => f.name).join(", ")}`);
   console.log(`  psa:        ${noPsa ? "SKIP (lazy-build path)" : "yes"}\n`);
@@ -436,7 +478,14 @@ if (mode === "all") {
   const baseArgs = process.argv
     .slice(2)
     .filter((a, i, arr) => a !== "--mode" && arr[i - 1] !== "--mode");
-  for (const phase of ["construction", "cold", "first-parse", "warm"]) {
+  for (const phase of [
+    "construction",
+    "cold",
+    "first-parse",
+    "warm-lex",
+    "warm-parse",
+    "warm",
+  ]) {
     const childArgs = [selfPath, "--mode", phase, ...baseArgs, "--quiet"];
     try {
       const output = _execFileSync(nodeExec, childArgs, {
@@ -452,6 +501,34 @@ if (mode === "all") {
     }
   }
   process.exit(0);
+}
+
+function measureConstructionAndCold() {
+  const results = {};
+  for (const f of factories) {
+    // Measure constructor and first parse in the same repetition so the
+    // reported rows add up exactly: construct+parse = constructor + parse-only.
+    f.make(); // throwaway for module/cache warmup symmetry with timeMs()
+    let constructionTotal = 0;
+    let coldTotal = 0;
+    for (let i = 0; i < REPS; i++) {
+      const t0 = performance.now();
+      const p = f.make();
+      const t1 = performance.now();
+      p.run();
+      const t2 = performance.now();
+      constructionTotal += t1 - t0;
+      coldTotal += t2 - t0;
+    }
+    const construction = constructionTotal / REPS;
+    const cold = coldTotal / REPS;
+    results[f.name] = {
+      construction: parseFloat(construction.toFixed(2)),
+      cold: parseFloat(cold.toFixed(2)),
+      "first-parse": parseFloat((cold - construction).toFixed(3)),
+    };
+  }
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -494,28 +571,81 @@ if (mode === "compare") {
     }
   }
 
-  const phases = ["construction", "first-parse", "cold", "warm"];
+  function runWarmMedian(phase, extraArgs) {
+    const warmRuns = [];
+    for (let i = 0; i < BURN_IN_RUNS; i++) {
+      runPhase(phase, extraArgs);
+    }
+    for (let i = 0; i < RUNS; i++) {
+      const data = runPhase(phase, extraArgs);
+      if (data != null) warmRuns.push(data);
+    }
+    if (warmRuns.length === 0) return null;
+    const result = {};
+    for (const parser of parserNames) {
+      const vals = warmRuns
+        .map((row) => row?.[parser])
+        .filter((v) => typeof v === "number");
+      result[parser] = vals.length > 0 ? median(vals) : null;
+    }
+    return result;
+  }
+
+  const phases = [
+    "construction",
+    "first-parse",
+    "cold",
+    "warm-lex",
+    "warm-parse",
+    "warm",
+  ];
   const configs = [
     { label: "v12 + psa", args: ["--lib", v12Lib] },
-    { label: "ours + psa", args: ["--lib", ourLib] },
-    { label: "smart - psa", args: ["--lib", ourLib, "--no-psa"] },
+    { label: "embed + psa", args: ["--lib", ourLib] },
+    { label: "smart + psa", args: ["--lib", ourLib, "--smart"] },
+    { label: "smart - psa", args: ["--lib", ourLib, "--smart", "--no-psa"] },
   ];
 
   // Collect results: results[phase][configLabel][parserName] = value
   const results = {};
   const parserNames = ["JSON", "CSS"];
-  for (const phase of phases) {
+  for (const phase of ["construction", "cold"]) {
     results[phase] = {};
-    process.stderr.write(`  running ${phase}...`);
-    for (const cfg of configs) {
-      const data = runPhase(phase, cfg.args);
-      results[phase][cfg.label] = data;
-    }
-    process.stderr.write(" done\n");
   }
+  results["first-parse"] = {};
+  results["warm-lex"] = {};
+  results["warm-parse"] = {};
+  results.warm = {};
+
+  process.stderr.write(`  running constructor/cold...`);
+  for (const cfg of configs) {
+    const data = runPhase("summary", cfg.args);
+    results.construction[cfg.label] = {};
+    results["first-parse"][cfg.label] = {};
+    results.cold[cfg.label] = {};
+    for (const parser of parserNames) {
+      const row = data?.[parser];
+      results.construction[cfg.label][parser] = row?.construction ?? null;
+      results["first-parse"][cfg.label][parser] = row?.["first-parse"] ?? null;
+      results.cold[cfg.label][parser] = row?.cold ?? null;
+    }
+  }
+  process.stderr.write(" done\n");
+
+  process.stderr.write(`  running warm...`);
+  for (const warmPhase of ["warm-lex", "warm-parse", "warm"]) {
+    for (const cfg of configs) {
+      const data =
+        RUNS > 1 || BURN_IN_RUNS > 0
+          ? runWarmMedian(warmPhase, cfg.args)
+          : runPhase(warmPhase, cfg.args);
+      results[warmPhase][cfg.label] = data;
+    }
+  }
+  process.stderr.write(" done\n");
 
   // Print table
-  const isWarm = (phase) => phase === "warm";
+  const isWarm = (phase) => phase.startsWith("warm");
   const fmt = (phase, val) =>
     val == null
       ? "  ERROR  "
@@ -526,7 +656,9 @@ if (mode === "compare") {
     construction: "constructor",
     cold: "construct+parse",
     "first-parse": "parse-only",
-    warm: "warm-reuse",
+    "warm-lex": "lex-warm",
+    "warm-parse": "parse-warm",
+    warm: "full-warm",
   };
 
   const ratio = (phase, ourVal, v12Val) => {
@@ -536,47 +668,49 @@ if (mode === "compare") {
   };
 
   console.log(
-    "\n╔══════════════════════════════════════════════════════════════════╗",
+    "\n╔══════════════════════════════════════════════════════════════════════════════════════╗",
   );
   console.log(
-    "║             Chevrotain benchmark: ours vs v12                    ║",
+    "║                      Chevrotain benchmark: strict vs smart vs v12                 ║",
   );
   console.log(
-    "╠══════════════════════════════════════════════════════════════════╣",
+    "╠══════════════════════════════════════════════════════════════════════════════════════╣",
   );
 
   for (const parser of parserNames) {
     console.log(
-      `║  ${parser}                                                               ║`.slice(
+      `║  ${parser}                                                                              ║`.slice(
         0,
-        69,
+        86,
       ) + "║",
     );
     console.log(
-      `║  Phase          v12 + psa    ours + psa   smart - psa          ║`,
+      `║  Phase          v12 + psa    embed + psa   smart + psa   smart - psa                  ║`,
     );
     console.log(
-      `║  ─────────────────────────────────────────────────────────────  ║`,
+      `║  ────────────────────────────────────────────────────────────────────────────────────  ║`,
     );
     for (const phase of phases) {
       const v12Val = results[phase][configs[0].label]?.[parser];
-      const psaVal = results[phase][configs[1].label]?.[parser];
-      const nopsaVal = results[phase][configs[2].label]?.[parser];
-      const r1 = ratio(phase, psaVal, v12Val);
-      const r2 = ratio(phase, nopsaVal, v12Val);
+      const embedVal = results[phase][configs[1].label]?.[parser];
+      const smartPsaVal = results[phase][configs[2].label]?.[parser];
+      const smartNoPsaVal = results[phase][configs[3].label]?.[parser];
+      const r1 = ratio(phase, embedVal, v12Val);
+      const r2 = ratio(phase, smartPsaVal, v12Val);
+      const r3 = ratio(phase, smartNoPsaVal, v12Val);
       const phasePad = phaseLabels[phase].padEnd(13);
       console.log(
-        `║  ${phasePad}  ${fmt(phase, v12Val)}  ${fmt(phase, psaVal)} ${r1.padEnd(6)}  ${fmt(phase, nopsaVal)} ${r2.padEnd(6)}  ║`,
+        `║  ${phasePad}  ${fmt(phase, v12Val)}  ${fmt(phase, embedVal)} ${r1.padEnd(6)}  ${fmt(phase, smartPsaVal)} ${r2.padEnd(6)}  ${fmt(phase, smartNoPsaVal)} ${r3.padEnd(6)}  ║`,
       );
     }
     if (parser !== parserNames[parserNames.length - 1]) {
       console.log(
-        "╠══════════════════════════════════════════════════════════════════╣",
+        "╠══════════════════════════════════════════════════════════════════════════════════════╣",
       );
     }
   }
   console.log(
-    "╚══════════════════════════════════════════════════════════════════╝",
+    "╚══════════════════════════════════════════════════════════════════════════════════════╝",
   );
   console.log(
     "  ratios: higher = better for warm (ops/s), lower = better for ms phases",
@@ -623,14 +757,10 @@ if (mode === "cold") {
 }
 
 if (mode === "first-parse") {
+  const combined = measureConstructionAndCold();
   const results = {};
-  for (const f of factories) {
-    const ms =
-      timeMs(() => {
-        const p = f.make();
-        p.run();
-      }, REPS) - timeMs(() => f.make(), REPS);
-    results[f.name] = parseFloat(ms.toFixed(3));
+  for (const [name, timings] of Object.entries(combined)) {
+    results[name] = timings["first-parse"];
   }
   if (jsonOutput) {
     console.log(JSON.stringify(results));
@@ -641,11 +771,98 @@ if (mode === "first-parse") {
   }
 }
 
-if (mode === "warm") {
+if (mode === "summary") {
+  const results = measureConstructionAndCold();
+  if (jsonOutput) {
+    console.log(JSON.stringify(results));
+  } else {
+    console.log(results);
+  }
+}
+
+if (mode === "warm" || mode === "warm-lex" || mode === "warm-parse") {
+  const warmVariant = mode;
+
+  if (RUNS > 1 || BURN_IN_RUNS > 0) {
+    const selfPath = new URL(import.meta.url).pathname;
+    const baseArgs = stripFlags(
+      process.argv.slice(2),
+      ["--runs", "--burn-in-runs", "--mode", "--parser"],
+      ["--json", "--quiet"],
+    );
+    const results = {};
+    for (const f of factories) {
+      const samples = [];
+      for (let i = 0; i < BURN_IN_RUNS; i++) {
+        const out = _execFileSync(
+          nodeExec,
+          [
+            selfPath,
+            ...baseArgs,
+            "--mode",
+            warmVariant,
+            "--parser",
+            f.name.toLowerCase(),
+            "--json",
+            "--quiet",
+          ],
+          {
+            encoding: "utf-8",
+            stdio: ["ignore", "pipe", "inherit"],
+          },
+        );
+        void out;
+      }
+      for (let i = 0; i < RUNS; i++) {
+        const out = _execFileSync(
+          nodeExec,
+          [
+            selfPath,
+            ...baseArgs,
+            "--mode",
+            warmVariant,
+            "--parser",
+            f.name.toLowerCase(),
+            "--json",
+            "--quiet",
+          ],
+          {
+            encoding: "utf-8",
+            stdio: ["ignore", "pipe", "inherit"],
+          },
+        );
+        const lines = out
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean);
+        const data = JSON.parse(lines[lines.length - 1]);
+        samples.push(data[f.name]);
+      }
+      results[f.name] = median(samples);
+    }
+    if (jsonOutput && quiet) {
+      console.log(JSON.stringify(results));
+    } else {
+      console.log(`warm median over ${RUNS} run(s)`);
+      for (const [k, v] of Object.entries(results))
+        console.log(
+          `  ${k.padEnd(8)} ${Math.round(v).toLocaleString().padStart(10)} ops/sec`,
+        );
+    }
+    process.exit(0);
+  }
+
   const results = {};
   for (const f of factories) {
     const p = f.make();
-    results[f.name] = bench(f.name, () => p.run());
+    if (warmVariant === "warm-lex") {
+      results[f.name] = bench(f.name, () => p.tokenize());
+    } else if (warmVariant === "warm-parse") {
+      const tokens = p.tokenize();
+      results[f.name] = bench(f.name, () => p.parse(tokens));
+    } else {
+      results[f.name] = bench(f.name, () => p.run());
+    }
   }
   if (jsonOutput && quiet) {
     console.log(JSON.stringify(results));

@@ -4112,64 +4112,6 @@ function findParentDef(
   return null;
 }
 
-function findAlternationByIdx(
-  defs: IProduction[],
-  occurrence: number,
-): Alternation | undefined {
-  for (const node of defs) {
-    if (node instanceof Alternation && node.idx === occurrence) {
-      return node;
-    }
-    const subDef = (node as any).definition;
-    if (isArray(subDef)) {
-      const found = findAlternationByIdx(subDef as IProduction[], occurrence);
-      if (found !== undefined) return found;
-    }
-  }
-  return undefined;
-}
-
-function findOptionalProdByIdx(
-  defs: IProduction[],
-  keyIdx: number,
-  occurrence: number,
-):
-  | Option
-  | Repetition
-  | RepetitionMandatory
-  | RepetitionWithSeparator
-  | RepetitionMandatoryWithSeparator
-  | undefined {
-  for (const node of defs) {
-    const matches =
-      ((keyIdx === OPTION_IDX && node instanceof Option) ||
-        (keyIdx === MANY_IDX && node instanceof Repetition) ||
-        (keyIdx === MANY_SEP_IDX && node instanceof RepetitionWithSeparator) ||
-        (keyIdx === AT_LEAST_ONE_IDX && node instanceof RepetitionMandatory) ||
-        (keyIdx === AT_LEAST_ONE_SEP_IDX &&
-          node instanceof RepetitionMandatoryWithSeparator)) &&
-      node.idx === occurrence;
-    if (matches) {
-      return node as
-        | Option
-        | Repetition
-        | RepetitionMandatory
-        | RepetitionWithSeparator
-        | RepetitionMandatoryWithSeparator;
-    }
-    const subDef = (node as any).definition;
-    if (isArray(subDef)) {
-      const found = findOptionalProdByIdx(
-        subDef as IProduction[],
-        keyIdx,
-        occurrence,
-      );
-      if (found !== undefined) return found;
-    }
-  }
-  return undefined;
-}
-
 /**
  * Returns true when counter management must be preserved in the OR dispatch
  * closure. When false, orDispatchLL1Simple (no counter management) is safe.
