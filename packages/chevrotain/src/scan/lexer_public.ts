@@ -806,14 +806,6 @@ export class Lexer {
   /* istanbul ignore next - place holder */
   private createTokenInstance!: (...args: any[]) => IToken;
 
-  /**
-   * All three factory variants produce the same property set so V8 assigns
-   * every IToken a single hidden class. Fields unused in a given tracking mode
-   * are set to undefined rather than omitted — omitting them would create a
-   * different hidden class and make token property accesses polymorphic.
-   * payload and isInsertedInRecovery are always pre-declared so recovery can
-   * set them without triggering a hidden-class transition.
-   */
   private createOffsetOnlyToken(
     image: string,
     startOffset: number,
@@ -823,15 +815,8 @@ export class Lexer {
     return {
       image,
       startOffset,
-      endOffset: undefined,
-      startLine: undefined,
-      endLine: undefined,
-      startColumn: undefined,
-      endColumn: undefined,
       tokenTypeIdx,
       tokenType,
-      payload: undefined,
-      isInsertedInRecovery: false,
     };
   }
 
@@ -846,15 +831,10 @@ export class Lexer {
     return {
       image,
       startOffset,
-      endOffset: undefined,
       startLine,
-      endLine: startLine,
       startColumn,
-      endColumn: undefined,
       tokenTypeIdx,
       tokenType,
-      payload: undefined,
-      isInsertedInRecovery: false,
     };
   }
 
@@ -877,8 +857,6 @@ export class Lexer {
       endColumn: startColumn + imageLength - 1,
       tokenTypeIdx,
       tokenType,
-      payload: undefined,
-      isInsertedInRecovery: false,
     };
   }
 

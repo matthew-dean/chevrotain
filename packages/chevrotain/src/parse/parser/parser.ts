@@ -4406,15 +4406,15 @@ function forgivingOrInternal<T>(
         if (gpa === undefined) {
           gpa = [];
           this._orGatedPrefixAlts[mapKey] = gpa;
-          this._runtimeLookaheadCachesDirty = true;
+          this.markRuntimeLookaheadCachesDirty();
         }
         if (!gpa.includes(i)) {
           gpa.push(i);
           if (gpa.length > 1) gpa.sort((a: number, b: number) => a - b);
-          this._runtimeLookaheadCachesDirty = true;
+          this.markRuntimeLookaheadCachesDirty();
         }
       } else {
-        this._runtimeLookaheadCachesDirty = true;
+        this.markRuntimeLookaheadCachesDirty();
         addOrFastMapEntry(
           this._orFastMaps,
           this._orFastMapAltsRef,
@@ -4428,10 +4428,10 @@ function forgivingOrInternal<T>(
           if (cm === undefined) {
             cm = Object.create(null);
             this._orCommittable[mapKey] = cm;
-            this._runtimeLookaheadCachesDirty = true;
+            this.markRuntimeLookaheadCachesDirty();
           }
           cm[la1TypeIdx] = true;
-          this._runtimeLookaheadCachesDirty = true;
+          this.markRuntimeLookaheadCachesDirty();
         }
       }
       this._orAltStartLexPos = savedAltStartLexPos;
@@ -4456,17 +4456,17 @@ function forgivingOrInternal<T>(
           if (gpa === undefined) {
             gpa = [];
             this._orGatedPrefixAlts[mapKey] = gpa;
-            this._runtimeLookaheadCachesDirty = true;
+            this.markRuntimeLookaheadCachesDirty();
           }
           if (!gpa.includes(i)) {
             gpa.push(i);
             if (gpa.length > 1) gpa.sort((a: number, b: number) => a - b);
-            this._runtimeLookaheadCachesDirty = true;
+            this.markRuntimeLookaheadCachesDirty();
           }
         }
         const progress = this.exportLexerState() - startLexPos;
         if (!this._orAltHasGatedPrefix && progress > 0) {
-          this._runtimeLookaheadCachesDirty = true;
+          this.markRuntimeLookaheadCachesDirty();
           addOrFastMapEntry(
             this._orFastMaps,
             this._orFastMapAltsRef,
