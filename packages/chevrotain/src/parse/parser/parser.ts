@@ -107,6 +107,13 @@ import {
   tokenStructuredMatcherNoCategories,
 } from "../../scan/tokens.js";
 import { IParserConfigInternal, ParserMethodInternal } from "./types.js";
+import {
+  addOrFastMapEntry,
+  cloneSparseArray,
+  cloneSparseNumberArrayTable,
+  cloneSparseRecordTable,
+  cloneSparseValueTable,
+} from "./forgiving_parser_utils.js";
 import { first as gastFirst } from "../grammar/first.js";
 import {
   AT_LEAST_ONE_IDX,
@@ -4134,106 +4141,6 @@ export class EmbeddedActionsParser extends StrictParser {
 
 // --- ForgivingParser helpers ---
 
-/**
- * Records that `altIdx` matched when LA(1) had `tokenTypeIdx`. When a
- * preceding alt has a GATE, stores `altIdx + GATED_OFFSET` so the fast
- * path knows to check gates adaptively. True ambiguity (two non-gated
- * alts) is marked as -1.
- */
-function addOrFastMapEntry(
-  orFastMaps: Record<number, Record<number, number>>,
-  orFastMapAltsRef: Record<number, IOrAlt<any>[]>,
-  mapKey: number,
-  tokenTypeIdx: number,
-  altIdx: number,
-  alts: IOrAlt<any>[],
-): void {
-  let map = orFastMaps[mapKey];
-  if (map === undefined) {
-    map = Object.create(null);
-    orFastMaps[mapKey] = map;
-    orFastMapAltsRef[mapKey] = alts;
-  }
-  let hasGatedPredecessor = false;
-  for (let g = 0; g < altIdx; g++) {
-    if (alts[g].GATE !== undefined) {
-      hasGatedPredecessor = true;
-      break;
-    }
-  }
-  const encodedAlt = hasGatedPredecessor ? altIdx + GATED_OFFSET : altIdx;
-  const existing = map[tokenTypeIdx];
-  if (existing === undefined) {
-    map[tokenTypeIdx] = encodedAlt;
-  } else if (existing >= 0) {
-    const existingAlt =
-      existing >= GATED_OFFSET ? existing - GATED_OFFSET : existing;
-    if (existingAlt !== altIdx) {
-      const existingGated = alts[existingAlt].GATE !== undefined;
-      const newGated = alts[altIdx].GATE !== undefined;
-      if (existingGated && !newGated) {
-        map[tokenTypeIdx] = encodedAlt;
-      } else if (!existingGated && newGated) {
-        if (hasGatedPredecessor && existing < GATED_OFFSET) {
-          map[tokenTypeIdx] = existing + GATED_OFFSET;
-        }
-      } else if (!existingGated && !newGated) {
-        map[tokenTypeIdx] = -1;
-      }
-    }
-  }
-}
-
-function cloneNullProtoRecord<T>(
-  src: Record<number, T> | undefined,
-): Record<number, T> | undefined {
-  if (src === undefined) return undefined;
-  const clone: Record<number, T> = Object.create(null);
-  for (const key of Object.keys(src)) {
-    clone[key as any] = src[key as any];
-  }
-  return clone;
-}
-
-function cloneSparseRecordTable<T>(
-  src: Record<number, Record<number, T>>,
-): Record<number, Record<number, T>> {
-  const clone: Record<number, Record<number, T>> = [];
-  for (const key of Object.keys(src)) {
-    clone[key as any] = cloneNullProtoRecord(src[key as any]) as Record<
-      number,
-      T
-    >;
-  }
-  return clone;
-}
-
-function cloneSparseNumberArrayTable(
-  src: Record<number, number[]>,
-): Record<number, number[]> {
-  const clone: Record<number, number[]> = [];
-  for (const key of Object.keys(src)) {
-    clone[key as any] = src[key as any].slice();
-  }
-  return clone;
-}
-
-function cloneSparseValueTable<T>(src: Record<number, T>): Record<number, T> {
-  const clone: Record<number, T> = [];
-  for (const key of Object.keys(src)) {
-    clone[key as any] = src[key as any];
-  }
-  return clone;
-}
-
-function cloneSparseArray<T>(src: T[]): T[] {
-  const clone: T[] = [];
-  for (const key of Object.keys(src)) {
-    clone[key as any] = src[key as any];
-  }
-  return clone;
-}
-
 function forgivingOrInternal<T>(
   this: any,
   altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
@@ -4445,6 +4352,7 @@ function forgivingOrInternal<T>(
           la1TypeIdx,
           i,
           alts,
+          GATED_OFFSET,
         );
         if (!this._orAltHasAnyPrefix) {
           let cm = this._orCommittable[mapKey];
@@ -4497,6 +4405,7 @@ function forgivingOrInternal<T>(
             la1TypeIdx,
             i,
             alts,
+            GATED_OFFSET,
           );
         }
         this.importLexerState(startLexPos);
