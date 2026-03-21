@@ -108,6 +108,12 @@ import {
 } from "../../scan/tokens.js";
 import { IParserConfigInternal, ParserMethodInternal } from "./types.js";
 import {
+  gastAssertMethodIdxIsValid,
+  gastGetIdxSuffix,
+  gastRecordOrProd,
+  gastRecordProd,
+} from "./gast_recorder_utils.js";
+import {
   addOrFastMapEntry,
   cloneSparseArray,
   cloneSparseNumberArrayTable,
@@ -3575,7 +3581,14 @@ class ParserBase {
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
     occurrence: number,
   ): OUT {
-    return gastRecordProd.call(this, Option, actionORMethodDef, occurrence);
+    return gastRecordProd.call(
+      this,
+      Option,
+      actionORMethodDef,
+      occurrence,
+      RECORDING_NULL_OBJECT,
+      MAX_METHOD_IDX,
+    );
   }
 
   atLeastOneInternalRecord<OUT>(
@@ -3587,6 +3600,8 @@ class ParserBase {
       RepetitionMandatory,
       actionORMethodDef,
       occurrence,
+      RECORDING_NULL_OBJECT,
+      MAX_METHOD_IDX,
     );
   }
 
@@ -3599,6 +3614,8 @@ class ParserBase {
       RepetitionMandatoryWithSeparator,
       options,
       occurrence,
+      RECORDING_NULL_OBJECT,
+      MAX_METHOD_IDX,
       HANDLE_SEPARATOR,
     );
   }
@@ -3607,7 +3624,14 @@ class ParserBase {
     occurrence: number,
     actionORMethodDef: GrammarAction<OUT> | DSLMethodOpts<OUT>,
   ): void {
-    gastRecordProd.call(this, Repetition, actionORMethodDef, occurrence);
+    gastRecordProd.call(
+      this,
+      Repetition,
+      actionORMethodDef,
+      occurrence,
+      RECORDING_NULL_OBJECT,
+      MAX_METHOD_IDX,
+    );
   }
 
   manySepFirstInternalRecord<OUT>(
@@ -3619,6 +3643,8 @@ class ParserBase {
       RepetitionWithSeparator,
       options,
       occurrence,
+      RECORDING_NULL_OBJECT,
+      MAX_METHOD_IDX,
       HANDLE_SEPARATOR,
     );
   }
@@ -3627,7 +3653,13 @@ class ParserBase {
     altsOrOpts: IOrAlt<any>[] | OrMethodOpts<unknown>,
     occurrence: number,
   ): T {
-    return gastRecordOrProd.call(this, altsOrOpts, occurrence);
+    return gastRecordOrProd.call(
+      this,
+      altsOrOpts,
+      occurrence,
+      RECORDING_NULL_OBJECT,
+      MAX_METHOD_IDX,
+    );
   }
 
   subruleInternalRecord<ARGS extends unknown[], R>(
@@ -3635,7 +3667,7 @@ class ParserBase {
     occurrence: number,
     options?: SubruleMethodOpts<ARGS>,
   ): R | CstNode {
-    gastAssertMethodIdxIsValid(occurrence);
+    gastAssertMethodIdxIsValid(occurrence, MAX_METHOD_IDX);
     if (!ruleToCall || !Object.hasOwn(ruleToCall, "ruleName")) {
       const error: any = new Error(
         `<SUBRULE${gastGetIdxSuffix(occurrence)}> argument is invalid` +
@@ -3670,7 +3702,7 @@ class ParserBase {
     occurrence: number,
     options?: ConsumeMethodOpts,
   ): IToken {
-    gastAssertMethodIdxIsValid(occurrence);
+    gastAssertMethodIdxIsValid(occurrence, MAX_METHOD_IDX);
     if (!hasShortKeyProperty(tokType)) {
       const error: any = new Error(
         `<CONSUME${gastGetIdxSuffix(occurrence)}> argument is invalid` +
@@ -4019,102 +4051,6 @@ function orNeedsCounterManagement(
     }
   }
   return false;
-}
-
-// --- GastRecorder module-level helpers (absorbed from trait) ---
-// Prefixed with `gast` to avoid name collisions with engine methods.
-function gastRecordProd(
-  prodConstructor: any,
-  mainProdArg: any,
-  occurrence: number,
-  handleSep: boolean = false,
-): any {
-  gastAssertMethodIdxIsValid(occurrence);
-  const prevProd: any = this.recordingProdStack.at(-1);
-  const grammarAction =
-    typeof mainProdArg === "function" ? mainProdArg : mainProdArg.DEF;
-
-  const newProd = new prodConstructor({ definition: [], idx: occurrence });
-  if (handleSep) {
-    newProd.separator = mainProdArg.SEP;
-  }
-  if (Object.hasOwn(mainProdArg, "MAX_LOOKAHEAD")) {
-    newProd.maxLookahead = mainProdArg.MAX_LOOKAHEAD;
-  }
-
-  this.recordingProdStack.push(newProd);
-  grammarAction.call(this);
-  prevProd.definition.push(newProd);
-  this.recordingProdStack.pop();
-
-  return RECORDING_NULL_OBJECT;
-}
-
-function gastRecordOrProd(mainProdArg: any, occurrence: number): any {
-  gastAssertMethodIdxIsValid(occurrence);
-  const prevProd: any = this.recordingProdStack.at(-1);
-  const hasOptions = isArray(mainProdArg) === false;
-  const alts: IOrAlt<unknown>[] =
-    hasOptions === false ? mainProdArg : mainProdArg.DEF;
-
-  const newOrProd = new Alternation({
-    definition: [],
-    idx: occurrence,
-    ignoreAmbiguities: hasOptions && mainProdArg.IGNORE_AMBIGUITIES === true,
-  });
-  if (Object.hasOwn(mainProdArg, "MAX_LOOKAHEAD")) {
-    newOrProd.maxLookahead = mainProdArg.MAX_LOOKAHEAD;
-  }
-
-  const hasPredicates = alts.some(
-    (currAlt: any) => typeof currAlt.GATE === "function",
-  );
-  newOrProd.hasPredicates = hasPredicates;
-
-  prevProd.definition.push(newOrProd);
-
-  const savedDslCounter = this._dslCounter;
-  const altStarts: number[] = [];
-
-  alts.forEach((currAlt) => {
-    altStarts.push(this._dslCounter - savedDslCounter);
-
-    const currAltFlat = new Alternative({ definition: [] });
-    newOrProd.definition.push(currAltFlat);
-    if (Object.hasOwn(currAlt, "IGNORE_AMBIGUITIES")) {
-      currAltFlat.ignoreAmbiguities = currAlt.IGNORE_AMBIGUITIES as boolean;
-    } else if (Object.hasOwn(currAlt, "GATE")) {
-      currAltFlat.ignoreAmbiguities = true;
-    }
-    this.recordingProdStack.push(currAltFlat);
-    currAlt.ALT.call(this);
-    this.recordingProdStack.pop();
-  });
-
-  const totalDelta = this._dslCounter - savedDslCounter;
-
-  const mapKey = this.currRuleShortName | occurrence;
-  this._orCounterDeltas[mapKey] = totalDelta;
-  this._orAltCounterStarts[mapKey] = altStarts;
-
-  return RECORDING_NULL_OBJECT;
-}
-
-function gastGetIdxSuffix(idx: number): string {
-  return idx === 0 ? "" : idx.toString();
-}
-
-function gastAssertMethodIdxIsValid(idx: number): void {
-  if (idx < 0 || idx > MAX_METHOD_IDX) {
-    const error: any = new Error(
-      `Invalid DSL Method idx value: <${idx}>\n\t` +
-        `Idx value must be a none negative value smaller than ${
-          MAX_METHOD_IDX + 1
-        }`,
-    );
-    error.KNOWN_RECORDER_ERROR = true;
-    throw error;
-  }
 }
 
 export class CstParser extends StrictParser {
