@@ -9,7 +9,6 @@ export {
   CstParser,
   EmbeddedActionsParser,
   SmartParser,
-  SimpleParser,
   ParserDefinitionErrorType,
   EMPTY_ALT,
 } from "./parse/parser/parser.js";

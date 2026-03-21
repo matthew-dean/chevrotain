@@ -6090,5 +6090,3 @@ export class ForgivingParser extends ParserBase {
 }
 
 export class SmartParser extends ForgivingParser {}
-
-export const SimpleParser = SmartParser;

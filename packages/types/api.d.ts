@@ -1225,7 +1225,6 @@ export declare class EmbeddedActionsParser extends StrictParser {
 export declare class StrictParser extends BaseParser {}
 export declare class ForgivingParser extends BaseParser {}
 export declare class SmartParser extends ForgivingParser {}
-export { SmartParser as SimpleParser };
 
 export interface ILexerDefinitionError {
   message: string;

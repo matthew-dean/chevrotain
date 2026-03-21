@@ -4,7 +4,6 @@ import {
   ForgivingParser as ForgivingParserConstructorImpl,
   StrictParser as StrictParserConstructorImpl,
   SmartParser as SmartParserConstructorImpl,
-  SimpleParser as SimpleParserConstructorImpl,
 } from "../parser.js";
 import * as defs from "@chevrotain/types";
 /**
@@ -55,17 +54,6 @@ interface MixedInForgivingParserConstructor {
 
 export const ForgivingParser: MixedInForgivingParserConstructor = <any>(
   ForgivingParserConstructorImpl
-);
-
-interface MixedInSimpleParserConstructor {
-  new (
-    tokenVocabulary: defs.TokenVocabulary,
-    config?: defs.IParserConfig,
-  ): defs.SimpleParser;
-}
-
-export const SimpleParser: MixedInSimpleParserConstructor = <any>(
-  SimpleParserConstructorImpl
 );
 
 interface MixedInSmartParserConstructor {
