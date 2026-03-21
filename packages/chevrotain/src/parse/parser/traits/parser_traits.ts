@@ -1,5 +1,5 @@
 import {
-  CstParser as CstParserConstructorImpel,
+  CstParser as CstParserConstructorImpl,
   EmbeddedActionsParser as EmbeddedActionsParserConstructorImpl,
   ForgivingParser as ForgivingParserConstructorImpl,
   StrictParser as StrictParserConstructorImpl,
@@ -12,57 +12,25 @@ import * as defs from "@chevrotain/types";
  */
 export type MixedInParser = StrictParserConstructorImpl;
 
-interface MixedInCstParserConstructor {
-  new (
-    tokenVocabulary: defs.TokenVocabulary,
-    config?: defs.IParserConfig,
-  ): defs.CstParser;
-}
+type ParserConstructor<T> = {
+  new (tokenVocabulary: defs.TokenVocabulary, config?: defs.IParserConfig): T;
+};
 
-export const CstParser: MixedInCstParserConstructor = <any>(
-  CstParserConstructorImpel
+export const CstParser: ParserConstructor<defs.CstParser> = <any>(
+  CstParserConstructorImpl
 );
 
-interface MixedInEmbeddedActionsParserConstructor {
-  new (
-    tokenVocabulary: defs.TokenVocabulary,
-    config?: defs.IParserConfig,
-  ): defs.EmbeddedActionsParser;
-}
+export const EmbeddedActionsParser: ParserConstructor<defs.EmbeddedActionsParser> =
+  <any>EmbeddedActionsParserConstructorImpl;
 
-export const EmbeddedActionsParser: MixedInEmbeddedActionsParserConstructor = <
-  any
->EmbeddedActionsParserConstructorImpl;
-
-interface MixedInStrictParserConstructor {
-  new (
-    tokenVocabulary: defs.TokenVocabulary,
-    config?: defs.IParserConfig,
-  ): defs.StrictParser;
-}
-
-export const StrictParser: MixedInStrictParserConstructor = <any>(
+export const StrictParser: ParserConstructor<defs.StrictParser> = <any>(
   StrictParserConstructorImpl
 );
 
-interface MixedInForgivingParserConstructor {
-  new (
-    tokenVocabulary: defs.TokenVocabulary,
-    config?: defs.IParserConfig,
-  ): defs.ForgivingParser;
-}
-
-export const ForgivingParser: MixedInForgivingParserConstructor = <any>(
+export const ForgivingParser: ParserConstructor<defs.ForgivingParser> = <any>(
   ForgivingParserConstructorImpl
 );
 
-interface MixedInSmartParserConstructor {
-  new (
-    tokenVocabulary: defs.TokenVocabulary,
-    config?: defs.IParserConfig,
-  ): defs.SmartParser;
-}
-
-export const SmartParser: MixedInSmartParserConstructor = <any>(
+export const SmartParser: ParserConstructor<defs.SmartParser> = <any>(
   SmartParserConstructorImpl
 );
